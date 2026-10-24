@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Video output in the render worker: decodes a stream's packets from the packet ring with
-// WebCodecs, or for a codec WebCodecs does not decode with FFmpeg (src/wasm-video.ts), into
+// WebCodecs, or for any codec WebCodecs does not decode with FFmpeg (src/wasm-video.ts), into
 // the frame queue (src/frames.ts), and shows the frame due at a given media time through the
 // compositor. Decoding waits while the queue is full, its frames are a
 // second ahead of the media time, or the decoder has enough packets in hand, so neither memory nor the decoder's backlog grows.
