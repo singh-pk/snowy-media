@@ -38,7 +38,7 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | `src/audio.ts` | the audio output on the main thread |
 | `src/audio.worklet.ts` | the AudioWorklet: plays the PCM ring and publishes the clock |
 | `src/render.worker.ts` | the render worker: the platform check, then video on its animation frames |
-| `src/protocol.ts` | the messages between threads |
+| `src/protocol.ts` | the messages between threads, and the records between the render worker and the video decode worker |
 | `scripts/build.ts` | bundles each thread's entry point into `dist/`, or for the tests into `test/dist/` |
 | `scripts/release.ts` | packs and checks the npm package for a release tag (CONTRIBUTING.md#releasing) |
 | `scripts/gen-fixtures.ts` | builds `test/fixtures` and `expected.json` from native FFmpeg |

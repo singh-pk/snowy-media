@@ -168,6 +168,17 @@ test("offer writes only what fits, and a waiting producer hears each release and
   expect(producer.offerEnd()).toBe(false);
 });
 
+test("hasRoom says whether a record fits with room to spare", () => {
+  const producer = createProducer(createRing(256));
+  const data = new Uint8Array(64);
+  // A record of 64 bytes takes 96 with its header: one leaves 160 bytes.
+  expect(producer.hasRoom(64, 160)).toBe(true);
+  expect(producer.hasRoom(64, 161)).toBe(false);
+  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 64)).toBe(true);
+  expect(producer.hasRoom(64, 64)).toBe(true);
+  expect(producer.hasRoom(64, 65)).toBe(false);
+});
+
 test("the key flag and the unknown timestamp are FFmpeg's", () => {
   expect([KEY_FLAG, NO_TIMESTAMP]).toEqual([AV_PKT_FLAG_KEY, AV_NOPTS_VALUE]);
 });

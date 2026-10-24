@@ -43,6 +43,7 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
     },
     flush: () => decoder.flush(),
     queued: () => decoder.decodeQueueSize,
+    fits: () => true,
     close() {
       if (decoder.state !== "closed") decoder.close();
     },
@@ -234,6 +235,15 @@ export function createVideoOutput(
 
       if (packet.stream === END) break;
       if (packet.stream === FAILED) throw new Error("demuxing failed");
+
+      // The decoder has no room for it yet; a packet decoded makes some.
+      if (!decoder.fits(packet.data.length)) {
+        const woken = Promise.withResolvers<void>();
+        wake.room = woken.resolve;
+        await woken.promise;
+        continue;
+      }
+
       const first = !state.started;
       state.started = true;
 
