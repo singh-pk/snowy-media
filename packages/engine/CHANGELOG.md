@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The engine is now under the [Snowy License 1.0](https://github.com/singh-pk/snowy-media/blob/main/LICENSES/LicenseRef-Snowy-License-1.0.txt) instead of MIT. It stays free for individuals, companies of up to 3 people, non-profits, education, open-source projects and evaluation; larger companies using it in production need a company licence ([LICENSE.md](https://github.com/singh-pk/snowy-media/blob/main/LICENSE.md)). Version 0.1.0 and earlier stay under MIT.
 - Video colour now matches native FFmpeg's whatever decoded it. The engine converts Y′CbCr to RGB itself, from the colour the stream states, where Chromium converted it differently for hardware and software decoders. A stream that states no matrix shows as BT.601, as FFmpeg shows it. HDR from a software decoder shows its signal, as FFmpeg shows it, not tone-mapped as Chromium did. Chromium still converts a 10-bit frame from a GPU decoder.
 - Video that WebCodecs decodes plays on less CPU: a frame whose conversion by Chromium matches FFmpeg's, as each decoder's first frames show, is drawn straight from the GPU instead of copied off it, 4K60 H.264 on about a third less on a budget laptop. A WebCodecs decoder's config now states what the stream leaves out of its colour as FFmpeg takes it.
+- Video that FFmpeg decodes, such as ProRes and DNxHD, decodes up to a third faster: packets and frames pass between the render worker and the video decode worker through shared rings, not a message each.
 
 ### Fixed
 
