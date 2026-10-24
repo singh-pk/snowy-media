@@ -8,7 +8,7 @@
 // second ahead of the media time, or the decoder has enough packets in hand, so neither memory nor the decoder's backlog grows.
 
 import { isRasl, makesFrame, type VideoParams, videoConfig } from "./codec";
-import type { createCompositor, Picture } from "./compositor";
+import { createRoute, type createCompositor, type Picture } from "./compositor";
 import { createDecodeTracker } from "./decoding";
 import { createFrameQueue } from "./frames";
 import { createConsumer, END, FAILED, KEY_FLAG, NO_TIMESTAMP } from "./ring";
@@ -97,6 +97,8 @@ export function createVideoOutput(
     closed: false,
   };
   const decoding = createDecodeTracker();
+  // How its frames go up, measured on the first that tell (src/compositor.ts).
+  const route = createRoute(p.colorSpace);
   const failed = Promise.withResolvers<never>();
 
   // Pictures uploaded and not yet shown, in presentation order. They are bounded by AHEAD, not by
@@ -112,7 +114,7 @@ export function createVideoOutput(
 
   async function upload(frame: DecodedFrame) {
     try {
-      const picture = await compositor.upload(frame, p.colorSpace);
+      const picture = await compositor.upload(frame, route);
 
       if (state.closed) {
         picture.close();

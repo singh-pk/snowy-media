@@ -5,7 +5,8 @@
 // timestamps, stay up until the next one is due, and are skipped when the time jumps past
 // them; and the first frame, drawn through the compositor at the size it is shown at (over its
 // scale, for a fixture whose frame numbers are scaled up), has the layout of native FFmpeg's,
-// display matrix included (test/fixtures/expected.json).
+// display matrix included (test/fixtures/expected.json). A WebCodecs frame drawn straight from the
+// GPU, where its measured route goes so, looks as the same frame drawn from its planes.
 // Usage: bun run test.
 
 import { afterAll, expect, test } from "bun:test";
@@ -36,6 +37,10 @@ const MIN_CORRELATION = 0.9;
 // Y′CbCr as FFmpeg does, which leaves rounding, scaling to the canvas, and Chromium's own
 // conversion of a frame whose planes cannot be read (a 10-bit frame from the GPU decoder).
 const MAX_LEVEL_DIFFERENCE = 2;
+// How far a frame drawn straight from the GPU may be from the same frame drawn from its planes,
+// in 8-bit levels, at the median and the 95th percentile of its channels: as far as the
+// measurement lets a route import (src/compositor.ts), plus rounding.
+const MAX_IMPORTED_OFF = [2, 7];
 const server = await serveEngine("<!doctype html><title>test</title>");
 
 afterAll(() => server.stop(true));
@@ -127,6 +132,44 @@ for (const [file, { video }] of Object.entries(expected)) {
       expect(difference, `${file} grid ${JSON.stringify(got.grid)}`).toBeLessThan(
         MAX_LEVEL_DIFFERENCE,
       );
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  test(`draws ${file} straight from the GPU as from its planes, where it measures so`, async () => {
+    const browser = await launch();
+
+    try {
+      const tab = await browser.newPage();
+      await tab.goto(server.url.href);
+      const got = await tab.evaluate(
+        async ({ page, worker, n, stream }) => {
+          const support: typeof import("./support/page") = await import(page);
+          const media = support.startMedia(worker);
+          const res = await fetch(`/test/fixtures/${n}`);
+          const blob = await res.blob();
+          const opened = await media.request({ type: "open", file: new File([blob], n) });
+          if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
+          const params = opened.video[stream];
+          if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
+
+          // FFmpeg's frames are always read from its memory.
+          if (params.decoder !== "webcodecs") {
+            media.stop();
+            return undefined;
+          }
+
+          const result = await support.compareRoutes(media, stream, params);
+          media.stop();
+          return result;
+        },
+        { page: PAGE, worker: MEDIA_WORKER, n: file, stream: video.id },
+      );
+      if (!got) return;
+      const [median = 0, p95 = 0] = got.off;
+      expect(median, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[0] ?? 0);
+      expect(p95, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[1] ?? 0);
     } finally {
       await browser.close();
     }

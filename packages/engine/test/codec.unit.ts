@@ -170,11 +170,17 @@ test("FFmpeg's colour names become WebCodecs', and only those WebCodecs knows", 
   });
 });
 
-test("the stated colour goes into the config; none states none", () => {
-  const space: VideoColorSpaceInit = { primaries: "bt709", fullRange: false };
+// What a stream leaves out is as FFmpeg takes it: BT.601 limited, BT.709 primaries and transfer.
+test("the stated colour goes into the config; what it leaves out is FFmpeg's", () => {
+  const space: VideoColorSpaceInit = { primaries: "bt709", matrix: "bt709", fullRange: true };
   const stated = { ...STREAM, codec: "vp8", colorSpace: space };
-  expect(videoConfig(stated, new Uint8Array()).colorSpace).toEqual(space);
-  expect(videoConfig({ ...STREAM, codec: "vp8" }, new Uint8Array()).colorSpace).toBeUndefined();
+  expect(videoConfig(stated, new Uint8Array()).colorSpace).toEqual({ ...space, transfer: "bt709" });
+  expect(videoConfig({ ...STREAM, codec: "vp8" }, new Uint8Array()).colorSpace).toEqual({
+    primaries: "bt709",
+    transfer: "bt709",
+    matrix: "smpte170m",
+    fullRange: false,
+  });
 });
 
 const vp8 = (sampleAspect: [number, number]) =>

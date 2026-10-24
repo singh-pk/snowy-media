@@ -4,11 +4,13 @@
 // The frame queue (src/frames.ts) and the compositor's fit (src/compositor.ts), in Chromium: the
 // queue keeps frames in presentation order, hands out the latest one due and closes those it
 // skips, and counts bytes, not frames; a frame of another shape than the canvas is centred
-// with black bars, and Y′CbCr becomes the R′G′B′ FFmpeg makes of it. test/render.test.ts covers both in the browsers.
+// with black bars, and Y′CbCr becomes the R′G′B′ FFmpeg makes of it; and a stream's frames are
+// drawn straight from the GPU only where Chromium's conversion of them measures as FFmpeg's. test/render.test.ts covers both in the browsers.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
-import { viewMap, yuvMatrix } from "../src/compositor";
+import { colorSpace } from "../src/codec";
+import { createRoute, verdict, viewMap, yuvMatrix } from "../src/compositor";
 import { createFrameQueue } from "../src/frames";
 
 function frames(...timestamps: number[]) {
@@ -118,4 +120,59 @@ test("next hands out the earliest frame, due or not", () => {
   expect(queue.next()?.timestamp).toBe(66);
   expect(queue.next()).toBeUndefined();
   expect(closed).toEqual([]);
+});
+
+// A grid read back as the compositor measures one (src/compositor.ts): 128 × 72 points of RGBA,
+// Chromium's conversion of each, then the same points as converted from the planes, `truth`.
+function grid(truth: (k: number) => [number, number, number], imported: (c: number) => number) {
+  const points = 128 * 72;
+  const data = new Float32Array(2 * points * 4);
+
+  for (let k = 0; k < points; k++) {
+    for (const [c, value] of truth(k).entries()) {
+      data[points * 4 + k * 4 + c] = value;
+      data[k * 4 + c] = imported(value);
+    }
+  }
+
+  return verdict(data, new Float32Array(points * 3), new Float32Array(points * 3));
+}
+
+const coloured = (k: number): [number, number, number] => [
+  0.2 + (0.6 * (k % 7)) / 6,
+  0.2 + (0.6 * (k % 5)) / 4,
+  0.5,
+];
+// A colour as FFmpeg names it: the DOM's types lack BT.2020, PQ and HLG.
+const stated = (primaries: string, transfer: string) =>
+  colorSpace({ primaries, transfer, matrix: "", range: "" });
+const srgbEncode = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+
+test("a stream is imported as is, or with Apple's gamma undone, only where that matches", () => {
+  expect(grid(coloured, (c) => c)).toBe("imported");
+  // As macOS gives a hardware decoder's BT.709 frames: a pure 1.961 gamma, read as sRGB.
+  expect(grid(coloured, (c) => srgbEncode(c ** 1.961))).toBe("apple");
+  expect(grid(coloured, (c) => c + 0.05)).toBe("read");
+});
+
+test("a frame too dark or too grey to tell the conversions apart decides nothing", () => {
+  expect(
+    grid(
+      () => [0.02, 0.03, 0.02],
+      (c) => c,
+    ),
+  ).toBeUndefined();
+  expect(
+    grid(
+      (k) => [0.2 + (k % 3) * 0.3, 0.2 + (k % 3) * 0.3, 0.25 + (k % 3) * 0.3],
+      (c) => c,
+    ),
+  ).toBeUndefined();
+});
+
+test("a stream whose primaries or transfer Chromium converts is never measured", () => {
+  expect(createRoute({}).via).toBe("unmeasured");
+  expect(createRoute({ primaries: "bt709", transfer: "smpte170m" }).via).toBe("unmeasured");
+  expect(createRoute(stated("bt2020", "smpte2084")).via).toBe("read");
+  expect(createRoute(stated("bt709", "arib-std-b67")).via).toBe("read");
 });

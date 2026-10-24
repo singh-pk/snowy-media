@@ -38,7 +38,7 @@ fn inside(uv: vec2f) -> bool {
 
 // Y′CbCr planes, read exactly as integers and filtered here: 16-bit textures cannot be
 // filtered, or even made, without an optional feature.
-const YUV_SHADER = /* wgsl */ `${VERTEX}
+const PLANES = /* wgsl */ `
 struct Colour {
   // From the planes' integer values (Y, Cb, Cr, 1) to R′G′B′.
   yuv: mat4x4f,
@@ -46,7 +46,6 @@ struct Colour {
   interleaved: u32,
 }
 
-@group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var luma: texture_2d<u32>;
 @group(0) @binding(2) var cb: texture_2d<u32>;
 @group(0) @binding(3) var cr: texture_2d<u32>;
@@ -67,13 +66,22 @@ fn bilinear(t: texture_2d<u32>, uv: vec2f) -> vec2f {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-@fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
-  let uv = view.map * clip + view.offset;
+// The planes' R′G′B′ at \`uv\`.
+fn convert(uv: vec2f) -> vec3f {
   let y = bilinear(luma, uv).r;
   let blue = bilinear(cb, uv);
   let red = select(bilinear(cr, uv).r, blue.g, colour.interleaved == 1u);
   let rgb = (colour.yuv * vec4f(y, blue.r, red, 1.0)).rgb;
-  return select(BLACK, vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)), 1.0), inside(uv));
+  return clamp(rgb, vec3f(0.0), vec3f(1.0));
+}
+`;
+
+const YUV_SHADER = /* wgsl */ `${VERTEX}
+@group(0) @binding(0) var<uniform> view: View;
+${PLANES}
+@fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
+  let uv = view.map * clip + view.offset;
+  return select(BLACK, vec4f(convert(uv), 1.0), inside(uv));
 }
 `;
 
@@ -90,19 +98,153 @@ const RGB_SHADER = /* wgsl */ `${VERTEX}
 }
 `;
 
-// A frame whose planes cannot be read, converted by Chromium into a picture of its size.
+// A frame converted by Chromium into a picture of its size. Where Chromium took it for Apple's
+// BT.709, a gamma of 1.961, and encoded it as sRGB (`apple`), that is undone, leaving the
+// frame's R′G′B′ (docs/architecture.md#colour).
 const IMPORT_SHADER = /* wgsl */ `${VERTEX}
 @group(0) @binding(0) var frame: texture_external;
 @group(0) @binding(1) var linear: sampler;
+override apple = false;
+
+fn srgbDecode(c: vec3f) -> vec3f {
+  return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}
 
 @fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
   let uv = clip * vec2f(0.5, -0.5) + 0.5;
-  return vec4f(textureSampleBaseClampToEdge(frame, linear, uv).rgb, 1.0);
+  let rgb = textureSampleBaseClampToEdge(frame, linear, uv).rgb;
+  if (!apple) {
+    return vec4f(rgb, 1.0);
+  }
+
+  return vec4f(pow(srgbDecode(max(rgb, vec3f(0.0))), vec3f(1.0 / 1.961)), 1.0);
+}
+`;
+
+// The same points of a frame converted both ways, by Chromium and here, to compare.
+const MEASURE_SHADER = /* wgsl */ `${VERTEX}
+${PLANES}
+@group(0) @binding(5) var frame: texture_external;
+@group(0) @binding(6) var linear: sampler;
+
+struct Measured {
+  @location(0) imported: vec4f,
+  @location(1) read: vec4f,
+}
+
+@fragment fn fs(@location(0) clip: vec2f) -> Measured {
+  // At the centre of the frame's nearest pixel, as both conversions sample alike there: between
+  // pixels, at an edge, they filter differently.
+  let size = vec2f(textureDimensions(luma));
+  let uv = (floor((clip * vec2f(0.5, -0.5) + 0.5) * size) + 0.5) / size;
+  let imported = textureSampleBaseClampToEdge(frame, linear, uv).rgb;
+  return Measured(vec4f(imported, 1.0), vec4f(convert(uv), 1.0));
 }
 `;
 
 // What a picture converted by Chromium is stored as: 10 bits a channel, 4 bytes a pixel.
 const IMPORTED: GPUTextureFormat = "rgb10a2unorm";
+
+// The points a frame is measured at, both conversions of each read back in 32-bit floats, a row
+// of them 2048 bytes, as a texture copy's rows are a multiple of 256 bytes.
+const GRID_WIDTH = 128;
+const GRID_HEIGHT = 72;
+const MEASURED: GPUTextureFormat = "rgba32float";
+const GRID_ROW = GRID_WIDTH * 16;
+// Of a measurement's channels, those neither near black nor near white tell the conversions
+// apart, and in a sharp frame, as colour bars, they are only along its edges; with fewer than this, as in a dark frame, the next frame is measured.
+const MIDTONES = [0.1, 0.9] as const;
+const MIN_POINTS = 300;
+// Of its points, those whose channels differ by more than this are coloured: only they tell a
+// matrix apart, and a frame with fewer than MIN_COLOURED, near grey, is not measured either.
+const COLOURED = 0.1;
+const MIN_COLOURED = 400;
+// The frames measured before giving up on a stream, as in a dark or grey one: its planes are
+// read, as before.
+const MAX_TRIES = 60;
+// How far Chromium's conversion may be from this one's, at the median and the 95th percentile of
+// the points: the two filter differently at edges, and Apple's gamma moves a midtone by 11 levels
+// of 255.
+const MEDIAN_OFF = 1.5 / 255;
+const P95_OFF = 6 / 255;
+
+/**
+ * How a stream's frames whose planes can be read go up, worked out from its own frames
+ * (docs/architecture.md#colour): read back and converted here until measured; then imported, as
+ * Chromium converts them, as they are (`imported`) or with Apple's gamma undone (`apple`), or
+ * read back still where neither matches (`read`).
+ */
+export interface Route {
+  readonly stated: VideoColorSpaceInit;
+  via: "unmeasured" | "imported" | "apple" | "read";
+  // The frames measured so far.
+  tries: number;
+}
+
+// What Chromium converts as FFmpeg does, which converts neither primaries nor transfer: BT.709's
+// primaries, and the transfers it takes for sRGB's, all a stream that states none is decoded as
+// (src/codec.ts). Measuring tells a transfer and a matrix apart, but not primaries, which only
+// the most saturated colours would.
+const KEPT_PRIMARIES = new Set<VideoColorPrimaries | null | undefined>([undefined, "bt709"]);
+const KEPT_TRANSFERS = new Set<VideoTransferCharacteristics | null | undefined>([
+  undefined,
+  "bt709",
+  "smpte170m",
+  "iec61966-2-1",
+]);
+
+/**
+ * The route of a stream whose colour is `stated`, before its frames are measured: read back if
+ * Chromium converts its primaries or transfer, as HDR's.
+ */
+export function createRoute(stated: VideoColorSpaceInit): Route {
+  const kept = KEPT_PRIMARIES.has(stated.primaries) && KEPT_TRANSFERS.has(stated.transfer);
+  return { stated, via: kept ? "unmeasured" : "read", tries: 0 };
+}
+
+const srgbDecode = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+// The value at fraction `q` of the first `count` of `values`.
+function quantile(values: Float32Array, count: number, q: number) {
+  const sorted = values.subarray(0, count).toSorted();
+  return sorted[Math.min(count - 1, Math.floor(q * count))] ?? Infinity;
+}
+
+/**
+ * Which way a stream goes, from a grid read back (`data`): Chromium's conversion of each point,
+ * then this one's, in rows of GRID_ROW bytes. Undecided while too few channels are midtones or
+ * too few points coloured. `asIs` and `undone` hold a difference for each channel.
+ */
+export function verdict(
+  data: Float32Array,
+  asIs: Float32Array,
+  undone: Float32Array,
+): Route["via"] | undefined {
+  const read = GRID_HEIGHT * (GRID_ROW / 4);
+  let count = 0;
+  let coloured = 0;
+
+  for (let i = 0; i < read; i += 4) {
+    const [r = 0, g = 0, b = 0] = data.subarray(read + i, read + i + 3);
+    if (Math.max(r, g, b) - Math.min(r, g, b) > COLOURED) coloured++;
+
+    // Alpha is left out.
+    for (let c = i; c < i + 3; c++) {
+      const truth = data[read + c] ?? 0;
+      if (truth < MIDTONES[0] || truth > MIDTONES[1]) continue;
+      const imported = data[c] ?? 0;
+      asIs[count] = Math.abs(imported - truth);
+      undone[count] = Math.abs(srgbDecode(Math.max(imported, 0)) ** (1 / 1.961) - truth);
+      count++;
+    }
+  }
+
+  if (count < MIN_POINTS || coloured < MIN_COLOURED) return undefined;
+  const off = (values: Float32Array) =>
+    quantile(values, count, 0.5) <= MEDIAN_OFF && quantile(values, count, 0.95) <= P95_OFF;
+  if (off(asIs)) return "imported";
+  return off(undone) ? "apple" : "read";
+}
 
 // FFmpeg's identity display matrix: 16.16 fixed point, and 2.30 in the last column.
 const IDENTITY = [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30];
@@ -269,25 +411,37 @@ const visibleHeight = (frame: DecodedFrame) =>
     ? (frame.visibleRect?.height ?? frame.codedHeight)
     : frame.codedHeight;
 
+// The views of a Y′CbCr picture's planes Y, Cb and Cr: NV12 has Cb and Cr in one.
+function planeViews(textures: GPUTexture[]) {
+  const views = textures.map((t) => t.createView());
+  const y = views[0];
+  if (!y) throw new Error("a picture without planes");
+  const u = views[1] ?? y;
+  return [y, u, views[2] ?? u] as const;
+}
+
 /** A compositor drawing with `device` into `context`, configured for it with `format`. */
 export function createCompositor(
   device: GPUDevice,
   context: GPUCanvasContext,
   format: GPUTextureFormat,
 ) {
-  const pipeline = (code: string, output: GPUTextureFormat) => {
+  const pipeline = (code: string, outputs: GPUTextureFormat[], constants = {}) => {
     const module = device.createShaderModule({ code });
+    const targets = outputs.map((output) => ({ format: output }));
     return device.createRenderPipeline({
       layout: "auto",
       vertex: { module, entryPoint: "vs" },
-      fragment: { module, entryPoint: "fs", targets: [{ format: output }] },
+      fragment: { module, entryPoint: "fs", targets, constants },
       primitive: { topology: "triangle-list" },
     });
   };
 
-  const yuvPipeline = pipeline(YUV_SHADER, format);
-  const rgbPipeline = pipeline(RGB_SHADER, format);
-  const importPipeline = pipeline(IMPORT_SHADER, IMPORTED);
+  const yuvPipeline = pipeline(YUV_SHADER, [format]);
+  const rgbPipeline = pipeline(RGB_SHADER, [format]);
+  const importPipeline = pipeline(IMPORT_SHADER, [IMPORTED]);
+  const applePipeline = pipeline(IMPORT_SHADER, [IMPORTED], { apple: 1 });
+  const measurePipeline = pipeline(MEASURE_SHADER, [MEASURED, MEASURED]);
   const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
   // mat2x2f, then vec2f, padded to 32 bytes.
   const view = new Float32Array(8);
@@ -317,6 +471,19 @@ export function createCompositor(
   const converted = { space: undefined as VideoColorSpaceInit | undefined, depth: 0, pixels: "" };
   // Where a plane is read from in `staging`, filled in for each.
   const source = { offset: 0, bytesPerRow: 0 };
+  // One measurement at a time, of any stream, into textures and a buffer made at the first.
+  const measuring = {
+    busy: false,
+    targets: undefined as [GPUTexture, GPUTexture] | undefined,
+    buffer: undefined as GPUBuffer | undefined,
+    // A difference for each channel of the grid, as is and with Apple's gamma undone.
+    asIs: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
+    undone: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
+    // Resolved as the measurement under way ends, for the tests.
+    done: Promise.withResolvers<void>(),
+  };
+  // None is under way at first.
+  measuring.done.resolve();
 
   function keyOf(kind: string, width: number, height: number) {
     if (kind === shape.kind && width === shape.width && height === shape.height) return shape.key;
@@ -377,6 +544,71 @@ export function createCompositor(
   const texture = (fmt: GPUTextureFormat, width: number, height: number, usage: number) =>
     device.createTexture({ format: fmt, size: [width, height], usage });
 
+  // Converts the points of the grid of `frame` both ways, from its planes uploaded into `picture`
+  // and as Chromium converts it, and decides `route` by them, or leaves it for a later frame,
+  // up to MAX_TRIES. A measurement that fails reads the planes from then on.
+  async function measure(frame: VideoFrame, picture: Slot, route: Route) {
+    measuring.busy = true;
+    route.tries++;
+
+    try {
+      const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
+      const grid = () => texture(MEASURED, GRID_WIDTH, GRID_HEIGHT, usage);
+      measuring.targets ??= [grid(), grid()];
+      const size = 2 * GRID_HEIGHT * GRID_ROW;
+      const mapped = GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST;
+      measuring.buffer ??= device.createBuffer({ size, usage: mapped });
+      const { targets, buffer } = measuring;
+      const colourBuffer = picture.colour;
+      if (!colourBuffer) throw new Error("a measured picture without a colour");
+      const [y, u, v] = planeViews(picture.textures);
+      const bindGroup = device.createBindGroup({
+        layout: measurePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 1, resource: y },
+          { binding: 2, resource: u },
+          { binding: 3, resource: v },
+          { binding: 4, resource: { buffer: colourBuffer } },
+          { binding: 5, resource: device.importExternalTexture({ source: frame }) },
+          { binding: 6, resource: sampler },
+        ],
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: targets.map((t) => ({
+          view: t.createView(),
+          loadOp: "clear" as const,
+          storeOp: "store" as const,
+        })),
+      });
+      pass.setPipeline(measurePipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+
+      for (const [i, t] of targets.entries()) {
+        const at = { buffer, offset: i * GRID_HEIGHT * GRID_ROW, bytesPerRow: GRID_ROW };
+        encoder.copyTextureToBuffer({ texture: t }, at, [GRID_WIDTH, GRID_HEIGHT]);
+      }
+
+      device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const via = verdict(
+        new Float32Array(buffer.getMappedRange()),
+        measuring.asIs,
+        measuring.undone,
+      );
+      buffer.unmap();
+      if (via) route.via = via;
+      else if (route.tries >= MAX_TRIES) route.via = "read";
+    } catch {
+      route.via = "read";
+    } finally {
+      measuring.busy = false;
+      measuring.done.resolve();
+    }
+  }
+
   // Where the planes of `frame` are: a VideoFrame's copied out into the staging buffer first.
   async function readPlanes(frame: DecodedFrame) {
     if (!(frame instanceof VideoFrame)) return { data: frame.memory.buffer, layout: frame.layout };
@@ -387,8 +619,10 @@ export function createCompositor(
   }
 
   // Writes the planes of `frame`, which has a format, into a picture, and converts them when
-  // drawn.
-  async function uploadPlanes(frame: DecodedFrame, stated: VideoColorSpaceInit) {
+  // drawn, by the colour `route` states; and measures a Y′CbCr VideoFrame while its stream is
+  // unmeasured.
+  async function uploadPlanes(frame: DecodedFrame, route: Route) {
+    const { stated } = route;
     const pixels = frame.format;
     if (!pixels) throw new Error("a frame without a format has no planes to read");
     const width = visibleWidth(frame);
@@ -401,12 +635,7 @@ export function createCompositor(
 
     const picture = acquire(key, () => {
       const textures = planes.map(([fmt, w, h]) => texture(fmt, w, h, usage));
-      const views = textures.map((t) => t.createView());
-      const y = views[0];
-      if (!y) throw new Error(`${pixels}: no planes`);
-      // NV12 has Cb and Cr in one plane.
-      const u = views[1] ?? y;
-      const v = views[2] ?? u;
+      const [y, u, v] = planeViews(textures);
 
       if (!yuv) {
         const bindGroup = device.createBindGroup({
@@ -455,13 +684,19 @@ export function createCompositor(
       }
 
       device.queue.writeBuffer(picture.colour, 0, colour);
+      const unmeasured = route.via === "unmeasured" && !measuring.busy;
+
+      if (unmeasured && frame instanceof VideoFrame) {
+        measuring.done = Promise.withResolvers<void>();
+        void measure(frame, picture, route);
+      }
     }
 
     return picture;
   }
 
-  // Converts `frame`, whose planes cannot be read, into a picture with Chromium's conversion.
-  function uploadImported(frame: VideoFrame) {
+  // Converts `frame` into a picture with Chromium's conversion, undoing Apple's gamma (`apple`).
+  function uploadImported(frame: VideoFrame, apple: boolean) {
     const width = visibleWidth(frame);
     const height = visibleHeight(frame);
     const key = keyOf(IMPORTED, width, height);
@@ -483,9 +718,11 @@ export function createCompositor(
 
     const into = picture.imported;
     if (!into) throw new Error("no picture texture");
+    // Each pipeline has a layout of its own.
+    const converting = apple ? applePipeline : importPipeline;
     // An external texture lasts one task, so it needs a bind group of its own.
     const bindGroup = device.createBindGroup({
-      layout: importPipeline.getBindGroupLayout(0),
+      layout: converting.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: device.importExternalTexture({ source: frame }) },
         { binding: 1, resource: sampler },
@@ -495,7 +732,7 @@ export function createCompositor(
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: into, loadOp: "clear", storeOp: "store" }],
     });
-    pass.setPipeline(importPipeline);
+    pass.setPipeline(converting);
     pass.setBindGroup(0, bindGroup);
     pass.draw(3);
     pass.end();
@@ -504,19 +741,23 @@ export function createCompositor(
   }
 
   /**
-   * Uploads `frame`, which it takes and closes, into a picture, converting it by the colour its
-   * stream states (`stated`): a decoder fills in what the stream leaves out its own way.
+   * Uploads `frame`, which it takes and closes, into a picture, the way its stream's `route`
+   * goes, converting it by the colour the stream states: a decoder fills in what the stream leaves
+   * out its own way. A frame whose planes cannot be read (a 10-bit hardware frame) is imported.
    * Uploads complete in the order they are called.
    */
-  async function upload(frame: DecodedFrame, stated: VideoColorSpaceInit): Promise<Picture> {
+  async function upload(frame: DecodedFrame, route: Route): Promise<Picture> {
     const before = uploads.last;
     const done = Promise.withResolvers<void>();
     uploads.last = done.promise;
 
     try {
       await before;
-      const imported = frame instanceof VideoFrame && !frame.format;
-      const uploading = imported ? uploadImported(frame) : uploadPlanes(frame, stated);
+      const imported = route.via === "imported" || route.via === "apple";
+      const uploading =
+        frame instanceof VideoFrame && (imported || !frame.format)
+          ? uploadImported(frame, route.via === "apple")
+          : uploadPlanes(frame, route);
       const picture = await uploading;
       picture.timestamp = frame.timestamp;
       picture.displayWidth = frame.displayWidth;
@@ -559,5 +800,11 @@ export function createCompositor(
     device.queue.submit([encoder.finish()]);
   }
 
-  return { upload, draw, clear };
+  return {
+    upload,
+    draw,
+    clear,
+    /** Resolves once the last measurement started has ended, for the tests. */
+    measured: () => measuring.done.promise,
+  };
 }

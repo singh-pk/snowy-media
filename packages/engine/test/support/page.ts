@@ -10,7 +10,7 @@
 import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
 import { createAudioOutput } from "../../src/audio";
 import { colorSpace, type VideoParams, videoConfig } from "../../src/codec";
-import { createCompositor } from "../../src/compositor";
+import { createCompositor, createRoute, type Route } from "../../src/compositor";
 import { createPcmControl, createPcmRing } from "../../src/pcm";
 import type { FromMedia, ToMedia } from "../../src/protocol";
 import { createConsumer, createRing, END, FAILED, RING_CAPACITY } from "../../src/ring";
@@ -301,6 +301,87 @@ export async function checkVideoConfig(
   // The colour the stream states, as the decoded frame should carry it.
   const stated = colorSpace(names);
   return { ...result, id, inBandId, colour, stated };
+}
+
+/**
+ * The first frame of video stream `stream` of the file open in `media`, with parameters `p`,
+ * decoded with WebCodecs and drawn at its size through the compositor both ways: from its
+ * planes, and the way its measured route goes. Returns the route, and how far the two drawings
+ * are apart in 8-bit levels, at the median and the 95th percentile of the channels.
+ */
+export async function compareRoutes(
+  media: ReturnType<typeof startMedia>,
+  stream: number,
+  p: VideoParams,
+) {
+  const keyframe = await firstPacket(media, stream);
+  const decoded = Promise.withResolvers<VideoFrame>();
+  const decoder = new VideoDecoder({ output: decoded.resolve, error: decoded.reject });
+  decoder.configure(videoConfig(p, keyframe));
+  decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data: keyframe }));
+  const flushed = decoder.flush();
+  const frame = await decoded.promise;
+  await flushed;
+  decoder.close();
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("no GPU adapter");
+  const device = await adapter.requestDevice();
+  const { displayWidth: width, displayHeight: height } = frame;
+  const canvas = new OffscreenCanvas(width, height);
+  const webgpu = canvas.getContext("webgpu");
+  if (!(webgpu instanceof GPUCanvasContext)) throw new Error("no WebGPU context");
+  const context = webgpu;
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
+  context.configure({ device, format, usage, alphaMode: "opaque" });
+  const compositor = createCompositor(device, context, format);
+  const stride = Math.ceil((width * 4) / 256) * 256;
+  const buffer = device.createBuffer({
+    size: stride * height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+
+  // The canvas once `frame` is drawn the way `route` goes, a row `stride` bytes long.
+  async function drawn(route: Route) {
+    const picture = await compositor.upload(frame.clone(), route);
+    compositor.draw(picture, p.matrix);
+    picture.close();
+    const encoder = device.createCommandEncoder();
+    const at = { buffer, bytesPerRow: stride };
+    encoder.copyTextureToBuffer({ texture: context.getCurrentTexture() }, at, [width, height]);
+    device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const pixels = new Uint8Array(buffer.getMappedRange()).slice();
+    buffer.unmap();
+    return pixels;
+  }
+
+  try {
+    const read = await drawn({ stated: p.colorSpace, via: "read", tries: 0 });
+    const route = createRoute(p.colorSpace);
+    // Measured as it goes up from its planes.
+    await drawn(route);
+    await compositor.measured();
+    if (route.via !== "imported" && route.via !== "apple") return { via: route.via, off: [0, 0] };
+    const imported = await drawn(route);
+    const off: number[] = [];
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width * 4; x++) {
+        // Alpha is left out.
+        if (x % 4 === 3) continue;
+        const i = y * stride + x;
+        off.push(Math.abs((read[i] ?? 0) - (imported[i] ?? 0)));
+      }
+    }
+
+    off.sort((a, b) => a - b);
+    const at = (q: number) => off[Math.floor(q * (off.length - 1))] ?? Infinity;
+    return { via: route.via, off: [at(0.5), at(0.95)] };
+  } finally {
+    frame.close();
+    device.destroy();
+  }
 }
 
 /**

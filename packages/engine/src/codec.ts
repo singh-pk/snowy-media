@@ -410,13 +410,21 @@ export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderC
   // that let them out. Decoding 4K is about as fast with it
   // (docs/architecture.md#video-decoder-configs).
   // The colour the container states. Without it, Chromium takes a VP9 stream, whose
-  // bitstream states no transfer, for BT.709 SDR, HDR included.
-  const colour = Object.keys(p.colorSpace).length > 0 ? { colorSpace: p.colorSpace } : {};
+  // bitstream states no transfer, for BT.709 SDR, HDR included. What the stream leaves out is
+  // as FFmpeg takes it: BT.601 limited Y′CbCr, and primaries and a transfer Chromium leaves as
+  // they are, so a frame it converts matches the compositor's (docs/architecture.md#colour).
+  const colour: VideoColorSpaceInit = {
+    primaries: "bt709",
+    transfer: "bt709",
+    matrix: "smpte170m",
+    fullRange: false,
+    ...p.colorSpace,
+  };
   const size = {
     codedWidth: p.width,
     codedHeight: p.height,
     ...aspect,
-    ...colour,
+    colorSpace: colour,
     optimizeForLatency: true,
   };
   if (p.codec === "h264") return { ...h264(p, keyframe), ...size };
