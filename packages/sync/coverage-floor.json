@@ -14,6 +14,7 @@
   "src/chunk.ts": 100,
   "src/control.ts": 100,
   "src/crypto.ts": 100,
+  "src/have.ts": 100,
   "src/hlc.ts": 100,
   "src/link.ts": 100,
   "src/push-queue.ts": 100,

@@ -511,7 +511,10 @@ background (only while no urgent or ahead request is waiting), in time order fro
 ### Have ranges
 
 - What a forwarder holds is a list of index ranges per track: `{ track, ranges: [[start, end], …] }`. A player forwarder usually has one range; an editor may have several while it fills in.
-- On every `stored` and `evicted` event, the forwarder collects the change and publishes a new `have` when the stream will accept more data. Several stores in a burst therefore become one update.
+- **A range is `[start, end)`.** Ranges are in order and apart, so each holding has one spelling, and each track appears once, in order. A peer refuses anything else.
+- **An update is numbered.** `have/<peer>@n` counts up, and a peer keeps the newest. The same update goes on the forwarder's `have` track and, as a `have` message on `ctl`, to the peers linked to it directly. It isn't signed: on the relay only the forwarder may publish its broadcast, and a direct link is its own. `n` starts from the time the forwarder began publishing, in milliseconds, so it keeps growing across reconnects and reloads, and an old update arriving late on another path never passes for a newer one. A peer forgets a forwarder's ranges when its broadcast is withdrawn.
+- The format here is a watch session's; in an edit session, ranges also name the asset and source ([Media keys](#media-keys)).
+- On every `stored` and `evicted` event, the forwarder collects the change and publishes a new `have` when the stream will accept more data. Several stores in a burst therefore become one update. The first goes as soon as the stream accepts it.
 - Only the forwarder's group subscribes. `have` is not secret, so the relay doesn't restrict who may subscribe.
 
 ## Peer groups
