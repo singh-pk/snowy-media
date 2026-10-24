@@ -357,7 +357,7 @@ export async function compareRoutes(
   }
 
   try {
-    const read = await drawn({ stated: p.colorSpace, via: "read", tries: 0 });
+    const read = await drawn({ ...createRoute(p.colorSpace), via: "read" });
     const route = createRoute(p.colorSpace);
     // Measured as it goes up from its planes.
     await drawn(route);
