@@ -169,11 +169,11 @@ const MAX_TRIES = 60;
 const MEDIAN_OFF = 1.5 / 255;
 const P95_OFF = 6 / 255;
 // Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped: shown by at
-// least BEYOND_POINTS of its channels further than BEYOND outside [0, 1]. Where Chromium clips, as
-// into an 8-bit texture, a saturated colour would not come back, and neither would a frame whose
-// colours all fit, which shows nothing either way.
+// least BEYOND_POINTS of its channels further than BEYOND below 0, and as many above 1, as one
+// clip may be at one end only. Where Chromium clips, as into an 8-bit texture, a saturated
+// colour would not come back; a frame whose colours all fit shows nothing either way.
 const BEYOND = 2 / 255;
-const BEYOND_POINTS = 20;
+const BEYOND_POINTS = 10;
 
 /**
  * How a stream's frames whose planes can be read go up, worked out from its own frames
@@ -299,22 +299,21 @@ function quantile(values: Float32Array, count: number, q: number) {
 // channel, in `off`. Returns how many.
 function differences(data: Float32Array, apple: boolean, undo: Float32Array, off: Float32Array) {
   const read = GRID_HEIGHT * (GRID_ROW / 4);
-  const encoded = [0, 0, 0];
+  // Mirrored about 0, as the shader undoes it.
+  const encode = (v: number) => (apple ? Math.sign(v) * srgbDecode(Math.abs(v)) ** (1 / 1.961) : v);
   let count = 0;
 
   for (let i = 0; i < read; i += 4) {
-    for (let c = 0; c < 3; c++) {
-      const imported = data[i + c] ?? 0;
-      const undone = Math.sign(imported) * srgbDecode(Math.abs(imported)) ** (1 / 1.961);
-      encoded[c] = apple ? undone : imported;
-    }
+    const r = encode(data[i] ?? 0);
+    const g = encode(data[i + 1] ?? 0);
+    const b = encode(data[i + 2] ?? 0);
 
     // Alpha is left out.
     for (let c = 0; c < 3; c++) {
       const truth = data[read + i + c] ?? 0;
       if (truth < MIDTONES[0] || truth > MIDTONES[1]) continue;
-      let mapped = undo[12 + c] ?? 0;
-      for (let k = 0; k < 3; k++) mapped += (undo[k * 4 + c] ?? 0) * (encoded[k] ?? 0);
+      const mapped =
+        (undo[c] ?? 0) * r + (undo[4 + c] ?? 0) * g + (undo[8 + c] ?? 0) * b + (undo[12 + c] ?? 0);
       off[count++] = Math.abs(mapped - truth);
     }
   }
@@ -340,7 +339,8 @@ export function verdict(
 ): Route["via"] | undefined {
   const read = GRID_HEIGHT * (GRID_ROW / 4);
   let coloured = 0;
-  let beyond = 0;
+  let below = 0;
+  let above = 0;
 
   for (let i = 0; i < read; i += 4) {
     const [r = 0, g = 0, b = 0] = data.subarray(read + i, read + i + 3);
@@ -348,7 +348,8 @@ export function verdict(
 
     for (let c = i; c < i + 3; c++) {
       const imported = data[c] ?? 0;
-      if (imported < -BEYOND || imported > 1 + BEYOND) beyond++;
+      if (imported < -BEYOND) below++;
+      if (imported > 1 + BEYOND) above++;
     }
   }
 
@@ -363,10 +364,12 @@ export function verdict(
   if (matches(false)) return "imported";
   if (matches(true)) return "apple";
 
-  for (const assumed of beyond < BEYOND_POINTS ? [] : ASSUMED) {
-    undoMatrix(undo, stated, assumed, depth);
-    if (matches(false)) return "imported";
-    if (matches(true)) return "apple";
+  if (below >= BEYOND_POINTS && above >= BEYOND_POINTS) {
+    for (const assumed of ASSUMED) {
+      undoMatrix(undo, stated, assumed, depth);
+      if (matches(false)) return "imported";
+      if (matches(true)) return "apple";
+    }
   }
 
   identity(undo);

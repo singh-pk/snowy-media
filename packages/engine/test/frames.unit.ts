@@ -155,10 +155,10 @@ test("a stream is imported as is, or with Apple's gamma undone, only where that 
   expect(grid(coloured, (c) => c + 0.05)).toBe("read");
 });
 
-// R′G′B′ of 8-bit plane values `yuv` as `space` converts them, unclipped.
-function rgbOf(space: VideoColorSpaceInit, yuv: number[]): [number, number, number] {
+// R′G′B′ of `depth`-bit plane values `yuv` as `space` converts them, unclipped.
+function rgbOf(space: VideoColorSpaceInit, yuv: number[], depth = 8): [number, number, number] {
   const m = new Float32Array(16);
-  yuvMatrix(m, space, 8);
+  yuvMatrix(m, space, depth);
   const [y = 0, u = 0, v = 0] = yuv;
   const at = (i: number) =>
     (m[i] ?? 0) * y + (m[4 + i] ?? 0) * u + (m[8 + i] ?? 0) * v + (m[12 + i] ?? 0);
@@ -169,20 +169,24 @@ function rgbOf(space: VideoColorSpaceInit, yuv: number[]): [number, number, numb
 const appleEncode = (c: number) => Math.sign(c) * srgbEncode(Math.abs(c) ** 1.961);
 const clipped = (c: number) => Math.min(Math.max(c, 0), 1);
 
-// A grid of coloured plane values, the stream's conversion of each as `streams`, and Chromium's
-// as `assumed`, then gamma `encode`: the route measured from it, and its `undo`.
+// Plane values saturated enough that some convert outside [0, 1], and some that never do.
+const saturated = (k: number) => [70 + (k % 11) * 10, 60 + (k % 7) * 22, 60 + (k % 5) * 30];
+const muted = (k: number) => [90 + (k % 11) * 8, 100 + (k % 7) * 9, 100 + (k % 5) * 12];
+
+// A grid of coloured plane values, `planes`, the stream's conversion of each as `streams`, and
+// Chromium's as `assumed`, then gamma `encode`: the route measured from it, and its `undo`.
 function assumedGrid(
   streams: VideoColorSpaceInit,
   assumed: VideoColorSpaceInit,
   encode = (c: number) => c,
+  planes = saturated,
 ) {
   const points = 128 * 72;
   const data = new Float32Array(2 * points * 4);
   const undo = new Float32Array(16);
 
   for (let k = 0; k < points; k++) {
-    // Saturated enough that some convert outside [0, 1].
-    const yuv = [70 + (k % 11) * 10, 60 + (k % 7) * 22, 60 + (k % 5) * 30];
+    const yuv = planes(k);
     const truth = rgbOf(streams, yuv);
     const imported = rgbOf(assumed, yuv);
 
@@ -212,19 +216,24 @@ test("a stream Chromium takes for another matrix or range is imported, its conve
 
 test("a stream Chromium clips is never imported through another matrix", () => {
   expect(assumedGrid({}, { matrix: "bt709", fullRange: false }, clipped).via).toBe("read");
+  // Nor one whose colours all fit, which shows no clip either way.
+  expect(assumedGrid({}, { matrix: "bt709", fullRange: false }, undefined, muted).via).toBe("read");
 });
 
 test("undoing a matrix takes Chromium's R′G′B′ back to the stream's", () => {
   const undo = new Float32Array(16);
   const assumed = { matrix: "bt709", fullRange: true } as const;
-  undoMatrix(undo, {}, assumed, 8);
-  const yuv = [140, 90, 170];
-  const [r, g, b] = rgbOf(assumed, yuv);
-  const mapped = [0, 1, 2].map(
-    (c) =>
-      (undo[c] ?? 0) * r + (undo[4 + c] ?? 0) * g + (undo[8 + c] ?? 0) * b + (undo[12 + c] ?? 0),
-  );
-  for (const [c, v] of rgbOf({}, yuv).entries()) expect(mapped[c]).toBeCloseTo(v, 5);
+
+  for (const depth of [8, 10]) {
+    undoMatrix(undo, {}, assumed, depth);
+    const yuv = [140, 90, 170].map((v) => v * 2 ** (depth - 8));
+    const [r, g, b] = rgbOf(assumed, yuv, depth);
+    const mapped = [0, 1, 2].map(
+      (c) =>
+        (undo[c] ?? 0) * r + (undo[4 + c] ?? 0) * g + (undo[8 + c] ?? 0) * b + (undo[12 + c] ?? 0),
+    );
+    for (const [c, v] of rgbOf({}, yuv, depth).entries()) expect(mapped[c]).toBeCloseTo(v, 5);
+  }
 });
 
 test("a frame too dark or too grey to tell the conversions apart decides nothing", () => {
