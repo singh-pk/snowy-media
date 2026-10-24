@@ -179,6 +179,7 @@ jobs:
       # --with-deps installs the libraries Chromium needs on Linux, and nothing elsewhere.
       - run: bunx playwright install --with-deps chromium
       - run: bun run test
+      - run: ps -eo pcpu,etime,args --sort=-pcpu | head -15 | cut -c1-200
       # For reading only: shared runners are too noisy to fail on (packages/engine/bench).
       - run: bun run bench --runs 5 >> "$GITHUB_STEP_SUMMARY"
 
