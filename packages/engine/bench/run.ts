@@ -230,7 +230,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   // how late the frame on screen is for the time heard (engine.currentTime), past when the next
   // frame was due (p50, p90, p99, max), the canvas's read-back included. The first read is left out:
   // play prerolls video before the clock starts. And the CPU time of every browser process over
-  // the time played, in cores (`cpu cores`).
+  // the time played, in cores (`cpu cores`). And how far the clock got in those 8 s
+  // (`reached s`), short of 8 on a machine too slow for the file.
   play: (tab) =>
     tab.evaluate(
       async ({ entry, page, file, times, seconds }) => {
@@ -257,7 +258,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
         player.close();
         canvas.remove();
         const heard = reads.at(-1)?.[0] ?? 0;
-        if (heard < seconds - 1) throw new Error(`played to ${heard} s in ${seconds} s`);
+        // A machine too slow for the file is measured; one that never plays has nothing to measure.
+        if (reads.length < 2 || heard <= 0) throw new Error(`did not play: ${reads.length} reads`);
         const lateness = reads.slice(1).map(([time, id]) => {
           if (times[id] === undefined) throw new Error(`frame ${id} read on screen`);
           return Math.max(0, time - (times[id + 1] ?? Infinity)) * 1000;
@@ -270,6 +272,7 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
           "late p99": at(0.99),
           "late max": sorted.at(-1) ?? 0,
           "cpu cores": cores,
+          "reached s": heard,
         };
       },
       { entry: ENTRY, page: PAGE, file: SCRUB_4K, times: due, seconds: 8 },
