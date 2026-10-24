@@ -156,6 +156,7 @@ export const FRAME = {
   size: 7,
   planes: 8,
   layout: 9,
+  // In 64-bit words: bytes 72 to 79, after the layout's 4 planes.
   timestamp: 9,
   bytes: 80,
 } as const;

@@ -25,6 +25,8 @@ import { RING_CAPACITY, createConsumer, createProducer, createRing, type Packet 
 // always go, the frames going back above all. The ring back holds small records only.
 const TO_CAPACITY = 2 * RING_CAPACITY;
 const SPARE = 1 << 20;
+// A frame's `packed` word as the record's pts.
+const PACKED = [0n, 1n] as const;
 const FROM_CAPACITY = 1 << 16;
 
 const FORMATS: ReadonlySet<string | undefined> = new Set(PIXEL_FORMATS);
@@ -102,6 +104,9 @@ export function createWasmVideo(
   const words = new Int32Array(payload.buffer);
   const doubles = new Float64Array(payload.buffer);
   const text = new TextDecoder();
+  // Where a failure's message is copied to be decoded: TextDecoder takes no shared memory.
+  const reason = new Uint8Array(1024);
+  const dequeue = (decoder: Open) => decoder.events.dequeue();
 
   // Writes a record that must go: one that does not fit means the spare room is spent.
   function put(
@@ -121,14 +126,14 @@ export function createWasmVideo(
   // Hands the frame in the payload back to the module that decoded it.
   function release() {
     const frame = (words[FRAME.frame] ?? 0) >>> 0;
-    put(TO_VIDEO.release, frame, BigInt(words[FRAME.packed] ?? 0), 0n, words[FRAME.module]);
+    put(TO_VIDEO.release, frame, PACKED[words[FRAME.packed] ?? 0], 0n, words[FRAME.module]);
   }
 
   // The frame in the payload, from the module whose memory is `memory`, as a frame that goes
   // back to it once closed. Pointers are unsigned, past 2 GiB too.
   function shared(memory: WebAssembly.Memory): SharedFrame {
     const frame = (words[FRAME.frame] ?? 0) >>> 0;
-    const packed = BigInt(words[FRAME.packed] ?? 0);
+    const packed = PACKED[words[FRAME.packed] ?? 0];
     const module = words[FRAME.module] ?? 0;
     const size = words[FRAME.size] ?? 0;
     const height = words[FRAME.codedHeight] ?? 0;
@@ -140,7 +145,12 @@ export function createWasmVideo(
     }
 
     const format = PIXEL_FORMATS[words[FRAME.format] ?? 0];
-    if (!isFormat(format)) throw new Error(`no pixel format ${words[FRAME.format]}`);
+
+    if (!isFormat(format)) {
+      release();
+      throw new Error(`no pixel format ${words[FRAME.format]}`);
+    }
+
     const own = { closed: false };
     return {
       format,
@@ -154,39 +164,37 @@ export function createWasmVideo(
       allocationSize: () => size,
       close() {
         if (own.closed) return;
-        own.closed = true;
+        // Closed once it has gone: a ring that has no room for it throws, and leaves it open.
         put(TO_VIDEO.release, frame, packed, 0n, module);
+        own.closed = true;
       },
     };
   }
 
-  // Hands record `record` from the worker to its decoder.
-  async function receive(record: Packet) {
-    const id = record.stream >> KIND_BITS;
-    const kind = record.stream & ((1 << KIND_BITS) - 1);
+  // Hands record `record` of decoder `id` from the worker to it; a frame's payload is in
+  // `payload` already.
+  function receive(record: Packet, id: number, kind: number) {
     const decoder = open.get(id);
 
     if (kind === FROM_VIDEO.frame) {
-      payload.set(record.data);
-      const module = words[FRAME.module] ?? 0;
-      // The memory comes by message, which may come after the module's first frame.
-      if (decoder && !loaded[module]) await memories[module]?.promise;
-      const memory = loaded[module];
+      const memory = loaded[words[FRAME.module] ?? 0];
       // A decoder closed since: nothing takes it, so it goes back at once.
-      if (memory && open.get(id) === decoder && decoder) decoder.events.output(shared(memory));
+      if (memory && decoder) decoder.events.output(shared(memory));
       else release();
     } else if (kind === FROM_VIDEO.decoded) {
       if (decoder) decoder.queued--;
       // A packet decoded, of any decoder, closed ones too, makes room in the ring for every one.
-      for (const each of open.values()) each.events.dequeue();
+      open.forEach(dequeue);
     } else if (kind === FROM_VIDEO.failed) {
-      decoder?.events.error(new Error(text.decode(record.data)));
+      reason.set(record.data);
+      decoder?.events.error(new Error(text.decode(reason.subarray(0, record.data.length))));
     } else {
       decoder?.flushed.resolve();
     }
   }
 
-  // Takes the worker's records from `replies` as they come, in order.
+  // Takes the worker's records from `replies` as they come, in order. One its decoder fails on
+  // fails that decoder alone.
   async function listen(replies: ReturnType<typeof createConsumer>) {
     for (;;) {
       const record = replies.peek();
@@ -196,7 +204,22 @@ export function createWasmVideo(
         continue;
       }
 
-      await receive(record);
+      const id = record.stream >> KIND_BITS;
+      const kind = record.stream & ((1 << KIND_BITS) - 1);
+
+      if (kind === FROM_VIDEO.frame) {
+        payload.set(record.data);
+        const module = words[FRAME.module] ?? 0;
+        // The memory comes by message, which may come after the module's first frame.
+        if (open.has(id) && !loaded[module]) await memories[module]?.promise;
+      }
+
+      try {
+        receive(record, id, kind);
+      } catch (e) {
+        open.get(id)?.events.error(e instanceof Error ? e : new Error(String(e)));
+      }
+
       replies.release();
     }
   }

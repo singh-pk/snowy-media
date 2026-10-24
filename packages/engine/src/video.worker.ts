@@ -110,11 +110,18 @@ function createDecoder(
     throw new Error("decoder: out of memory");
   }
 
+  // The index in PIXEL_FORMATS of each format name met, by its pointer: a static string.
+  const formats = new Map<Ptr, number>();
+
   // The index of `held`'s format in PIXEL_FORMATS.
   function pixelFormat(held: Ptr) {
-    const format = name(m._sny_frame_video_format(held));
+    const ptr = m._sny_frame_video_format(held);
+    const known = formats.get(ptr);
+    if (known !== undefined) return known;
+    const format = name(ptr);
     const index = PIXEL_FORMATS.findIndex((f) => f === format);
     if (index < 0) throw new Error(`no VideoFrame format for ${format}`);
+    formats.set(ptr, index);
     return index;
   }
 
@@ -248,25 +255,17 @@ async function serve({ to, from }: ToVideo) {
     return m;
   }
 
-  // Handles `record` of decoder `id`; it is freed once this returns, or before decoding.
-  async function handle(record: Packet, id: number, kind: number) {
-    if (kind === TO_VIDEO.release) {
-      const m = loaded[record.duration];
-      // A pointer, unsigned past 2 GiB.
-      const frame = record.flags >>> 0;
-      if (record.pts) m?._free(frame);
-      else m?._sny_frame_free(frame);
-      return;
-    }
+  // Opens decoder `id` from its `open` record, once its module is loaded.
+  async function open(record: Packet, id: number) {
+    const m = await module(record.duration);
+    const send = () => reply(id, FROM_VIDEO.frame, payload, FRAME.bytes);
+    const [num, den] = [Number(record.pts), Number(record.dts)];
+    decoders.set(id, createDecoder(m, record.duration, record.data, num, den, send));
+  }
 
-    if (kind === TO_VIDEO.open) {
-      const m = await module(record.duration);
-      const send = () => reply(id, FROM_VIDEO.frame, payload, FRAME.bytes);
-      const [num, den] = [Number(record.pts), Number(record.dts)];
-      decoders.set(id, createDecoder(m, record.duration, record.data, num, den, send));
-      return;
-    }
-
+  // Handles any other `record` of decoder `id`; it is freed once this returns, or a packet's
+  // before decoding.
+  function handle(record: Packet, id: number, kind: number) {
     const decoder = decoders.get(id);
 
     if (kind === TO_VIDEO.close) {
@@ -301,14 +300,28 @@ async function serve({ to, from }: ToVideo) {
     const id = record.stream >> KIND_BITS;
     const kind = record.stream & ((1 << KIND_BITS) - 1);
 
+    // A frame going back is of no decoder: id 0 is only its kind's.
+    if (kind === TO_VIDEO.release) {
+      const m = loaded[record.duration];
+      // A pointer, unsigned past 2 GiB.
+      const frame = record.flags >>> 0;
+      if (record.pts) m?._free(frame);
+      else m?._sny_frame_free(frame);
+      records.release();
+      continue;
+    }
+
     try {
-      await handle(record, id, kind);
+      if (kind === TO_VIDEO.open) await open(record, id);
+      else handle(record, id, kind);
     } catch (e) {
       // It decodes nothing more, but stays until it closes.
       decoders.get(id)?.close();
       decoders.set(id, undefined);
       const { written } = encoder.encodeInto(e instanceof Error ? e.message : String(e), message);
       reply(id, FROM_VIDEO.failed, message, written);
+      // Still decoded, as its room in the ring is free, which another decoder may wait for.
+      if (kind === TO_VIDEO.packet) reply(id, FROM_VIDEO.decoded);
     }
 
     // A packet's record is freed already.

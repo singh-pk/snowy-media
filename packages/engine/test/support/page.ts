@@ -385,6 +385,26 @@ export async function compareRoutes(
 }
 
 /**
+ * The error of a decoder the video decode worker fails to open: one of the stream with
+ * parameters `p`, but with codec parameters FFmpeg cannot read.
+ */
+export async function failInWorker(p: VideoParams) {
+  const failed = Promise.withResolvers<Error>();
+  const events = {
+    output: (f: { close(): void }) => f.close(),
+    dequeue() {},
+    error: failed.resolve,
+  };
+  const decoder = wasm.createDecoder({ ...p, params: new Uint8Array(64).fill(255) }, events);
+  const data = new Uint8Array(16);
+  const packet = { stream: 0, flags: AV_PKT_FLAG_KEY, pts: 0n, dts: 0n, duration: 1, data };
+  decoder.decode(packet, 0n, 0, 0);
+  const error = await failed.promise;
+  decoder.close();
+  return error.message;
+}
+
+/**
  * Plays video stream `stream` of the file open in `media` through the engine's video output
  * into a `width` × `height` canvas, showing it at each of `times` (microseconds) in turn
  * once the frames up to it are decoded. Returns, for each time, whether a new frame went up
