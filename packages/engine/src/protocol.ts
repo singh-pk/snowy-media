@@ -112,53 +112,75 @@ export type FromMedia =
   | { type: "error"; id: number; message: string };
 
 // The render worker's decoders in the video decode worker (src/video.worker.ts), each by its
-// `id`: one opens for a play's video stream that FFmpeg's `module` decodes, from the
-// stream's exported codec parameters, then takes the stream's packets in decoding order
-// (timestamps in its time base), a flush once the stream ends, and a close. A frame it sent
-// goes back, by its `module`, once it is uploaded or dropped, whether its decoder is open or not.
-export type ToVideo =
-  | {
-      type: "open";
-      id: number;
-      module: "video" | "video-ext";
-      params: Uint8Array;
-      timeBase: [number, number];
-    }
-  | {
-      type: "decode";
-      id: number;
-      data: Uint8Array;
-      pts: bigint;
-      dts: bigint;
-      duration: number;
-      flags: number;
-    }
-  | { type: "flush"; id: number }
-  | { type: "close"; id: number }
-  | { type: "release"; module: "video" | "video-ext"; frame: number; packed: boolean };
+// id, talk through two rings (src/ring.ts) the render worker makes once and sends at the start,
+// with no message per packet or frame. In the ring to the worker, a decoder opens for a play's
+// video stream that one of VIDEO_MODULES decodes, from the stream's exported codec parameters,
+// then takes the stream's packets in decoding order (timestamps in its time base), a flush once
+// the stream ends, and a close; and a frame goes back, by its module, once it is uploaded or
+// dropped, whether its decoder is open or not. In the ring from the worker come each decoded
+// frame, each packet decoded, the flush done, and a decoder's first error, after which it
+// decodes nothing. A module's memory, which frames are read from, comes by message once it loads,
+// before any of its frames.
+export type ToVideo = { type: "start"; to: SharedArrayBuffer; from: SharedArrayBuffer };
+export type FromVideo = { type: "memory"; module: number; memory: WebAssembly.Memory };
+
+/** The FFmpeg modules that decode video, by their index in records. */
+export const VIDEO_MODULES = ["video", "video-ext"] as const;
 
 /**
- * A frame FFmpeg decoded, left where it is in the shared memory of the module that decoded it
- * until it goes back: its AVFrame (`frame`), or the buffer a frame stored bottom row first is
- * packed into (`packed`); where each of its planes starts in the memory and its stride; and the
- * bytes it holds.
+ * A record's kind, in the low KIND_BITS of its stream, and its decoder's id in the rest. To the
+ * worker: `open`, its module in the duration, its time base in pts and dts, the parameters as
+ * payload; `packet`, as the packet ring's; `flush` and `close`; and `release`, of the frame in
+ * the flags from the module in the duration, which the pts says is packed (1) or not (0).
  */
-export interface HeldFrame {
-  frame: number;
-  packed: boolean;
-  format: VideoPixelFormat;
-  codedWidth: number;
-  codedHeight: number;
-  displayWidth: number;
-  timestamp: number;
-  layout: PlaneLayout[];
-  size: number;
-}
+export const TO_VIDEO = { open: 0, packet: 1, flush: 2, close: 3, release: 4 } as const;
+/** From the worker: `frame`, its FRAME payload; `decoded`; `flushed`; `failed`, its message. */
+export const FROM_VIDEO = { frame: 0, decoded: 1, flushed: 2, failed: 3 } as const;
+export const KIND_BITS = 3;
 
-// A decoder's module's memory, once it opens; each decoded frame; `decoded` once a packet or
-// the flush is done; and a decoder's first error, after which it decodes nothing.
-export type FromVideo =
-  | { type: "memory"; id: number; memory: WebAssembly.Memory }
-  | { type: "frame"; id: number; module: "video" | "video-ext"; frame: HeldFrame }
-  | { type: "decoded"; id: number; flushed: boolean }
-  | { type: "error"; id: number; message: string };
+/**
+ * A frame record's payload, in 32-bit words, then its timestamp as a float64 (`timestamp`, an
+ * index in 64-bit words): FFmpeg's frame, left where it is in the shared memory of the module
+ * that decoded it until it goes back, as its AVFrame or the buffer a frame stored bottom row
+ * first is packed into (`packed`); its format, an index in PIXEL_FORMATS; its size; the bytes it
+ * holds; and from `layout` on, where each of its `planes` starts in the memory and its stride.
+ */
+export const FRAME = {
+  frame: 0,
+  packed: 1,
+  module: 2,
+  format: 3,
+  codedWidth: 4,
+  codedHeight: 5,
+  displayWidth: 6,
+  size: 7,
+  planes: 8,
+  layout: 9,
+  // In 64-bit words: bytes 72 to 79, after the layout's 4 planes.
+  timestamp: 9,
+  bytes: 80,
+} as const;
+
+/** The formats a frame may have: those sny_to_video_format makes, by their index in records. */
+export const PIXEL_FORMATS = [
+  "I420",
+  "I420P10",
+  "I420P12",
+  "I420A",
+  "I420AP10",
+  "I422",
+  "I422P10",
+  "I422P12",
+  "I422A",
+  "I422AP10",
+  "I444",
+  "I444P10",
+  "I444P12",
+  "I444A",
+  "I444AP10",
+  "NV12",
+  "RGBA",
+  "RGBX",
+  "BGRA",
+  "BGRX",
+] as const;

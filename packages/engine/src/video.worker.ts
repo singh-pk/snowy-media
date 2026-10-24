@@ -6,7 +6,8 @@
 // synchronously, in software, so it does so here, never in the render worker's animation
 // frames. Each frame, in a format VideoFrame takes (sny_to_video_format), stays where the
 // decoder left it in the module's shared memory, which the render worker uploads it from; the
-// render worker sends it back once it is uploaded or dropped.
+// render worker sends it back once it is uploaded or dropped. Packets and frames go both ways
+// through the rings the render worker sends at the start, with no message per packet or frame.
 
 import {
   AVERROR_EAGAIN,
@@ -14,12 +15,20 @@ import {
   createVideo,
   type VideoModule,
 } from "@snowy-media/ffmpeg/video";
-import type { FromVideo, ToVideo } from "./protocol";
+import {
+  FRAME,
+  FROM_VIDEO,
+  KIND_BITS,
+  PIXEL_FORMATS,
+  TO_VIDEO,
+  VIDEO_MODULES,
+  type FromVideo,
+  type ToVideo,
+} from "./protocol";
+import { createConsumer, createProducer, type Packet } from "./ring";
 
 type Ptr = number;
-type Module = "video" | "video-ext";
-// What waits in turn; a frame going back does not.
-type Request = Exclude<ToVideo, { type: "release" }>;
+type Module = (typeof VIDEO_MODULES)[number];
 
 const LOG_ERRORS = 16;
 // The most planes a frame has: Y, Cb, Cr and alpha.
@@ -27,36 +36,12 @@ const MAX_PLANES = 4;
 // Decoding threads: one a core, at most the module's pool of 8.
 const THREADS = Math.min(navigator.hardwareConcurrency, 8);
 
-// The formats sny_to_video_format makes.
-const FORMATS = new Set([
-  "I420",
-  "I420P10",
-  "I420P12",
-  "I420A",
-  "I420AP10",
-  "I422",
-  "I422P10",
-  "I422P12",
-  "I422A",
-  "I422AP10",
-  "I444",
-  "I444P10",
-  "I444P12",
-  "I444A",
-  "I444AP10",
-  "NV12",
-  "RGBA",
-  "RGBX",
-  "BGRA",
-  "BGRX",
-]);
-
-// Whether a name is one of FORMATS. TypeScript's DOM types know fewer than Chromium takes.
-const isFormat = (v: string): v is VideoPixelFormat => FORMATS.has(v);
-
-function post(message: FromVideo, transfer: Transferable[] = []) {
-  self.postMessage(message, transfer);
-}
+// Where a frame record's payload is put together.
+const payload = new Uint8Array(FRAME.bytes);
+const words = new Int32Array(payload.buffer);
+const doubles = new Float64Array(payload.buffer);
+// Where a failure's message is put; a longer one is cut short.
+const message = new Uint8Array(1024);
 
 // Module `name`, loaded when a stream first needs it: video-ext only for the rarer codecs.
 async function load(name: Module): Promise<VideoModule> {
@@ -72,14 +57,15 @@ async function load(name: Module): Promise<VideoModule> {
   return m;
 }
 
-// A decoder of stream parameters `params` in module `m`, `module`, posting its frames as decoder
-// `id`.
+// A decoder of stream parameters `params` in module `m`, the `module`th, with time base
+// `num`/`den`, sending each frame it decodes with `send`.
 function createDecoder(
   m: VideoModule,
-  module: Module,
-  id: number,
+  module: number,
   params: Uint8Array,
-  [num, den]: [number, number],
+  num: number,
+  den: number,
+  send: () => void,
 ) {
   const check = (ret: number, what: string) => {
     if (ret < 0) throw new Error(`${what}: ${m.UTF8ToString(m._sny_strerror(ret))}`);
@@ -124,30 +110,40 @@ function createDecoder(
     throw new Error("decoder: out of memory");
   }
 
+  // The index in PIXEL_FORMATS of each format name met, by its pointer: a static string.
+  const formats = new Map<Ptr, number>();
+
+  // The index of `held`'s format in PIXEL_FORMATS.
   function pixelFormat(held: Ptr) {
-    const format = name(m._sny_frame_video_format(held));
-    if (!isFormat(format)) throw new Error(`no VideoFrame format for ${format}`);
-    return format;
+    const ptr = m._sny_frame_video_format(held);
+    const known = formats.get(ptr);
+    if (known !== undefined) return known;
+    const format = name(ptr);
+    const index = PIXEL_FORMATS.findIndex((f) => f === format);
+    if (index < 0) throw new Error(`no VideoFrame format for ${format}`);
+    formats.set(ptr, index);
+    return index;
   }
 
-  // Where each plane of `held` starts in memory, and its stride; undefined if one is stored
-  // bottom row first (a negative stride), as a texture is never uploaded. A format's unused
-  // planes have no data.
+  // Puts where each plane of `held` starts in memory, and its stride, in the payload, and
+  // returns how many it has; 0 if one is stored bottom row first (a negative stride), as a
+  // texture is never uploaded. A format's unused planes have no data.
   function planes(held: Ptr) {
-    const layout: PlaneLayout[] = [];
+    let i = 0;
 
-    for (let i = 0; i < MAX_PLANES && m._sny_frame_data(held, i); i++) {
+    for (; i < MAX_PLANES && m._sny_frame_data(held, i); i++) {
       const stride = m._sny_frame_linesize(held, i);
-      if (stride <= 0) return undefined;
-      layout.push({ offset: m._sny_frame_data(held, i), stride });
+      if (stride <= 0) return 0;
+      words[FRAME.layout + 2 * i] = m._sny_frame_data(held, i);
+      words[FRAME.layout + 2 * i + 1] = stride;
     }
 
-    return layout;
+    return i;
   }
 
   // `held`, stored bottom row first, as a raw AVI's or a BMP's RGB is, packed top row first into
   // a buffer of its own, of `size` bytes, which stands for it from then on. Such a frame is RGB:
-  // one plane, 4 bytes a pixel, `width` pixels a row.
+  // one plane, 4 bytes a pixel, `width` pixels a row. Returns the buffer.
   function pack(held: Ptr, size: number, width: number) {
     if (m._sny_frame_data(held, 1)) throw new Error("a planar frame stored bottom row first");
     const at = m._malloc(size);
@@ -160,11 +156,13 @@ function createDecoder(
     }
 
     m._sny_frame_free(held);
-    return { frame: at, packed: true, layout: [{ offset: at, stride: width * 4 }] };
+    words[FRAME.layout] = at;
+    words[FRAME.layout + 1] = width * 4;
+    return at;
   }
 
   // The decoded frame, held in a reference of its own (or converted into a frame of its own) so
-  // the decoder does not reuse its buffers before it goes back.
+  // the decoder does not reuse its buffers before it goes back, put in the payload.
   function hold() {
     const held = m._sny_frame_alloc();
     if (!held) throw new Error("frame_alloc: out of memory");
@@ -176,28 +174,26 @@ function createDecoder(
       const [sarNum, sarDen] = [m._sny_frame_sar_num(frame), m._sny_frame_sar_den(frame)];
       // Non-square pixels widen or narrow it, as a WebCodecs decoder's display aspect does.
       const displayWidth = sarNum > 0 && sarDen > 0 ? Math.round((width * sarNum) / sarDen) : width;
-      const format = pixelFormat(held);
+      words[FRAME.format] = pixelFormat(held);
+      words[FRAME.module] = module;
+      words[FRAME.codedWidth] = width;
+      words[FRAME.codedHeight] = height;
+      words[FRAME.displayWidth] = displayWidth;
       const size = check(m._sny_frame_pack_size(held), "frame_pack_size");
-      const timestamp = micros(m._sny_frame_pts(frame));
-      const layout = planes(held);
+      words[FRAME.size] = size;
+      doubles[FRAME.timestamp] = micros(m._sny_frame_pts(frame));
+      const count = planes(held);
+      words[FRAME.planes] = count || 1;
+      words[FRAME.packed] = count ? 0 : 1;
       // Last, as packing frees `held`.
-      const kept = layout ? { frame: held, packed: false, layout } : pack(held, size, width);
-      return {
-        ...kept,
-        format,
-        codedWidth: width,
-        codedHeight: height,
-        displayWidth,
-        timestamp,
-        size,
-      };
+      words[FRAME.frame] = count ? held : pack(held, size, width);
     } catch (e) {
       m._sny_frame_free(held);
       throw e;
     }
   }
 
-  // Sends `packet` (0 to drain) and posts every frame it completes. A packet the decoder
+  // Sends `packet` (0 to drain) and sends on every frame it completes. A packet the decoder
   // rejects, or a frame it fails to decode, is skipped, as the ffmpeg command line does: with
   // frame threads, a broken packet's error comes out of receive.
   function decode(packet: Ptr) {
@@ -207,7 +203,9 @@ function createDecoder(
       for (;;) {
         const got = m._sny_decoder_receive(dec, frame);
         if (got === AVERROR_EAGAIN || got === AVERROR_EOF) break;
-        if (got >= 0) post({ type: "frame", id, module, frame: hold() });
+        if (got < 0) continue;
+        hold();
+        send();
       }
 
       // Full, it takes the packet once its frames are out.
@@ -216,12 +214,13 @@ function createDecoder(
   }
 
   return {
-    decode({ data, pts, dts, duration, flags }: Extract<Request, { type: "decode" }>) {
+    // Copies `packet` into memory, to decode once its record is freed.
+    put({ data, pts, dts, duration, flags }: Packet) {
       const at = m._sny_packet_make(pkt, data.length, pts, dts, BigInt(duration), flags);
       if (!at) throw new Error("packet_make: out of memory");
       heap().set(data, at);
-      decode(pkt);
     },
+    decode: () => decode(pkt),
     flush: () => decode(0),
     close,
   };
@@ -229,77 +228,107 @@ function createDecoder(
 
 type Decoder = ReturnType<typeof createDecoder>;
 
-const modules = new Map<Module, Promise<VideoModule>>();
-// The modules loaded, for a frame that goes back while a decoder waits for one to load.
-const loaded = new Map<Module, VideoModule>();
-// Open decoders by id; one that failed stays, without a decoder, until it closes.
-const decoders = new Map<number, Decoder | undefined>();
+// Serves the render worker through the rings of `start`.
+async function serve({ to, from }: ToVideo) {
+  const records = createConsumer(to);
+  const replies = createProducer(from);
+  // The modules loaded, for a frame that goes back.
+  const loaded: (VideoModule | undefined)[] = [];
+  // Open decoders by id; one that failed stays, without a decoder, until it closes.
+  const decoders = new Map<number, Decoder | undefined>();
+  const encoder = new TextEncoder();
 
-async function handle(message: Request) {
-  const { id } = message;
+  const reply = (id: number, kind: number, data = payload, size = 0) =>
+    replies.write((id << KIND_BITS) | kind, 0, 0n, 0n, 0, data, 0, size);
 
-  if (message.type === "open") {
-    if (!modules.has(message.module)) modules.set(message.module, load(message.module));
-    const m = await modules.get(message.module);
-    if (!m) return;
-    loaded.set(message.module, m);
-    decoders.set(id, createDecoder(m, message.module, id, message.params, message.timeBase));
-    post({ type: "memory", id, memory: m.wasmMemory });
-    return;
+  // The `index`th module, loaded once; its memory goes to the render worker before any frame.
+  async function module(index: number) {
+    const name = VIDEO_MODULES[index];
+    if (!name) throw new Error(`no video module ${index}`);
+
+    const had = loaded[index];
+    if (had) return had;
+    const m = await load(name);
+    loaded[index] = m;
+    const memory: FromVideo = { type: "memory", module: index, memory: m.wasmMemory };
+    self.postMessage(memory);
+    return m;
   }
 
-  const decoder = decoders.get(id);
-
-  if (message.type === "close") {
-    decoder?.close();
-    decoders.delete(id);
-  } else if (message.type === "decode") {
-    decoder?.decode(message);
-    post({ type: "decoded", id, flushed: false });
-  } else {
-    decoder?.flush();
-    post({ type: "decoded", id, flushed: true });
-  }
-}
-
-// Messages are handled one at a time, in order: an open waits for its module, and the packets
-// sent behind it wait for the decoder.
-const inbox: Request[] = [];
-const wake = { next: () => {} };
-
-addEventListener("message", ({ data }: MessageEvent<ToVideo>) => {
-  // At once, not behind the packets: its buffers go back to the decoder.
-  if (data.type === "release") {
-    const m = loaded.get(data.module);
-    if (data.packed) m?._free(data.frame);
-    else m?._sny_frame_free(data.frame);
-    return;
+  // Opens decoder `id` from its `open` record, once its module is loaded.
+  async function open(record: Packet, id: number) {
+    const m = await module(record.duration);
+    const send = () => reply(id, FROM_VIDEO.frame, payload, FRAME.bytes);
+    const [num, den] = [Number(record.pts), Number(record.dts)];
+    decoders.set(id, createDecoder(m, record.duration, record.data, num, den, send));
   }
 
-  inbox.push(data);
-  wake.next();
-});
+  // Handles any other `record` of decoder `id`; it is freed once this returns, or a packet's
+  // before decoding.
+  function handle(record: Packet, id: number, kind: number) {
+    const decoder = decoders.get(id);
 
-async function serve() {
+    if (kind === TO_VIDEO.close) {
+      decoder?.close();
+      decoders.delete(id);
+    } else if (kind === TO_VIDEO.packet) {
+      // Freed before decoding, which takes long, so the render worker has room for the next.
+      try {
+        decoder?.put(record);
+      } finally {
+        records.release();
+      }
+
+      decoder?.decode();
+      reply(id, FROM_VIDEO.decoded);
+    } else {
+      decoder?.flush();
+      reply(id, FROM_VIDEO.flushed);
+    }
+  }
+
+  // Records are handled one at a time, in order: an open waits for its module, and the records
+  // behind it wait for the decoder.
   for (;;) {
-    const message = inbox.shift();
+    const record = records.peek();
 
-    if (!message) {
-      const next = Promise.withResolvers<void>();
-      wake.next = next.resolve;
-      await next.promise;
+    if (!record) {
+      await records.wait();
+      continue;
+    }
+
+    const id = record.stream >> KIND_BITS;
+    const kind = record.stream & ((1 << KIND_BITS) - 1);
+
+    // A frame going back is of no decoder: id 0 is only its kind's.
+    if (kind === TO_VIDEO.release) {
+      const m = loaded[record.duration];
+      // A pointer, unsigned past 2 GiB.
+      const frame = record.flags >>> 0;
+      if (record.pts) m?._free(frame);
+      else m?._sny_frame_free(frame);
+      records.release();
       continue;
     }
 
     try {
-      await handle(message);
+      if (kind === TO_VIDEO.open) await open(record, id);
+      else handle(record, id, kind);
     } catch (e) {
       // It decodes nothing more, but stays until it closes.
-      decoders.get(message.id)?.close();
-      decoders.set(message.id, undefined);
-      post({ type: "error", id: message.id, message: e instanceof Error ? e.message : String(e) });
+      decoders.get(id)?.close();
+      decoders.set(id, undefined);
+      const { written } = encoder.encodeInto(e instanceof Error ? e.message : String(e), message);
+      reply(id, FROM_VIDEO.failed, message, written);
+      // Still decoded, as its room in the ring is free, which another decoder may wait for.
+      if (kind === TO_VIDEO.packet) reply(id, FROM_VIDEO.decoded);
     }
+
+    // A packet's record is freed already.
+    if (kind !== TO_VIDEO.packet) records.release();
   }
 }
 
-void serve();
+addEventListener("message", ({ data }: MessageEvent<ToVideo>) => void serve(data), {
+  once: true,
+});

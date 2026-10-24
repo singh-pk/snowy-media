@@ -195,6 +195,14 @@ export function createProducer(ring: SharedArrayBuffer) {
     return true;
   }
 
+  /**
+   * Whether a record of `size` bytes fits with `spare` bytes left over, for a producer that
+   * keeps room for records it must always be able to offer.
+   */
+  function hasRoom(size: number, spare: number) {
+    return fits(padded(size) + spare);
+  }
+
   /** Writes the END record after the last packet, waiting for room, as the tests' producer does. */
   function end() {
     return write(END, 0, 0n, 0n, 0, bytes, 0, 0);
@@ -237,7 +245,19 @@ export function createProducer(ring: SharedArrayBuffer) {
     Atomics.wait(control, READ, seen);
   }
 
-  return { write, offer, end, offerEnd, fail, blocking, closed, waitingForRoom, bell, sleep };
+  return {
+    write,
+    offer,
+    hasRoom,
+    end,
+    offerEnd,
+    fail,
+    blocking,
+    closed,
+    waitingForRoom,
+    bell,
+    sleep,
+  };
 }
 
 /**
