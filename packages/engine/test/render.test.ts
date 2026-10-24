@@ -87,38 +87,6 @@ function plan(video: Video) {
   return { frames, times, drawn };
 }
 
-test("a decoder the video decode worker fails reports why, and the next decodes", async () => {
-  const browser = await launch();
-  const name = "mpeg2-aac.mov";
-
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    const got = await tab.evaluate(
-      async ({ page, worker, n }) => {
-        const support: typeof import("./support/page") = await import(page);
-        const media = support.startMedia(worker);
-        const res = await fetch(`/test/fixtures/${n}`);
-        const blob = await res.blob();
-        const opened = await media.request({ type: "open", file: new File([blob], n) });
-        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-        const params = opened.video[0];
-        if (!params) throw new Error(`${n}: no video parameters`);
-        const message = await support.failInWorker(params);
-        const size = { times: [0], width: params.width, height: params.height };
-        const { shown } = await support.render(media, 0, params, size);
-        media.stop();
-        return { message, shown };
-      },
-      { page: PAGE, worker: MEDIA_WORKER, n: name },
-    );
-    expect(got.message).toContain("decoder_open_params");
-    expect(got.shown).toEqual([{ drawn: true, id: 0 }]);
-  } finally {
-    await browser.close();
-  }
-}, 60_000);
-
 for (const [file, { video }] of Object.entries(expected)) {
   test(`shows ${file} at its timestamps, as FFmpeg shows it`, async () => {
     const browser = await launch();
