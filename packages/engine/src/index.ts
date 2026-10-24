@@ -179,7 +179,7 @@ export async function createEngine({ canvas }: EngineOptions): Promise<Engine> {
 interface Playback {
   id: number;
   clock: ReturnType<typeof createPcmControl>;
-  publish(): void;
+  publish(stopping?: number): void;
   primed(): boolean;
   drawn(): boolean;
   heard(): boolean;
@@ -314,12 +314,23 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     );
 
     const frame = { id: 0 };
-    // The last output timestamp, as context minus performance milliseconds, and when.
-    const output = { offset: Number.NaN, at: 0, agreed: 0, newer: 0, settled: false };
+    // The last output timestamp, as context minus performance milliseconds, and when; and the
+    // media time heard when a pause stopped it, until a timestamp passes it.
+    const output = {
+      offset: Number.NaN,
+      at: 0,
+      agreed: 0,
+      newer: 0,
+      settled: false,
+      stopped: Number.NaN,
+    };
 
     // The output timestamp, for the render worker (src/pcm.ts), on every animation frame and
     // as the context stops. It runs once it has settled, and stays so until the context stops.
-    function publish() {
+    // Stopped by a pause at `stopping` (performance milliseconds), it holds the media time heard
+    // then until a timestamp passes it, so the clock never goes back: the last timestamp
+    // is up to an audio callback older, and the frame on screen went up by it carried forward.
+    function publish(stopping?: number) {
       const { contextTime = 0, performanceTime = 0 } = context.getOutputTimestamp();
       const offset = contextTime * 1000 - performanceTime;
 
@@ -332,10 +343,19 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
       }
 
       const running = context.state === "running";
+
+      // Heard no further than the worklet rendered; paused again while held, never back.
+      if (stopping !== undefined && output.settled) {
+        const at = clock.mediaTime(Math.min((stopping + output.offset) / 1000, clock.read().time));
+        output.stopped = Number.isNaN(output.stopped) ? at : Math.max(output.stopped, at);
+      }
+
       const agreed = output.agreed >= SETTLED_COUNT || output.newer >= SETTLED_LIMIT;
       const settled = output.settled;
       output.settled = running && (output.settled || agreed);
       if (output.settled !== settled) changed();
+      if (clock.mediaTime(contextTime) >= output.stopped) output.stopped = Number.NaN;
+      const held = !Number.isNaN(output.stopped);
 
       // A timestamp from before a pause says nothing of the one after it.
       if (!running) {
@@ -343,7 +363,10 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
         output.newer = 0;
       }
 
-      clock.publishOutput(contextTime, performance.timeOrigin + performanceTime, output.settled);
+      // Held as a media time, not a context time: a suspend moves context time on by a
+      // callback the worklet never renders.
+      const at = performance.timeOrigin + performanceTime;
+      clock.publishOutput(contextTime, at, output.settled, held ? output.stopped : undefined);
     }
 
     function everyFrame() {
@@ -388,10 +411,11 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
       return params ? state.video.id === id && state.video.drawn : primed();
     }
 
-    // Whether it is heard, by a settled timestamp, and the frame on screen went up by it.
+    // Whether it is heard, by a settled timestamp past a pause's, and the frame on screen went
+    // up by it.
     function heard() {
       const shown = !params || (state.video.id === id && state.video.shown);
-      return output.settled && shown;
+      return output.settled && Number.isNaN(output.stopped) && shown;
     }
 
     everyFrame();
@@ -517,8 +541,8 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     changed();
     await state.context?.suspend();
     // Published now, not on the next animation frame, so the clock holds once pause resolves,
-    // in a hidden page too.
-    state.started?.publish();
+    // in a hidden page too; at the time heard now, as far as the render worker has drawn.
+    state.started?.publish(performance.now());
   }
 
   // `time` in seconds as a start in microseconds, at most the duration; or what is wrong.
