@@ -103,7 +103,7 @@ test("a peer can't announce itself as another", async () => {
   expect(result).toEqual({ sawImpostor: false, subscribeRefused: true });
 }, 60_000);
 
-test("only the source publishes `source`, and its records reach the others and are kept", async () => {
+test("only the source publishes `source`, and its records and chunks reach the others and check out", async () => {
   const result = await scenario("source");
   expect(result).toEqual({
     forgedRefused: true,
@@ -115,6 +115,10 @@ test("only the source publishes `source`, and its records reach the others and a
     },
     control: { epoch: 1, playing: true, mediaUs: 0, atUs: 5, ended: false },
     setup: { track: 0, codec: "vp09.00.10.08", codedWidth: 64, codedHeight: 48 },
+    chunks: [
+      { index: 0, startUs: 0, endUs: 2_000_000, packets: 2 },
+      { index: 1, startUs: 2_000_000, endUs: 4_000_000, packets: 2 },
+    ],
   });
 }, 60_000);
 

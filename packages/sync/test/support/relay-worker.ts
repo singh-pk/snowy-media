@@ -7,6 +7,7 @@
 // once a check holds after something it watches has changed.
 
 import { openChat } from "../../src/chat-session";
+import { openChunk, sealChunk } from "../../src/chunk";
 import { contentKey, generateKeyPair, keyId, type Bytes, type KeyId } from "../../src/crypto";
 import type { Link } from "../../src/link";
 import {
@@ -373,7 +374,8 @@ async function impostor(config: RelayConfig) {
 }
 
 // The source's records: only the source's token lets a peer publish `source`, and what the source
-// publishes there reaches the others, sealed and framed with its key, and is kept.
+// publishes there, its records and chunks, reaches the others sealed and framed with its key, and
+// checks out.
 async function sourceRecords(config: RelayConfig) {
   const sessionPair = await generateKeyPair();
   const grant = await joinGrant(sessionPair);
@@ -422,7 +424,7 @@ async function sourceRecords(config: RelayConfig) {
     self: sourceId,
     token,
     tracks: [],
-    source: ["catalog", "control", "init/0"],
+    source: ["catalog", "control", "init/0", "media/0"],
   });
   const asked = { now: false, ...watch() };
 
@@ -462,10 +464,30 @@ async function sourceRecords(config: RelayConfig) {
     }
   }
 
+  // The slot and time range of each chunk Bob opens.
+  const chunks: Array<{ index: number; startUs: number; endUs: number; packets: number }> = [];
+
+  async function takeChunk(payload: Bytes) {
+    const framed = unframe(payload);
+    if (framed === undefined) return;
+
+    try {
+      const object = { key: framed.key, sealed: new Uint8Array(framed.bytes) };
+      const chunk = await openChunk(sessionPair.publicKey, content, object);
+      const { index, startUs, endUs, packets } = chunk;
+      chunks.push({ index, startUs, endUs, packets: packets.length });
+    } catch (error) {
+      rejected.push(`${framed.key}: ${String(error)}`);
+    }
+
+    bob.changed();
+  }
+
   await Promise.all([
     bob.relay.subscribeSource("catalog", take),
     bob.relay.subscribeSource("control", take),
     bob.relay.subscribeSource("init/0", take),
+    bob.relay.subscribeSource("media/0", takeChunk),
   ]);
   // Bob's subscriptions are in place before the source publishes, since nothing may rely on the
   // groups a publisher keeps for later subscribers: once the source hears Bob, it publishes.
@@ -502,7 +524,30 @@ async function sourceRecords(config: RelayConfig) {
     source.sourceTrack(track).send(frame(object.key, object.sealed));
   }
 
-  await bob.until(() => kept.length === 3 || rejected.length > 0);
+  // Two chunks of two seconds, each a keyframe and the frame after it.
+  const sealedChunks = await Promise.all(
+    [0, 1].map(async (index) => {
+      const startUs = index * 2_000_000;
+      const packets = [startUs, startUs + 40_000].map((ptsUs, i) => ({
+        ptsUs,
+        dtsUs: ptsUs,
+        durationUs: 40_000,
+        keyframe: i === 0,
+        data: new Uint8Array(1_000).fill(index),
+      }));
+      return sealChunk(sessionPair, content, {
+        track: 0,
+        index,
+        startUs,
+        endUs: startUs + 2_000_000,
+        packets,
+      });
+    }),
+  );
+  for (const { key, sealed } of sealedChunks)
+    source.sourceTrack("media/0").send(frame(key, sealed));
+
+  await bob.until(() => (kept.length === 3 && chunks.length === 2) || rejected.length > 0);
   await Promise.all([source.close(), bob.relay.close()]);
   return {
     forgedRefused: forgedRefused instanceof RelayRequestError,
@@ -510,6 +555,8 @@ async function sourceRecords(config: RelayConfig) {
     catalog: records.catalog(),
     control: records.control(),
     setup: records.setup(0),
+    // Objects may arrive in any order.
+    chunks: chunks.toSorted((a, b) => a.index - b.index),
   };
 }
 

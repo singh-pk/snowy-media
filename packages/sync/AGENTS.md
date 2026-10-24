@@ -18,7 +18,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | Path | What it holds |
 | --- | --- |
 | `src/crypto.ts` | key pairs and key ids, Ed25519 signatures, the content key, and sealing objects with AES-GCM |
-| `src/chunk.ts` | the media chunk: its signed header and packet records, encoded and checked |
+| `src/chunk.ts` | the media chunk: its signed header and packet records, encoded and checked, and sealed under its object key |
 | `src/signed-record.ts` | the source's records as JSON signed by the session key, over a domain prefix and the session |
 | `src/catalog.ts` | the catalog and each track's codec setup, as signed records |
 | `src/control.ts` | the control record: the source's playback position and state from a moment on its clock |

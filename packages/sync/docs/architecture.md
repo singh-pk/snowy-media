@@ -236,7 +236,7 @@ Every name sits under the namespace `snowy/<SessionId>`. The relay enforces who 
 - **A peer serves its own tracks.** It announces a broadcast (MoQ Transport's namespace) and answers the subscriptions the relay forwards to it; nothing is pushed with `PUBLISH`, which moq-relay doesn't accept.
 - **Each sender has a broadcast of its own** under `inbox/<recipient>`, so every broadcast has exactly one publisher, and a relay never has to choose between two.
 - **Every object is a group of its own**, inbox messages included, so one lost or slow object never holds up another. Objects on the relay may therefore arrive in any order: everything sent through it is either self-proving (batches, chunks) or answered whatever order it comes in (repair messages).
-- **An object's key travels with it** on `chat`, `deliver`, `catalog`, `control` and `init/<track>`, framed as a 2-byte big-endian key length, the key in UTF-8, then the sealed bytes. A message on `ctl` is JSON.
+- **An object's key travels with it** on `chat`, `deliver`, `catalog`, `control`, `init/<track>` and `media/<track>`, framed as a 2-byte big-endian key length, the key in UTF-8, then the sealed bytes. A message on `ctl` is JSON.
 - **Presence** is a watch of the announcements under `peer/*` (`SUBSCRIBE_NAMESPACE` in MoQ Transport): a peer is online while its `peer/<PeerId>` broadcast is announced, and the relay reports the announcements and withdrawals.
 - **A broadcast's tracks exist before it is announced**, so a peer that subscribes on seeing a broadcast finds every track in it. A peer creates its own tracks before announcing `peer/<PeerId>`, so they are fixed when it connects, and the source announces `source` before that, so a peer that sees the source online finds `source` too.
 - **No group is skipped for its age.** `@moq/net` skips a group once a newer one is further ahead in time than the subscriber allows, which suits live media; every frame here carries the same timestamp, so none ever is.
@@ -328,6 +328,7 @@ Body
 
 - Timestamps are in microseconds for every track, so every track shares one timeline.
 - A version 2 header names the project, the asset and the source, so a chunk can't be replayed into another project, asset or source. A peer stores one only if `signer` is the source named in the chunk's namespace and holds `edit`.
+- **On the wire,** a chunk is sealed under its object key, in a watch session `media/<track>/<index>` (an edit session's are in [Media keys](#media-keys)), spelled in decimal without leading zeros, which travels with it. A peer opens it under that key, then checks that the header names the same slot, so a chunk can't be passed off as another, sealed again or not.
 - A peer stores a chunk only once the signature and `bodyHash` both check out. It throws away anything that fails without storing it.
 
 ## Local store
