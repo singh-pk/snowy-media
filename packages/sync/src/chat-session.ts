@@ -111,6 +111,7 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     holdings,
     repairs,
     store,
+    // copy: `rank` takes an array.
     candidates: () => [...links.keys()],
   });
 
@@ -187,7 +188,8 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   function catchUp() {
     const next = state.catchUp.findIndex((peer) => newest(peer) !== undefined);
     // Peers ranked above it have no link left.
-    state.catchUp = next === -1 ? [] : state.catchUp.slice(next);
+    if (next === -1) state.catchUp = [];
+    else state.catchUp.splice(0, next);
     const [peer] = state.catchUp;
     if (peer === undefined) return;
     newest(peer)?.send({ type: "chat-versions", versions: log.versions() });
@@ -237,7 +239,9 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
    */
   function connect(link: Link) {
     const { peer } = link;
-    links.set(peer, [...(links.get(peer) ?? []), link]);
+    const held = links.get(peer);
+    if (held) held.push(link);
+    else links.set(peer, [link]);
     const responder = createChatResponder({
       content,
       holdings,
@@ -255,6 +259,7 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
    * peer's last link closes before a batch from it arrives, the next one is sent the vector.
    */
   async function reconnected() {
+    // copy: `rank` takes an array.
     const ranked = await rank([...links.keys()], self, "chat-versions");
     state.catchUp = ranked;
     catchUp();

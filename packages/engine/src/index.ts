@@ -134,9 +134,10 @@ function createMedia() {
     buffered = () => {},
   ) {
     if (failed) return Promise.reject(failed);
-    const call = Promise.withResolvers<FromMedia>();
+    const call = Object.assign(Promise.withResolvers<FromMedia>(), { buffered });
     const id = next++;
-    pending.set(id, { ...call, buffered });
+    pending.set(id, call);
+    // copy: a few fields per request, to add its id.
     worker.postMessage({ ...message, id }, transfer);
     return call.promise;
   }

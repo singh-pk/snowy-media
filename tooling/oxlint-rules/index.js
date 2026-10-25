@@ -4,6 +4,7 @@
 // Repository lint rules that oxlint has no built-in equivalent for.
 
 import blankLineAroundBlocks from "./blank-line-around-blocks.js";
+import copyNeedsReason from "./copy-needs-reason.js";
 import disableNeedsReason from "./disable-needs-reason.js";
 import factoryOnly from "./factory-only.js";
 import noAccessModifiers from "./no-access-modifiers.js";
@@ -24,6 +25,7 @@ export default {
   meta: { name: "repo" },
   rules: {
     "blank-line-around-blocks": blankLineAroundBlocks,
+    "copy-needs-reason": copyNeedsReason,
     "disable-needs-reason": disableNeedsReason,
     "factory-only": factoryOnly,
     "no-access-modifiers": noAccessModifiers,

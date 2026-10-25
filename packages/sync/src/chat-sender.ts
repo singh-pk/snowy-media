@@ -24,7 +24,8 @@ export type ChatSenderOptions = {
   last?: ChatMessage | undefined;
   /**
    * The author's messages from before a reload that may not have been published, ending at
-   * `last` (`unsent` in src/chat-store.ts): queued again, to go with the first batch.
+   * `last` (`unsent` in src/chat-store.ts): queued again, to go with the first batch. The
+   * sender takes the array over and changes it.
    */
   pending?: ChatMessage[] | undefined;
   /**
@@ -41,7 +42,7 @@ const previousHash = async (last?: ChatMessage) => (last === undefined ? "" : me
 
 export function createChatSender(options: ChatSenderOptions) {
   const author = keyId(options.peer.publicKey);
-  const queue: ChatMessage[] = [...(options.pending ?? [])];
+  const queue: ChatMessage[] = options.pending ?? [];
   const state: {
     last?: ChatMessage | undefined;
     writable: boolean;
@@ -73,10 +74,12 @@ export function createChatSender(options: ChatSenderOptions) {
 
     const prev = await previousHash(state.last);
     const id = await author;
-    const fields = { author: id, seq: (state.last?.seq ?? 0) + 1, prev, mediaUs, ...content };
-    checkMessage({ ...fields, hlc: NO_CLOCK });
-
-    const message: ChatMessage = { ...fields, hlc: options.clock.send() };
+    const seq = (state.last?.seq ?? 0) + 1;
+    // copy: once per message written, its content into the message.
+    const message: ChatMessage = { author: id, seq, prev, mediaUs, ...content, hlc: NO_CLOCK };
+    // Checked before the clock moves on, so a refused message takes no clock value.
+    checkMessage(message);
+    message.hlc = options.clock.send();
     // Stored before it can be sent: a message sent but lost from the store would let a reload
     // give its seq to another.
     await options.keep(message);
@@ -124,12 +127,19 @@ export function createChatSender(options: ChatSenderOptions) {
     return flush();
   }
 
+  // Puts `messages` back at the front of the queue, in order, for the next writable event.
+  function putBack(messages: ChatMessage[]) {
+    // copy: `unshift` takes the messages as arguments, a batch's few: those written while the
+    // stream was busy.
+    queue.unshift(...messages);
+  }
+
   async function encoded(messages: ChatMessage[]) {
     try {
       return await encodeBatch(options.peer, options.content, messages);
     } catch (error) {
       // Nothing is lost: the messages wait for the next writable event.
-      queue.unshift(...messages);
+      putBack(messages);
       throw error;
     }
   }
@@ -141,7 +151,7 @@ export function createChatSender(options: ChatSenderOptions) {
     // The stream closed while the batch was sealed, even if it has reopened: the batch goes
     // again, with whatever queued since, once the stream is writable.
     if (state.closes !== closes || !state.writable) {
-      queue.unshift(...messages);
+      putBack(messages);
       return;
     }
 
@@ -151,7 +161,7 @@ export function createChatSender(options: ChatSenderOptions) {
       options.publish(sealed.key, sealed.bytes);
     } catch (error) {
       // The stream refused it: the messages wait for the next writable event.
-      queue.unshift(...messages);
+      putBack(messages);
       throw error;
     }
   }

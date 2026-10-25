@@ -17,10 +17,11 @@ const encoder = new TextEncoder();
 export async function rank(candidates: KeyId[], ...parts: Array<string | number>) {
   const scored = await Promise.all(
     candidates.map(async (candidate) => {
-      const bytes = encoder.encode([candidate, ...parts].join("\n"));
+      const bytes = encoder.encode(parts.reduce<string>((text, p) => `${text}\n${p}`, candidate));
       const hash = await crypto.subtle.digest("SHA-256", bytes);
       return { candidate, score: new Uint8Array(hash).toHex() };
     }),
   );
-  return scored.toSorted((a, b) => (a.score < b.score ? -1 : 1)).map((s) => s.candidate);
+  scored.sort((a, b) => (a.score < b.score ? -1 : 1));
+  return scored.map((s) => s.candidate);
 }

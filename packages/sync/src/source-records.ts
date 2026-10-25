@@ -148,6 +148,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
 
   /** Every record held, sealed as it came, to pass on unchanged. */
   function objects(): SealedObject[] {
+    // copy: every record held, into one list.
     return [held.catalog, held.control, ...held.setups.values()].flatMap((h) =>
       h === undefined ? [] : [h.object],
     );

@@ -29,6 +29,7 @@ export function onlyFields(value: Record<string, unknown>, fields: Set<string>) 
   if (unknown !== undefined) throw new InvalidRecordError(`unknown field ${unknown}`);
 }
 
+// copy: once per record signed or checked, with its session.
 const signedBytes = (domain: string, session: KeyId, record: object) =>
   encoder.encode(`${domain}\n${JSON.stringify({ session, ...record })}`);
 
@@ -36,6 +37,7 @@ const signedBytes = (domain: string, session: KeyId, record: object) =>
 export async function signRecord(session: CryptoKeyPair, domain: string, record: object) {
   const id = await keyId(session.publicKey);
   const sig = await sign(session.privateKey, signedBytes(domain, id, record));
+  // copy: once per record signed, with its signature.
   return encoder.encode(JSON.stringify({ ...record, sig: base64(sig) }));
 }
 

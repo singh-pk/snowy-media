@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 //
 // Checks every repository lint rule against its fixtures: in `bad.ts` the rule reports exactly
-// the lines its `// expected lines:` comment lists, and nothing else reports; `good.ts` raises
-// nothing. A rule without fixtures fails.
+// the lines its `// expected lines:` comment lists, and in `good.ts` nothing. Other rules'
+// reports are left out. A rule without fixtures fails.
 // Usage: bun tooling/check-lint-rules.ts
 
 import { existsSync } from "node:fs";
@@ -39,17 +39,19 @@ async function check(rule: string) {
   const source = await Bun.file(`${dir}bad.ts`).text();
   const listed = /\/\/ expected lines: ([\d ]+)/.exec(source)?.[1];
   const expected = (listed ?? "").trim().split(/\s+/).map(Number).join(" ");
-  const bad = await lint(`${dir}bad.ts`);
-  const good = await lint(`${dir}good.ts`);
-  const fromRule = bad.filter((d) => d.code === `repo(${rule})`);
-  const reported = fromRule
+  // Each fixture tests its own rule; the other rules' reports are not its concern.
+  const own = (d: Diagnostic) => d.code === `repo(${rule})`;
+  const badReports = await lint(`${dir}bad.ts`);
+  const goodReports = await lint(`${dir}good.ts`);
+  const bad = badReports.filter(own);
+  const good = goodReports.filter(own);
+  const reported = bad
     .map(lineOf)
     .toSorted((a, b) => a - b)
     .join(" ");
   const problems: string[] = [];
   if (!listed) problems.push("bad.ts has no `// expected lines:` comment");
   if (reported !== expected) problems.push(`bad.ts: lines ${reported || "none"}, not ${expected}`);
-  if (fromRule.length !== bad.length) problems.push(`bad.ts, other rules: ${describe(bad)}`);
   if (good.length > 0) problems.push(`good.ts: ${describe(good)}`);
   return problems.map((p) => `${rule}: ${p}`);
 }

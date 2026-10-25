@@ -72,7 +72,7 @@ export function createChatHoldings() {
    * it, this peer's own unsent ones, stay out, as they would until their batch came back.
    */
   function restore(author: KeyId, messages: ChatMessage[], checkpoints: Checkpoint[]) {
-    const newest = Math.max(0, ...checkpoints.map((cp) => cp.seq));
+    const newest = checkpoints.reduce((max, cp) => Math.max(max, cp.seq), 0);
     const proven = messages.filter((m) => m.seq <= newest);
     return queued(author, proven, checkpoints);
   }
@@ -110,7 +110,11 @@ export function createChatHoldings() {
     const kept = new Map<number, Checkpoint>();
     let floor = Infinity;
 
-    for (const [seq, cp] of [...held.checkpoints].toSorted(([a], [b]) => b - a)) {
+    // copy: a Map can't be sorted, so its checkpoints go into an array, highest first.
+    const highestFirst = [...held.checkpoints];
+    highestFirst.sort(([a], [b]) => b - a);
+
+    for (const [seq, cp] of highestFirst) {
       if (seq >= floor) continue;
 
       kept.set(seq, cp);
@@ -126,9 +130,9 @@ export function createChatHoldings() {
     if (!held.messages.has(from)) return undefined;
 
     const { first } = runOf(held, from);
-    const checkpoint = [...held.checkpoints.values()].find(
-      (cp) => cp.seq >= from && runOf(held, cp.seq).first === first,
-    );
+    const checkpoint = held.checkpoints
+      .values()
+      .find((cp) => cp.seq >= from && runOf(held, cp.seq).first === first);
     if (checkpoint === undefined) return undefined;
 
     const messages = Array.from({ length: checkpoint.seq - from + 1 }, (_, i) =>
@@ -156,7 +160,11 @@ export function createChatHoldings() {
 
     for (const [author, held] of authors) {
       const known = versions[author] ?? 0;
-      const seqs = [...held.messages.keys()].filter((s) => s > known).toSorted((a, b) => a - b);
+      const seqs = held.messages
+        .keys()
+        .filter((s) => s > known)
+        .toArray();
+      seqs.sort((a, b) => a - b);
 
       for (const seq of seqs) {
         if (seq !== known + 1 && linked(held, seq)) continue;
@@ -170,8 +178,12 @@ export function createChatHoldings() {
   }
 
   /** The checkpoints kept for an author, in seq order: one per run. */
-  const checkpoints = (author: KeyId) =>
-    [...(authors.get(author)?.checkpoints.values() ?? [])].toSorted((a, b) => a.seq - b.seq);
+  const checkpoints = (author: KeyId) => {
+    // copy: a Map can't be sorted, so its checkpoints go into an array, in seq order.
+    const ordered = [...(authors.get(author)?.checkpoints.values() ?? [])];
+    ordered.sort((a, b) => a.seq - b.seq);
+    return ordered;
+  };
 
   /** The highest seq held from an author, or 0. */
   const newest = (author: KeyId) => authors.get(author)?.newest ?? 0;
