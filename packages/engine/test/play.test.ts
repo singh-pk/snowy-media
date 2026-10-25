@@ -43,11 +43,11 @@ const SECONDS = Number(process.env.SNOWY_SYNC_SECONDS ?? 20);
 // frames up to 15 ms early and 27 ms late; the late bound there is SOFTWARE_LATE.
 const MAX_OFFSET = 0.02;
 const SOFTWARE_LATE = 0.05;
-// Where Chromium draws slower than real time (SLOW_DRAWING), video falls behind: ten runs on
-// CI's macOS runners showed frames up to 280 ms late, and 141 ms at the 99th percentile. There,
-// lateness is bounded by these, and logged.
+// Where Chromium draws slower than real time (SLOW_DRAWING), video falls behind: thirty runs on
+// CI's macOS runners showed frames up to 441 ms late, and from 56 to 199 ms at the 99th
+// percentile. There, lateness is bounded by these, and logged.
 const SLOW_LATE = 1;
-const SLOW_P99 = 0.15;
+const SLOW_P99 = 0.25;
 // And over a two-second play, the clock may be as far off as a frame may be late.
 const SLOW_REAL_TIME = SLOW_LATE;
 const realTime = SLOW_DRAWING ? SLOW_REAL_TIME : REAL_TIME;
