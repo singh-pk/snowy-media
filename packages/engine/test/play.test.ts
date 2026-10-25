@@ -304,3 +304,47 @@ test(`plays ${SPARSE} to the end with each frame on time`, async () => {
     await browser.close();
   }
 }, 60_000);
+
+test("a pause settles a play that waits for the browser to allow audio", async () => {
+  const browser = await launch();
+
+  try {
+    const tab = await browser.newPage();
+    await tab.goto(server.url.href);
+    const got = await tab.evaluate(
+      async ({ entry, page, file }) => {
+        // As Chromium holds resume until a user gesture, which Playwright's Chromium never
+        // asks for: the context does not start, so play waits.
+        const asked = Promise.withResolvers<void>();
+
+        AudioContext.prototype.resume = () => {
+          asked.resolve();
+          return new Promise<void>(() => {});
+        };
+
+        const engine: typeof import("../src/index") = await import(entry);
+        const support: typeof import("./support/page") = await import(page);
+        const canvas = document.querySelector("canvas");
+        if (!canvas) throw new Error("no canvas");
+        const player = await engine.createEngine({ canvas });
+        const res = await fetch(`/test/fixtures/${file}`);
+        const blob = await res.blob();
+        const handle = await support.fileHandle(file, blob);
+        await player.open(handle);
+        const playing = player.play();
+        // Once it is waiting for audio to start.
+        await asked.promise;
+        await player.pause();
+        await playing;
+        const time = player.currentTime;
+        player.close();
+        return time;
+      },
+      { entry: ENTRY, page: PAGE, file: FILE },
+    );
+
+    expect(got).toBe(0);
+  } finally {
+    await browser.close();
+  }
+}, 30_000);

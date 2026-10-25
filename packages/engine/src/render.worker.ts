@@ -187,12 +187,16 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
       const running = clock.outputRunning();
       const seen = clock.heard(performance.timeOrigin + time + refresh);
       // The clock starts up to a sample before `from`: the frame shown is never one before.
-      const drawn = output.present(Math.max(Math.round(seen * 1e6), playing.target));
+      const at = Math.max(Math.round(seen * 1e6), playing.target);
+      const drawn = output.present(at);
+      // Shown by the running clock once a frame is up and none due by it is still going up,
+      // not just as it runs; a decoder slower than the clock still lets it be shown.
+      const shown = running && output.current(at);
       const reached = output.reached(playing.target) ? playing.target : playing.reached;
 
-      if ((drawn && !playing.drawn) || (running && !playing.shown) || reached !== playing.reached) {
+      if ((drawn && !playing.drawn) || (shown && !playing.shown) || reached !== playing.reached) {
         playing.drawn ||= drawn;
-        playing.shown ||= running;
+        playing.shown ||= shown;
         playing.reached = reached;
         report();
       }

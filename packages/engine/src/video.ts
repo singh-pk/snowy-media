@@ -329,12 +329,18 @@ export function createVideoOutput(
     if (decoding.decodedTo() >= to) void prepare(to);
   }
 
+  /**
+   * Whether a frame is on screen and none decoded and due by `time` (microseconds) is still on
+   * its way up, however far decoding trails it.
+   */
+  function current(time: number) {
+    const coming = Math.min(pictures.first()?.timestamp ?? Infinity, uploads.stamps[0] ?? Infinity);
+    return state.shown !== undefined && coming > time;
+  }
+
   /** Whether the frame due at `time` (microseconds) is the one on screen. */
   function reached(time: number) {
-    // A frame due by then, still on its way up, is not on screen yet.
-    const coming = Math.min(pictures.first()?.timestamp ?? Infinity, uploads.stamps[0] ?? Infinity);
-    const decoded = state.ended || decoding.decodedTo() >= time;
-    return state.shown !== undefined && decoded && coming > time;
+    return current(time) && (state.ended || decoding.decodedTo() >= time);
   }
 
   /** Stops decoding and closes every frame. */
@@ -354,6 +360,7 @@ export function createVideoOutput(
     done,
     present,
     moveTo,
+    current,
     reached,
     close,
     /** The time, in microseconds, up to which every frame is decoded (src/decoding.ts). */
