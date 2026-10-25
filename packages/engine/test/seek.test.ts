@@ -11,7 +11,7 @@
 // Usage: bun run test.
 
 import { afterAll, expect, test } from "bun:test";
-import { decodable, launch } from "./support/browsers";
+import { decodable, launch, SLOW_DRAWING } from "./support/browsers";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
 
 interface Video {
@@ -48,9 +48,9 @@ const SETTLE = 100;
 // How far the clock may read from the target, in seconds: the audio starts on a whole sample.
 const SAMPLE = 1e-4;
 // How far the frame on screen may be from the one due at the clock while it plays, in seconds:
-// a frame and more, or on CI, whose virtual machines do not draw in real time, the play test's
-// bound there (test/play.test.ts).
-const SYNC = process.env.CI === "true" ? 1 : 0.1;
+// a frame and more, or where Chromium draws slower than real time, the play test's bound there
+// (test/play.test.ts).
+const SYNC = SLOW_DRAWING ? 1 : 0.1;
 const [width, height] = [320, 180];
 const server = await serveEngine(
   `<!doctype html><title>test</title><canvas width="${width}" height="${height}"></canvas>`,

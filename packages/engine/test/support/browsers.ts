@@ -34,14 +34,25 @@ const gpu = process.env.SNOWY_GPU ?? "";
 const args = ARGS[gpu];
 if (!args) throw new Error(`SNOWY_GPU=${gpu}: not a GPU`);
 const GPU: LaunchOptions = { args };
+/** Whether WebGPU runs in software here (SNOWY_GPU), as on CI's Linux and Windows runners. */
+export const SOFTWARE_GPU = gpu !== "";
 
 // The fixtures of `expected` (test/fixtures/expected.json) Chromium decodes here. With WebGPU in
 // software there is no hardware video decoder either, so no HEVC, which Chromium decodes only in
 // hardware; macOS, on a GPU, tests it.
 export function decodable<T extends { video?: { codec: string } }>(expected: Record<string, T>) {
-  const entries = Object.entries(expected).filter(([, e]) => !gpu || e.video?.codec !== "hevc");
+  const entries = Object.entries(expected).filter(
+    ([, e]) => !SOFTWARE_GPU || e.video?.codec !== "hevc",
+  );
   return Object.fromEntries(entries);
 }
+
+/**
+ * Whether Chromium draws slower than real time here: on CI's macOS runners, virtual machines
+ * whose pages get 30 animation frames a second, video falls behind the clock (test/play.test.ts).
+ * CI's Linux and Windows runners draw in software, in real time.
+ */
+export const SLOW_DRAWING = process.env.CI === "true" && process.platform === "darwin";
 
 /** The machine the tests and benchmarks stand for: "" for this one, or "low-end". */
 export const PROFILE = process.env.SNOWY_PROFILE ?? "";

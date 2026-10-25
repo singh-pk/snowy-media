@@ -13,7 +13,7 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { PCM_RATE } from "./support/audio";
-import { launch } from "./support/browsers";
+import { launch, SLOW_DRAWING, SOFTWARE_GPU } from "./support/browsers";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
 
 interface Video {
@@ -39,21 +39,21 @@ const WATCH = 2;
 const REAL_TIME = 0.25;
 const SECONDS = Number(process.env.SNOWY_SYNC_SECONDS ?? 20);
 // How far the frame on screen may be from the one due at the media time heard, in seconds.
+// Drawn in software (SOFTWARE_GPU), as CI's Linux and Windows runners draw, ten runs showed
+// frames up to 15 ms early and 27 ms late; the late bound there is SOFTWARE_LATE.
 const MAX_OFFSET = 0.02;
-// On CI's runners, a virtual machine's GPU or software, Chromium does not draw in real time
-// (on macOS its page gets 30 animation frames a second), so video falls behind: p99 82 ms on
-// macOS, up to three quarters of a second at worst. There, the offsets are bounded by these, and logged; the
-// bounds above hold on real hardware.
-const CI_LATE = 1;
-const CI_EARLY = 0.15;
-const CI_P99 = 0.15;
+const SOFTWARE_LATE = 0.05;
+// Where Chromium draws slower than real time (SLOW_DRAWING), video falls behind: thirty runs on
+// CI's macOS runners showed frames up to 441 ms late, and from 56 to 199 ms at the 99th
+// percentile. There, lateness is bounded by these, and logged.
+const SLOW_LATE = 1;
+const SLOW_P99 = 0.25;
 // And over a two-second play, the clock may be as far off as a frame may be late.
-const CI_REAL_TIME = CI_LATE;
-const ci = process.env.CI === "true";
-const realTime = ci ? CI_REAL_TIME : REAL_TIME;
+const SLOW_REAL_TIME = SLOW_LATE;
+const realTime = SLOW_DRAWING ? SLOW_REAL_TIME : REAL_TIME;
 // The bounds on a frame early and late, in seconds.
-const earliness = ci ? CI_EARLY : MAX_OFFSET;
-const lateness = ci ? CI_LATE : MAX_OFFSET;
+const earliness = MAX_OFFSET;
+const lateness = SLOW_DRAWING ? SLOW_LATE : SOFTWARE_GPU ? SOFTWARE_LATE : MAX_OFFSET;
 const server = await serveEngine(
   `<!doctype html><title>test</title><canvas width="${video.width}" height="${video.height}"></canvas>`,
 );
@@ -64,6 +64,8 @@ afterAll(() => server.stop(true));
 // negative while it is early, positive once it is late. The first frame is due from the start,
 // before its own time (docs/architecture.md#video-output).
 function offset(v: Video, id: number, time: number) {
+  // A frame number the fixture lacks is a misread, never a frame on time.
+  if (!Number.isInteger(id) || id < 0 || id >= v.pts.length) throw new Error(`no frame ${id}`);
   const [num = 1, den = 1] = v.timeBase.split("/").map(Number);
   const due = id === 0 ? -Infinity : ((v.pts[id] ?? 0) * num) / den;
   const next = ((v.pts[id + 1] ?? Infinity) * num) / den;
@@ -88,6 +90,15 @@ function frameAt(v: Video, time: number) {
 // frames before, with the frame due on the next read under a millisecond later. That is no
 // late frame: play prerolls a quarter second of video before the clock starts.
 const fresh = (reads: [time: number, id: number][]) => reads.slice(1);
+// The fewest reads a second of watching may give: the screen is read on every animation frame,
+// 15 to 25 a second where Chromium draws slower than real time and 60 or more elsewhere. Fewer,
+// and a check of every read checks too little.
+const MIN_READS = 10;
+
+// Whether `reads` over `seconds` of watching are enough to check.
+function enough(reads: unknown[], seconds: number, what: string) {
+  expect(reads.length, `${what}: reads`).toBeGreaterThanOrEqual(Math.floor(MIN_READS * seconds));
+}
 
 test(
   `plays ${FILE} with the frame on screen at the time heard`,
@@ -148,6 +159,7 @@ test(
         `last ${ms(got.playing.at(-1)?.[0] ?? 0) / 1000} s`,
       );
 
+      enough(got.playing, SECONDS, FILE);
       const last = got.playing.at(-1)?.[0] ?? 0;
       // It played in real time, from the start.
       expect(last).toBeGreaterThan(SECONDS - 1);
@@ -159,7 +171,7 @@ test(
       expect(late.offset, `late by ${of(late)}; first reads ${start.join(" ")}`).toBeLessThan(
         lateness,
       );
-      expect(p99, "the 99th percentile").toBeLessThan(ci ? CI_P99 : MAX_OFFSET);
+      expect(p99, "the 99th percentile").toBeLessThan(SLOW_DRAWING ? SLOW_P99 : MAX_OFFSET);
       // Paused: one time, one frame.
       expect(new Set(got.paused.map(([time]) => time)).size).toBe(1);
       expect(new Set(got.paused.map(([, id]) => id)).size).toBe(1);
@@ -221,6 +233,8 @@ test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
       const end = audio.resampled.frames / PCM_RATE;
       const [[pausedAt, pausedId] = [0, 0]] = play.paused;
       console.log(`${file}: ${span(play.first)}; paused at ${pausedAt} s; ${span(play.second)}`);
+      enough(play.first, WATCH, `${file} first`);
+      enough(play.second, WATCH, `${file} second`);
       // Started, and played from the start in real time, up to the end of the audio.
       expect(Math.abs((play.first.at(-1)?.[0] ?? 0) - Math.min(end, WATCH))).toBeLessThan(realTime);
       // Paused: one time, one frame.
@@ -292,6 +306,7 @@ test(`plays ${SPARSE} to the end with each frame on time`, async () => {
     );
 
     console.log(`${SPARSE}: ${span(reads)}`);
+    enough(reads, end + 0.5, SPARSE);
     expect(Math.abs((reads.at(-1)?.[0] ?? 0) - end)).toBeLessThan(realTime);
     expect(reads.at(-1)?.[1]).toBe(v.pts.length - 1);
 

@@ -258,7 +258,7 @@ async function referenceGrid(file: string, index: number, width: number, height:
 
 // A stream's packets as the engine's tests hash them: one line `pts,dts,key,size,crc32` per
 // packet, an unknown timestamp empty, crc32 in lowercase hex. dts is left out (`pts,key,...`)
-// unless the container stores it, as MP4 does: where it does not (Matroska), libavformat
+// unless the container stores it, as MP4 and QuickTime do: where it does not (Matroska), libavformat
 // guesses it from the decoder's delay, and the engine's demuxer has no video decoders, so the
 // guess depends on the build, not the file.
 function hashPackets(packets: Packet[], index: number, dts: boolean) {
@@ -387,7 +387,7 @@ for (const [name, fixture] of Object.entries(fixtures)) {
   const keyframes = packets.filter((p) => p.codec_type === "video" && p.flags.startsWith("K"));
   const reference = await referenceGrid(file, v.index, v.width, v.height);
 
-  const dts = name.endsWith(".mp4");
+  const dts = name.endsWith(".mp4") || name.endsWith(".mov");
 
   expected[name] = {
     format: probe.format.format_name,
