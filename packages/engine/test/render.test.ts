@@ -276,6 +276,7 @@ for (const [file, { video }] of Object.entries(expected)) {
       expect(got.shown.map((s) => s.drawn)).toEqual(drawn);
       const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
       // A turned frame's number is not where the reader looks; its grid shows the turn.
+      // oxlint-disable-next-line repo/no-conditional-expect -- the grid below checks a turned frame
       if (!turned) expect(ids).toEqual(frames);
       const r = correlation(got.grid, video.grid);
       expect(r, `${file} grid ${JSON.stringify(got.grid)}`).toBeGreaterThan(MIN_CORRELATION);

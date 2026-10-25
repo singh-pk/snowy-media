@@ -1,0 +1,29 @@
+{
+  "$schema": "../../node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "off"
+  },
+  "jsPlugins": [
+    {
+      "name": "repo",
+      "specifier": "./index.js"
+    }
+  ],
+  "rules": {
+    "no-debugger": "error",
+    "repo/blank-line-around-blocks": "error",
+    "repo/disable-needs-reason": "error",
+    "repo/no-access-modifiers": "error",
+    "repo/no-await-assertion": "error",
+    "repo/no-classes": "error",
+    "repo/no-conditional-expect": "error",
+    "repo/no-focused-tests": "error",
+    "repo/no-module-let": "error",
+    "repo/no-nested-await": "error",
+    "repo/no-process-comments": "error",
+    "repo/no-promise-chains": "error",
+    "repo/no-set-interval": "error",
+    "repo/no-timers": "error",
+    "repo/test-has-assertion": "error"
+  }
+}
