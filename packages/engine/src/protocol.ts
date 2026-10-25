@@ -91,8 +91,8 @@ export interface MediaInfo {
 // rate and channels. Unless it fails or the PCM ring closes
 // first, it says once, before it replies, that the audio is buffered (`buffered`): `preroll`
 // frames of it, a full ring, or all of it. It replies once it has written all the audio and the
-// END record, or once a consumer has closed its ring. On an error it writes the FAILED record
-// and replies with it.
+// END record, or once a consumer has closed its ring. On an error it ends the ring with FAILED
+// and replies with the error, the only report of it.
 export type ToMedia =
   | { type: "open"; id: number; file: File }
   | {

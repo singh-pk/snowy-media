@@ -5,9 +5,10 @@
 // with no message per packet. It is a byte stream of records: a 32-byte header, then the
 // payload, padded to 32 bytes. A record may wrap around the end of the ring, so a packet of
 // any size up to the capacity fits without wasting the space at the end. The producer blocks
-// (Atomics.wait) while the ring is full; the consumer never blocks, and waits (Atomics.waitAsync)
-// for the producer to notify it when it writes to an empty ring. A consumer that watches is
-// notified too when the producer's thread blocks, on this ring or on another one it writes.
+// (Atomics.wait) while the ring is full, except to fail, which takes no room; the consumer
+// never blocks, and waits (Atomics.waitAsync) for the producer to notify it when it writes to
+// an empty ring or fails. A consumer that watches is notified too when the producer's thread
+// blocks, on this ring or on another one it writes.
 //
 // Positions only grow, as 32-bit integers that wrap; the distance between them is the bytes
 // in use. Each side writes only its own position, so neither needs a lock.
@@ -23,6 +24,8 @@ const CLOSED = 4;
 const WATCHING = 5;
 // How many times the producer's thread has blocked while watched, a count to wait on.
 const BLOCKS = 6;
+// 1 once the producer has failed: the consumer reads FAILED after the records before it.
+const FAILURE = 7;
 const DATA = 64;
 // A header, and the alignment of every record, so a header never wraps.
 const HEADER = 32;
@@ -35,7 +38,7 @@ export const RING_CAPACITY = 1 << 23;
 
 /** The stream of the record that follows the last packet. */
 export const END = -1;
-/** The stream of the record that ends the packets early, because the producer failed. */
+/** The stream of the packet that ends the packets early, because the producer failed. */
 export const FAILED = -2;
 /**
  * FFmpeg's values the records carry, AV_PKT_FLAG_KEY and AV_NOPTS_VALUE, here so a consumer
@@ -184,15 +187,17 @@ export function createProducer(ring: SharedArrayBuffer) {
     bytes.set(src.subarray(offset, offset + first), start);
     if (first < size) bytes.set(src.subarray(offset + first, offset + size), 0);
     Atomics.store(control, WRITE, (written + need) | 0);
+    wakeConsumer();
+    return true;
+  }
 
-    // Taken, so a busy ring makes no notify calls.
+  // Taken, so a busy ring makes no notify calls.
+  function wakeConsumer() {
     const waiting = Atomics.load(control, CONSUMER_WAITING) === 1;
 
     if (waiting && Atomics.compareExchange(control, CONSUMER_WAITING, 1, 0) === 1) {
       Atomics.notify(control, CONSUMER_WAITING);
     }
-
-    return true;
   }
 
   /**
@@ -213,9 +218,13 @@ export function createProducer(ring: SharedArrayBuffer) {
     return offer(END, 0, 0n, 0n, 0, bytes, 0, 0);
   }
 
-  /** Writes the FAILED record in place of the remaining packets. */
+  /**
+   * Ends the packets with FAILED in place of the rest, at once: it takes no room, so a full
+   * ring whose consumer reads no more never holds it back.
+   */
   function fail() {
-    return write(FAILED, 0, 0n, 0n, 0, bytes, 0, 0);
+    Atomics.store(control, FAILURE, 1);
+    wakeConsumer();
   }
 
   /** Whether the consumer has closed the ring. */
@@ -291,10 +300,23 @@ export function createConsumer(
   // Where a record that wraps is put back together; it grows to the largest such packet.
   let joined = new Uint8Array(0);
 
-  /** The next packet, valid until `release`; undefined while the ring is empty or closed. */
+  /**
+   * The next packet, valid until `release`; undefined while the ring is empty or closed. Once
+   * the producer has failed and every record is read, a FAILED packet, which `release` leaves.
+   */
   function peek(): Packet | undefined {
     const read = control[READ] ?? 0;
-    if (Atomics.load(control, CLOSED) || Atomics.load(control, WRITE) === read) return undefined;
+    // Read before WRITE, so a failure seen comes after every record it sees.
+    const failed = Atomics.load(control, FAILURE) === 1;
+    if (Atomics.load(control, CLOSED)) return undefined;
+
+    if (Atomics.load(control, WRITE) === read) {
+      if (!failed) return undefined;
+      packet.stream = FAILED;
+      packet.data = bytes.subarray(0, 0);
+      return packet;
+    }
+
     const at = read & (capacity - 1);
     const size = words[at >> 2] ?? 0;
     packet.stream = words[(at >> 2) + 1] ?? 0;
@@ -317,10 +339,10 @@ export function createConsumer(
     return packet;
   }
 
-  /** Frees the packet `peek` returned; nothing once the ring is closed. */
+  /** Frees the packet `peek` returned; nothing once the ring is closed, or for FAILED. */
   function release() {
-    if (Atomics.load(control, CLOSED)) return;
     const read = control[READ] ?? 0;
+    if (Atomics.load(control, CLOSED) || Atomics.load(control, WRITE) === read) return;
     const size = words[(read & (capacity - 1)) >> 2] ?? 0;
     Atomics.store(control, READ, (read + padded(size)) | 0);
 
@@ -331,8 +353,8 @@ export function createConsumer(
   }
 
   /**
-   * Resolves once the ring holds a packet, or at once when it is closed; now and then on a
-   * late notify with the ring still empty, so a caller peeks again.
+   * Resolves once the ring holds a packet or the producer fails, or at once when it is closed;
+   * now and then on a late notify with the ring still empty, so a caller peeks again.
    */
   async function wait() {
     if (Atomics.load(control, CLOSED)) return;
@@ -340,7 +362,9 @@ export function createConsumer(
     // first. A producer that took the flag leaves it lowered, and the wait returns at once.
     Atomics.store(control, CONSUMER_WAITING, 1);
 
-    if (Atomics.load(control, WRITE) !== (control[READ] ?? 0)) {
+    const failed = Atomics.load(control, FAILURE) === 1;
+
+    if (failed || Atomics.load(control, WRITE) !== (control[READ] ?? 0)) {
       Atomics.store(control, CONSUMER_WAITING, 0);
       return;
     }

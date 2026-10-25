@@ -51,7 +51,7 @@ const timestamp = (t: bigint) => (t === AV_NOPTS_VALUE ? "" : String(t));
 /**
  * Reads `ring` to its END record and resolves with each stream's packet count
  * and the SHA-256 of its lines `pts,dts,key,size,crc32`, without dts unless `dts`
- * (scripts/gen-fixtures.ts); or with "failed" at a FAILED record.
+ * (scripts/gen-fixtures.ts); or with "failed" at FAILED.
  */
 export async function hashRing(ring: SharedArrayBuffer, dts: boolean) {
   const consumer = createConsumer(ring);
@@ -402,6 +402,38 @@ export async function failInWorker(p: VideoParams) {
   const error = await failed.promise;
   decoder.close();
   return error.message;
+}
+
+/**
+ * Decodes video stream `stream` of the file open in `media` from a demux that fails at once,
+ * as one from a negative time does. Returns the media worker's error, and how the output ended:
+ * "rejected" with its error, or whether it decoded to the end.
+ */
+export async function failDemux(
+  media: ReturnType<typeof startMedia>,
+  stream: number,
+  p: VideoParams,
+) {
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("no GPU adapter");
+  const device = await adapter.requestDevice();
+  const canvas = new OffscreenCanvas(p.width, p.height);
+  const context = canvas.getContext("webgpu");
+  if (!(context instanceof GPUCanvasContext)) throw new Error("no WebGPU context");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "opaque" });
+  const ring = createRing(RING_CAPACITY);
+  const compositor = createCompositor(device, context, format);
+  const output = createVideoOutput(ring, p, compositor, wasm, () => {});
+  const results = await Promise.allSettled([
+    media.request({ type: "demux", ring, streams: [stream], from: -1 }),
+    output.done,
+  ]);
+  output.close();
+  device.destroy();
+  const [demuxed, done] = results;
+  const message = demuxed.status === "rejected" ? String(demuxed.reason) : "replied";
+  return { message, done: done.status === "rejected" ? String(done.reason) : output.ended() };
 }
 
 /**

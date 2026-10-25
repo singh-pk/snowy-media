@@ -87,12 +87,15 @@ function plan(video: Video) {
   return { frames, times, drawn };
 }
 
-test("a decoder the video decode worker fails reports why, and the next decodes", async () => {
+test("a decoder the video decode worker fails reports why, closes cleanly, and the next decodes", async () => {
   const browser = await launch();
   const name = "mpeg2-aac.mov";
 
   try {
     const tab = await browser.newPage();
+    // An uncaught error, a promise rejected with no handler among them.
+    const errors: string[] = [];
+    tab.on("pageerror", (e) => errors.push(e.message));
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ page, worker, n }) => {
@@ -114,6 +117,36 @@ test("a decoder the video decode worker fails reports why, and the next decodes"
     );
     expect(got.message).toContain("decoder_open_params");
     expect(got.shown).toEqual([{ drawn: true, id: 0 }]);
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+}, 60_000);
+
+test("a demux that fails stops decoding, leaving the media worker's error the only report", async () => {
+  const browser = await launch();
+  const name = "h264-aac.mp4";
+
+  try {
+    const tab = await browser.newPage();
+    await tab.goto(server.url.href);
+    const got = await tab.evaluate(
+      async ({ page, worker, n }) => {
+        const support: typeof import("./support/page") = await import(page);
+        const media = support.startMedia(worker);
+        const res = await fetch(`/test/fixtures/${n}`);
+        const blob = await res.blob();
+        const opened = await media.request({ type: "open", file: new File([blob], n) });
+        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
+        const params = opened.video[0];
+        if (!params) throw new Error(`${n}: no video parameters`);
+        const result = await support.failDemux(media, 0, params);
+        media.stop();
+        return result;
+      },
+      { page: PAGE, worker: MEDIA_WORKER, n: name },
+    );
+    expect(got).toEqual({ message: "Error: demux: from -1", done: false });
   } finally {
     await browser.close();
   }

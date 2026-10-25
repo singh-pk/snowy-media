@@ -56,8 +56,9 @@ const frameBytes = (frame: DecodedFrame) =>
 
 /**
  * Decodes the packets of the stream with parameters `p` from `ring`, with WebCodecs or
- * `wasm`'s decoders, and shows them with `compositor`. `done` resolves once the decoder has decoded the last packet or the
- * output is closed, and rejects if decoding fails. `changed` runs on each event that may change
+ * `wasm`'s decoders, and shows them with `compositor`. `done` resolves once the decoder has
+ * decoded the last packet, the producer has failed (it reports why itself) or the output is
+ * closed, and rejects if decoding fails. `changed` runs on each event that may change
  * how far decoding is: a frame decoded, the decoder taking a packet, a wait for packets or for
  * the media time begun, the end decoded, and the media worker blocking while `watch`ed. `freed`
  * runs as the ring frees room for a media worker that waits, and as it closes (src/ring.ts). It
@@ -242,7 +243,8 @@ export function createVideoOutput(
       }
 
       if (packet.stream === END) break;
-      if (packet.stream === FAILED) throw new Error("demuxing failed");
+      // The media worker reports why, to the main thread, which stops this play.
+      if (packet.stream === FAILED) return;
 
       // The decoder has no room for it yet; a packet decoded makes some.
       if (!decoder.fits(packet.data.length)) {

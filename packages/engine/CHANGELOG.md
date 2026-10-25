@@ -24,6 +24,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Paused while video runs behind, the frame due no longer stays off screen for the whole pause, an older frame showing instead.
 - A `pause`, `open` or `close` settles a `play` still waiting for the browser to allow audio; it no longer stays pending until a user gesture.
 - `play` resolves once the frame due by the clock heard is on screen, not as soon as the clock runs, and a `seek` while playing that a `pause` interrupts resolves once its frame is on screen, as a paused seek does.
+- A demux failure reports its own error, not `demuxing failed`, and the media worker never hangs reporting it while its ring is full and no longer read.
+- Closing an FFmpeg-decoded video stream without flushing it no longer leaves an unhandled promise rejection in the render worker.
 - WebCodecs video decoders now get the colour the file states (primaries, transfer, matrix and range), so a VP9 HDR stream, whose bitstream does not state its transfer, is no longer decoded as BT.709 SDR.
 
 ## [0.1.0] - 2026-10-24
