@@ -1,14 +1,19 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: MIT
 //
-// Checks every repository lint rule against its fixtures: in `bad.ts` the rule reports exactly
-// the lines its `// expected lines:` comment lists, and in `good.ts` nothing. Other rules'
-// reports are left out. A rule without fixtures fails.
+// Checks every repository lint rule, for oxlint and for markdownlint, against its fixtures: in
+// `bad.ts` (or `bad.md`) the rule reports exactly the lines its `expected lines:` comment
+// lists, and in `good.ts` (or `good.md`) nothing. Other rules' reports are left out. A rule
+// without fixtures fails.
 // Usage: bun tooling/check-lint-rules.ts
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { lint as lintMarkdown } from "markdownlint/promise";
+import type { Rule } from "markdownlint";
 
 const ROOT = new URL("oxlint-rules/", import.meta.url);
+const MD_ROOT = new URL("markdownlint-rules/", import.meta.url);
+const MD_FIXTURES = new URL("fixtures/", MD_ROOT);
 const FIXTURES = new URL("fixtures/", ROOT);
 const CONFIG = new URL("fixtures.json", ROOT).pathname;
 const OXLINT = new URL("../node_modules/.bin/oxlint", import.meta.url).pathname;
@@ -56,12 +61,41 @@ async function check(rule: string) {
   return problems.map((p) => `${rule}: ${p}`);
 }
 
+// A markdown rule, checked the same way against `bad.md` and `good.md`, with `<!-- expected
+// lines: -->` in `bad.md`.
+async function checkMarkdown(name: string) {
+  const dir = new URL(`${name}/`, MD_FIXTURES).pathname;
+  const bad = `${dir}bad.md`;
+  const good = `${dir}good.md`;
+  if (!existsSync(bad) || !existsSync(good))
+    return [`${name}: no fixtures/${name}/bad.md and good.md`];
+  const rule: { default: Rule } = await import(new URL(`${name}.js`, MD_ROOT).href);
+  const config = { default: false, [name]: true };
+  const results = await lintMarkdown({ files: [bad, good], customRules: [rule.default], config });
+  const source = await Bun.file(bad).text();
+  const listed = /<!-- expected lines: ([\d ]+)-->/.exec(source)?.[1];
+  const expected = (listed ?? "").trim().split(/\s+/).map(Number).join(" ");
+  const reported = (results[bad] ?? []).map((e) => e.lineNumber).join(" ");
+  const problems: string[] = [];
+  if (!listed) problems.push("bad.md has no `<!-- expected lines: -->` comment");
+  if (reported !== expected) problems.push(`bad.md: lines ${reported || "none"}, not ${expected}`);
+  const extra = (results[good] ?? []).map((e) => `line ${e.lineNumber}`).join(", ");
+  if (extra !== "") problems.push(`good.md: ${extra}`);
+  return problems.map((p) => `${name}: ${p}`);
+}
+
 // The plugin is plain JavaScript, so it is imported by URL, untyped.
 const plugin: { default: { rules: Record<string, unknown> } } = await import(
   new URL("index.js", ROOT).href
 );
-const rules = Object.keys(plugin.default.rules);
-const results = await Promise.all(rules.map(check));
+const markdownRules = readdirSync(MD_ROOT)
+  .filter((file) => file.endsWith(".js"))
+  .map((file) => file.slice(0, -3));
+const rules = [...Object.keys(plugin.default.rules), ...markdownRules];
+const results = await Promise.all([
+  ...Object.keys(plugin.default.rules).map(check),
+  ...markdownRules.map(checkMarkdown),
+]);
 const failing = results.filter((r) => r.length > 0);
 for (const problem of failing.flat()) console.error(problem);
 console.log(`${rules.length - failing.length}/${rules.length} rules pass their fixtures`);

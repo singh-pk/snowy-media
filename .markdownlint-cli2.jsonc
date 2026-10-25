@@ -7,6 +7,7 @@
     "MD041": false, // skills and agents start with YAML front matter
     "MD060": false,
   },
+  "customRules": ["./tooling/markdownlint-rules/no-slop.js"],
   "globs": ["**/*.md", ".agents/**/*.md", ".claude/**/*.md", ".github/**/*.md"],
   "ignores": [
     "**/node_modules/**",
@@ -14,5 +15,6 @@
     "packages/ffmpeg/bench/media/**",
     "packages/ffmpeg/bench/variants/**",
     "LICENSES/**",
+    "tooling/markdownlint-rules/fixtures/**",
   ],
 }

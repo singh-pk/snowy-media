@@ -13,6 +13,20 @@ The playback pipeline of [Snowy](https://github.com/singh-pk/snowy-media): it re
 > [!NOTE]
 > In development: `bun add @snowy-media/engine`. Until 1.0 a minor version may change the API. It plays a file's first video and audio track (a file without audio does not play yet), and seeks and scrubs frame-exactly; see the [changelog](CHANGELOG.md) for what is there so far.
 
+## How it works
+
+```mermaid
+flowchart LR
+  handle["FileSystemFileHandle"] --> media["Media worker<br/>FFmpeg core: reads, demuxes,<br/>decodes and resamples audio"]
+  media -- "packet ring" --> render["Render worker<br/>WebCodecs, WebGPU"]
+  render <-- "packets, frames" --> decode["Video decode worker<br/>FFmpeg video modules,<br/>for what WebCodecs can't decode"]
+  media -- "PCM ring" --> worklet["AudioWorklet<br/>plays the audio, owns the clock"]
+  worklet -. "clock" .-> render
+  render --> canvas["canvas"]
+```
+
+Each worker is its own file, and the rings are `SharedArrayBuffer`s, so no packet or sample goes through `postMessage`. [docs/architecture.md](docs/architecture.md) is the design.
+
 ## Requirements
 
 A page served with cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) in desktop Chromium (Chrome, Edge), which has all it needs: WebAssembly SIMD and threads, AudioWorklet, WebGPU on an `OffscreenCanvas` in a worker, and WebCodecs. There is no fallback: where something is missing, `createEngine` says what.
