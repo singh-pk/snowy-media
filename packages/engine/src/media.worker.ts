@@ -602,7 +602,7 @@ function createMedia(core: CoreModule) {
     }
   }
 
-  // pump, and on an error the FAILED record, so the thread reading the ring stops too; the
+  // pump, and on an error fails the ring, so the thread reading it stops too; the
   // error itself goes to whoever asked. `buffered` runs once the audio is buffered ahead.
   function demux(
     ring: SharedArrayBuffer,

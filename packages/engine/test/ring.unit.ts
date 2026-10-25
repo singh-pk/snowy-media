@@ -12,6 +12,7 @@ import {
   createProducer,
   createRing,
   END,
+  FAILED,
   KEY_FLAG,
   NO_TIMESTAMP,
 } from "../src/ring";
@@ -166,6 +167,43 @@ test("offer writes only what fits, and a waiting producer hears each release and
   expect(producer.closed()).toBe(true);
   expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 1)).toBe(false);
   expect(producer.offerEnd()).toBe(false);
+});
+
+test("a producer fails at once on a full ring, and the consumer reads FAILED after every packet", async () => {
+  const ring = createRing(256);
+  const producer = createProducer(ring);
+  const consumer = createConsumer(ring);
+  const data = new Uint8Array(64);
+  // Two records of 64 bytes and two END records fill the 256 bytes.
+  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 64)).toBe(true);
+  expect(producer.offer(0, 0, 1n, 1n, 1, data, 0, 64)).toBe(true);
+  expect(producer.offerEnd()).toBe(true);
+  expect(producer.offerEnd()).toBe(true);
+  expect(producer.hasRoom(0, 0)).toBe(false);
+  producer.fail();
+  const read: (number | undefined)[] = [];
+
+  for (let packet = consumer.peek(); packet?.stream !== FAILED; packet = consumer.peek()) {
+    read.push(packet?.stream);
+    consumer.release();
+  }
+
+  expect(read).toEqual([0, 0, END, END]);
+  // FAILED stays, whatever is released.
+  consumer.release();
+  expect(consumer.peek()?.stream).toBe(FAILED);
+  await consumer.wait();
+  consumer.close();
+});
+
+test("a failure wakes the consumer waiting on an empty ring", async () => {
+  const ring = createRing(256);
+  const consumer = createConsumer(ring);
+  const waited = consumer.wait();
+  createProducer(ring).fail();
+  await waited;
+  expect(consumer.peek()?.stream).toBe(FAILED);
+  consumer.close();
 });
 
 test("hasRoom says whether a record fits with room to spare", () => {

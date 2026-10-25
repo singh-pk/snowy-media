@@ -79,7 +79,8 @@ export interface Decoder {
 interface Open {
   events: DecoderEvents;
   queued: number;
-  flushed: PromiseWithResolvers<void>;
+  // Made by a flush, so a close without one rejects nothing no one awaits.
+  flushed?: PromiseWithResolvers<void>;
 }
 
 /**
@@ -189,7 +190,7 @@ export function createWasmVideo(
       reason.set(record.data);
       decoder?.events.error(new Error(text.decode(reason.subarray(0, record.data.length))));
     } else {
-      decoder?.flushed.resolve();
+      decoder?.flushed?.resolve();
     }
   }
 
@@ -272,8 +273,7 @@ export function createWasmVideo(
     }
 
     const id = state.next++;
-    const flushed = Promise.withResolvers<void>();
-    const decoder: Open = { events, queued: 0, flushed };
+    const decoder: Open = { events, queued: 0 };
     open.set(id, decoder);
     const [num, den] = p.timeBase;
     const index = VIDEO_MODULES.indexOf(module);
@@ -295,6 +295,7 @@ export function createWasmVideo(
         put((id << KIND_BITS) | TO_VIDEO.packet, flags, pts, dts, duration, data, data.length);
       },
       flush() {
+        decoder.flushed = Promise.withResolvers<void>();
         put((id << KIND_BITS) | TO_VIDEO.flush);
         return decoder.flushed.promise;
       },
@@ -303,7 +304,7 @@ export function createWasmVideo(
       // A flush under way ends, as VideoDecoder.close() ends one.
       close() {
         if (!open.delete(id)) return;
-        decoder.flushed.reject(new DOMException("closed", "AbortError"));
+        decoder.flushed?.reject(new DOMException("closed", "AbortError"));
         put((id << KIND_BITS) | TO_VIDEO.close);
       },
     };
