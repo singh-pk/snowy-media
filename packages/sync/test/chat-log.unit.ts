@@ -46,11 +46,14 @@ test("messages with the same clock value sort by author", async () => {
   const b = await bob.write({ kind: "text", text: "b" });
   expect(a.hlc).toBe(b.hlc);
 
-  const log = createChatLog();
-  log.add(a, ZERO);
-  log.add(b, ZERO);
-  const first = alice.id < bob.id ? "a" : "b";
-  expect(texts(log)[0]).toBe(first);
+  // Both arrival orders, so the comparison is made each way round whichever key sorts first.
+  const inOrder = createChatLog();
+  const reversed = createChatLog();
+  for (const m of [a, b]) inOrder.add(m, ZERO);
+  for (const m of [b, a]) reversed.add(m, ZERO);
+  const byAuthor = alice.id < bob.id ? ["a", "b"] : ["b", "a"];
+  expect(texts(inOrder)).toEqual(byAuthor);
+  expect(texts(reversed)).toEqual(byAuthor);
 });
 
 test("a message that sorts below the peer's clock when it arrives is marked late", async () => {

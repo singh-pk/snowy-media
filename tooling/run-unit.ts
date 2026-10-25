@@ -13,8 +13,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { Glob } from "bun";
 import { chromium, type Page } from "playwright";
+import { COVERAGE, type ScriptCoverage, watchWorker, writeReport } from "./coverage";
 import { serve } from "./test-server";
-import type { FromUnitWorker } from "./unit-worker";
+import type { FromUnitWorker, ToUnitWorker } from "./unit-worker";
 
 // How long a file may take to load, and a test to run, before it counts as hung. The load needs
 // a limit of its own: its tests are registered only once their names are known.
@@ -27,6 +28,8 @@ type Loaded = Extract<FromUnitWorker, { type: "loaded" }>;
 interface Unit {
   loaded: Promise<Loaded>;
   run: (index: number) => Promise<string[]>;
+  /** Has the worker import its file. */
+  start: () => void;
   /** Ends the worker, and with it a test still waiting, so no call is left as the page closes. */
   stop: () => void;
 }
@@ -44,8 +47,9 @@ async function settled<T>(promise: Promise<T>): Promise<{ value: T } | { error: 
   }
 }
 
-// Starts the worker for `url` in `tab`; resolves with its test names, or a load that failed.
-async function load(tab: Page, url: string): Promise<Loaded> {
+// Starts the worker for `url` in `tab`, once `ready` has; resolves with its test names, or a
+// load that failed.
+async function load(tab: Page, url: string, ready: Promise<void>): Promise<Loaded> {
   await tab.evaluate((worker) => {
     const unitWorker = new Worker(worker, { type: "module" });
     const loaded = Promise.withResolvers<Loaded>();
@@ -69,8 +73,12 @@ async function load(tab: Page, url: string): Promise<Loaded> {
     function run(index: number) {
       const ran = Promise.withResolvers<string[]>();
       waiting.set(index, ran.resolve);
-      unitWorker.postMessage(index);
+      unitWorker.postMessage(index satisfies ToUnitWorker);
       return ran.promise;
+    }
+
+    function start() {
+      unitWorker.postMessage("start" satisfies ToUnitWorker);
     }
 
     function stop() {
@@ -78,22 +86,31 @@ async function load(tab: Page, url: string): Promise<Loaded> {
       for (const done of waiting.values()) done(["stopped: it did not finish"]);
     }
 
-    (globalThis as WithUnit).unit = { loaded: loaded.promise, run, stop };
+    (globalThis as WithUnit).unit = { loaded: loaded.promise, run, start, stop };
   }, url);
 
+  // The deadline covers waiting for `ready` too, which may never come.
   const hung = Promise.withResolvers<Loaded>();
   const deadline = setTimeout(
     () => hung.resolve({ type: "loaded", names: [], error: `did not load in ${LOAD_MS} ms` }),
     LOAD_MS,
   );
-  const loaded = tab.evaluate(async () => {
+  const result = await Promise.race([started(tab, ready), hung.promise]);
+  clearTimeout(deadline);
+  return result;
+}
+
+// Has the worker in `tab` import its file once `ready` has, and resolves with what it posted.
+async function started(tab: Page, ready: Promise<void>): Promise<Loaded> {
+  const isReady = await settled(ready);
+  if ("error" in isReady) return { type: "loaded", names: [], error: String(isReady.error) };
+  await tab.evaluate(() => (globalThis as WithUnit).unit?.start());
+
+  return await tab.evaluate(async () => {
     const unit = (globalThis as WithUnit).unit;
     if (!unit) throw new Error("no unit worker");
     return await unit.loaded;
   });
-  const result = await Promise.race([loaded, hung.promise]);
-  clearTimeout(deadline);
-  return result;
 }
 
 interface Options {
@@ -121,28 +138,33 @@ export async function runUnitTests(pkg: URL, { support = [] }: Options = {}) {
     outdir,
     target: "browser",
     format: "esm",
+    sourcemap: "external",
   });
   if (!built.success) throw new AggregateError(built.logs, "unit tests: build failed");
   const server = serve(pkg, "<!doctype html><title>unit tests</title>");
   const browser = await chromium.launch();
+  // What each file's worker ran, when coverage is collected.
+  const scripts: ScriptCoverage[] = [];
 
   afterAll(async () => {
     await browser.close();
     await server.stop(true);
+    if (COVERAGE) await writeReport(dir, scripts);
   });
 
   const loads = files.map(async (file) => {
     const tab = await browser.newPage();
     await tab.goto(server.url.href);
+    const coverage = await (COVERAGE ? watchWorker(tab) : undefined);
     const bundle = `/test/dist/unit/${file.slice("test/".length, -".ts".length)}.js`;
     const url = `/test/dist/unit/runner/unit-worker.js?file=${encodeURIComponent(bundle)}`;
-    const loaded = await load(tab, url);
-    return { file, tab, loaded };
+    const loaded = await load(tab, url, coverage?.started ?? Promise.resolve());
+    return { file, tab, loaded, coverage };
   });
 
   const opened = await Promise.all(loads);
 
-  for (const { file, tab, loaded } of opened) {
+  for (const { file, tab, loaded, coverage } of opened) {
     describe(file, () => {
       // The test still running, if it has hung: the ones after it in the file wait behind it.
       // Once the file is done, a hung one, abandoned, has nothing left to report.
@@ -150,8 +172,11 @@ export async function runUnitTests(pkg: URL, { support = [] }: Options = {}) {
 
       afterAll(async () => {
         state.done = true;
+        const taken = await settled(coverage?.take() ?? Promise.resolve([]));
         await tab.evaluate(() => (globalThis as WithUnit).unit?.stop());
         await tab.close();
+        if ("error" in taken) throw taken.error;
+        scripts.push(...taken.value);
       });
 
       // A file that fails to load, or registers nothing, is a failure of its own.

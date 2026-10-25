@@ -1,0 +1,19 @@
+{
+  "src/batch.ts": 100,
+  "src/branches.ts": 98,
+  "src/document.ts": 100,
+  "src/entry.ts": 100,
+  "src/folder.ts": 95,
+  "src/history.ts": 98,
+  "src/ids.ts": 100,
+  "src/layout.ts": 100,
+  "src/plan.ts": 100,
+  "src/position.ts": 100,
+  "src/project.ts": 99,
+  "src/schema.ts": 100,
+  "src/serial.ts": 100,
+  "src/signed.ts": 100,
+  "src/storyline.ts": 100,
+  "src/time.ts": 100,
+  "src/undo.ts": 87
+}

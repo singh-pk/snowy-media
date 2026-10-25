@@ -3,6 +3,7 @@ node_modules/
 .claude/settings.local.json
 packages/*/dist/
 packages/*/test/dist/
+packages/*/coverage/
 # Generated from LICENSES/ when a package is packed.
 packages/*/LICENSE
 packages/ffmpeg/.build.log

@@ -1,0 +1,19 @@
+{
+  "src/audio.ts": 0,
+  "src/audio.worklet.ts": 0,
+  "src/codec.ts": 84,
+  "src/compositor.ts": 34,
+  "src/decoding.ts": 100,
+  "src/frames.ts": 100,
+  "src/index.ts": 0,
+  "src/io.ts": 0,
+  "src/media.worker.ts": 0,
+  "src/pcm.ts": 93,
+  "src/platform.ts": 0,
+  "src/protocol.ts": 0,
+  "src/render.worker.ts": 0,
+  "src/ring.ts": 97,
+  "src/video.ts": 0,
+  "src/video.worker.ts": 0,
+  "src/wasm-video.ts": 0
+}
