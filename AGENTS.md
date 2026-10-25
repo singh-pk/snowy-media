@@ -39,6 +39,7 @@ Run `bun run check` before every commit; the hook runs it anyway.
 | `tooling/check-baseline.ts`, `tooling/lint-baseline.json` | the size and duplication limits (rule 7), and the code that predates them, which may only shrink |
 | `tooling/test-server.ts`, `tooling/run-unit.ts`, `tooling/unit.ts`, `tooling/unit-worker.ts` | serving a package to Chromium for its tests and benchmarks, and running unit tests there (rule 2) |
 | `tooling/coverage.ts`, `tooling/check-coverage.ts` | line coverage of `src/` from the unit tests' workers, and the per-file floors it may not fall below (rule 11) |
+| `tooling/lint-edited.ts` | the Claude Code hook that lints and format-checks each file an agent edits (`.claude/settings.json`) |
 | `scripts/` | repository scripts, such as `settings.ts`, which applies `.github/settings.yml` |
 | `.agents/skills/` | task playbooks, also linked into `.claude/skills` |
 | `brand/` | the logo, avatar and social preview, and the rules for using them; trademarks, not licensed ([TRADEMARKS.md](TRADEMARKS.md)) |
@@ -61,10 +62,27 @@ Shared configuration lives once, at the root: `tsconfig.base.json`, `.oxlintrc.j
 10. **Packages are headless.** A package is framework-agnostic and unstyled: no CSS, no UI framework or component library, and nothing it adds to the DOM; it draws only into what the app hands it, such as a canvas. It carries no product policy either: no telemetry or analytics, no accounts, billing or usage limits, and no call to a service Snowy runs. Those belong to Snowy's apps and their server. Where an app needs a say, the package takes a neutral extension point, such as a callback, that knows nothing of the app's policy and allows everything when the app passes none. A package never limits quality: no cap on resolution, bitrate, frame rate, length or exports, and no watermark.
 11. **Tests are honest.** An expected value comes from a source independent of the code under test, never from that code. A tolerance is the measured spread of the setup it applies to, with its reason in a comment, and is never widened so that one runner passes. A test that could see nothing asserts how much it saw, such as a minimum number of reads, so it cannot pass vacuously. A test waits on an event, never a sleep. Each `src/` file's line coverage by the unit tests may not fall below its floor in the package's `coverage-floor.json`, which CI checks; `bun tooling/check-coverage.ts <name> --update` raises the floors, adds new files and drops gone ones, and lowering a floor is a hand edit with its reason in the pull request. Code run only by page tests or in a worker a test starts, such as the engine's workers or sync's relay, is not measured yet, so its floor is 0 or what the unit tests reach.
 
+## Standards
+
+What every change is held to, and what holds it. A reviewer doesn't repeat what a tool checks; each package's `## Review` section adds what matters there.
+
+| Standard | Held by |
+| --- | --- |
+| One way of writing code: formatting, the house rules, sizes, no repeated blocks (rule 7) | `bun run check` |
+| Each `src/` file says its job in the package's Map; a README is short, drawn and ends with its licence (rule 8) | `bun run lint:structure` |
+| Documents say what is there, without marketing words or plans (rule 8) | `bun run lint:md` |
+| Tests run the code they claim to: per-file coverage floors (rule 11) | `tooling/check-coverage.ts`, in CI |
+| A name says what a file or function holds or does: no `utils`, `helpers`, `manager`, `misc` or `common` | review |
+| A file has one job, which its Map row names | review |
+| A comment says why, never what the next line does or how the code came to be | review |
+| One way per concern: errors, cleanup, events and state follow what the package already does | review |
+| Nothing written twice that the duplication check misses: a second helper, constant or type for the same thing | review |
+| A test fails for the bug it names: its expectation comes from an independent source, and no change loosens an assertion in the same diff that changes the code it checks | review, and the `verify-tests` skill |
+
 ## Before you open a pull request
 
 1. `bun run check` and `bun test` pass, plus any extra check the package's AGENTS.md asks for.
-2. Review your own diff with the `code-reviewer` agent (`.claude/agents/code-reviewer.md`) in a fresh context, and fix what it finds.
+2. Review your own diff with the `code-reviewer` agent (`.claude/agents/code-reviewer.md`) in a fresh context, and fix what it finds. It holds the diff to the standards above and the `## Review` section of each package it touches.
 3. Title the pull request as a Conventional Commit, fill in the template, and say which parts an agent wrote.
 
 ## Skills
@@ -73,4 +91,7 @@ Task playbooks in [`.agents/skills`](.agents/skills) (also linked into `.claude/
 
 | Skill | Use it to |
 | --- | --- |
+| `audit-package` | audit a whole package against the standards and its `## Review` section, and rank what is wrong |
 | `triage-issue` | label a new issue and ask for what is missing |
+| `verify-tests` | find what the tests miss, by breaking the code on purpose and seeing which change no test catches |
+| `write-readme` | write or rewrite a package's README in the shape `lint:structure` checks |

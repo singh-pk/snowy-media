@@ -44,6 +44,13 @@ A full FFmpeg build takes 20+ minutes; changing only `src/` relinks in under a m
 
 Before a pull request that touches the `Dockerfile`, `build/` or `src/`, rebuild and check `shasum -a 256 -c dist.sha256`.
 
+## Review
+
+Beyond the rules above and [docs/architecture.md](docs/architecture.md), a reviewer checks:
+
+- **FFmpeg use.** Every negative `AVERROR` return is checked; every `av_*alloc` and `sny_open` has its free or close on every path, errors included; timestamps and sizes stay `int64_t` in C and `bigint` in JavaScript; I/O positions are right at both ends.
+- **Copies and reads.** No extra copy of packet data, no allocation per packet in JavaScript, and no small reads through `FileReaderSync`.
+
 ## Skills
 
 | Skill | Use it to |

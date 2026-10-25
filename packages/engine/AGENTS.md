@@ -58,3 +58,11 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 8. **No interface.** The engine adds nothing to the DOM: it draws into the canvas it is handed and plays through its own `AudioContext`; the player and the editor own the interface.
 9. **A failure is reported once and never blocks.** The thread that hits it reports why to the main thread; the threads it reaches through a ring or a message stop without reporting it again. Reporting a failure never waits for room in a ring or for a reader. A promise that can reject has a handler before it can.
 10. **Stopping leaves nothing behind.** After a stop, a close or a failure, whatever was waiting is resolved or rejected, and no state of that run, such as a flag, a half-sent packet or a pending promise, reaches the next.
+
+## Review
+
+Beyond the rules above, a reviewer checks:
+
+- **Copies.** Each copy of packet, sample or frame data and each read back from the GPU is one the path cannot do without, and its `// copy:` or `// readback:` reason is true. A WebCodecs frame is imported, never read back, wherever its colour measures as FFmpeg's ([Colour](docs/architecture.md#colour)), and an FFmpeg frame is uploaded from the module's memory without a copy on the CPU.
+- **Transfers.** A buffer posted to another thread is transferred or shared, never cloned.
+- **One path per job.** Codecs and pixel formats share the decode, convert and draw code instead of growing a parallel copy each.

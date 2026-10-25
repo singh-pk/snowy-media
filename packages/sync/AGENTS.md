@@ -49,3 +49,12 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 3. **The relay stores nothing.** Never rely on it keeping an object after forwarding it.
 4. **Transports stay behind `Link`.** The scheduler, the store and chat never refer to MoQ or WebRTC directly.
 5. **Authorization checks keys, not plans.** `src/relay-auth.ts` decides only what signatures and grants allow. Limits on who may join or edit beyond that, and accounts, are the app's policy; the app applies it through `admit` ([Admission](docs/architecture.md#admission)), and the package never gains the policy itself.
+
+## Review
+
+Beyond the rules above and [docs/architecture.md](docs/architecture.md), a reviewer checks:
+
+- **Shortest path.** A chunk comes from where [Choosing where each chunk comes from](docs/architecture.md#choosing-where-each-chunk-comes-from) says, in its order; a change to that order changes the document first.
+- **Relay first.** The relay, over WebTransport, is the path for every peer that can reach it; a direct WebRTC link is a shortcut on top. ICE uses the two STUN endpoints only, a pair whose ICE check fails stays on the relay, and `symmetric` peers never use WebRTC. No change makes a session depend on a direct link or on a server the design doesn't have, such as TURN. Networks that block UDP are outside the design.
+- **Least data.** Each byte crosses each link once: nothing is sent twice, a record goes out only when it changes, a request no longer needed is cancelled, and metadata reaches only the peers that use it. The exceptions are the design's: the source sends a chunk again to a peer no forwarder can serve, and peers republish what they publish after a relay restart. An encoding on a path that carries every chunk is compact, and each field earns its bytes. A test of something that sends asserts how much it sent.
+- **Highest quality.** Nothing lowers bitrate, resolution or frame rate to save bytes or to keep up; a slow peer is served from elsewhere or waits (root rule 10).

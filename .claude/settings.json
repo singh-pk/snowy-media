@@ -6,18 +6,35 @@
       "Bash(bun run check)",
       "Bash(bun run format)",
       "Bash(bun run lint)",
+      "Bash(bun run lint:*)",
       "Bash(bun run typecheck)",
       "Bash(bun run build)",
+      "Bash(bun run test)",
       "Bash(bun test)",
       "Bash(bun test:*)",
+      "Bash(bun tooling/check-*.ts:*)",
       "Bash(bun scripts/gen-dts.ts)",
       "Bash(shasum -a 256 -c dist.sha256)",
       "Bash(git diff:*)",
       "Bash(git status)",
+      "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(gh pr view:*)",
       "Bash(gh pr diff:*)",
       "Bash(gh issue view:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/tooling/lint-edited.ts\""
+          }
+        ]
+      }
     ]
   }
 }
