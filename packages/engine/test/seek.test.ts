@@ -396,9 +396,12 @@ test("a seek after another file opens leaves it paused", async () => {
       { entry: ENTRY, page: PAGE, file: LONG, settle: SETTLE },
     );
 
-    // The open stopped what played: the clock holds at the seek's target.
+    // The open stopped what played: the clock holds at the seek's target, never past it. Held
+    // where the audio was heard, it may fall short of it by part of a sample (18 µs on CI's
+    // software runners).
     expect(got.length).toBeGreaterThan(0);
-    expect(new Set(got)).toEqual(new Set([1]));
+    expect(Math.max(...got)).toBeLessThanOrEqual(1);
+    expect(Math.min(...got)).toBeGreaterThanOrEqual(1 - SAMPLE);
   } finally {
     await browser.close();
   }
