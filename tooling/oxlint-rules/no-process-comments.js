@@ -7,7 +7,8 @@
 // specification.
 
 const PATTERNS = [
-  [/\b(TODO|FIXME|XXX|HACK)\b/, "a to-do marker"],
+  [/\b(TODO|FIXME|XXX)\b/i, "a to-do marker"],
+  [/\bHACK\b/, "a to-do marker"],
   [/\b(for now|for the time being|later PR|next PR)\b/i, "a promise of later work"],
   [/\bno longer needed\b/i, "change history"],
   [/\btemporar(y|ily) (fix|workaround|hack|solution|measure)\b/i, "a promise of later work"],

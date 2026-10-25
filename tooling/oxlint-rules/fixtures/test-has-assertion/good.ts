@@ -23,3 +23,9 @@ describe("a group", () => {
 
   test("through a helper in the group", () => inGroup());
 });
+test("in a promise it awaits", async () => {
+  await new Promise<void>((resolve) => {
+    expect(1).toBe(1);
+    resolve();
+  });
+});

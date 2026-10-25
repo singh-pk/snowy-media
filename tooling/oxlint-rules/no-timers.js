@@ -43,12 +43,21 @@ function isTimed(args) {
   return limit !== undefined && !(limit.type === "Identifier" && limit.name === "Infinity");
 }
 
-// Whether an options object literal sets `key`.
+// Whether an options argument may set `key`: a literal that names it or spreads another object,
+// or any value the rule can't read, such as a variable.
 function hasOption(options, key) {
-  if (options?.type !== "ObjectExpression") return false;
+  if (options === undefined) return false;
+  if (options.type !== "ObjectExpression") return true;
   return options.properties.some(
-    (p) => p.type === "Property" && (p.key.name ?? p.key.value) === key,
+    (p) => p.type === "SpreadElement" || (p.key.name ?? p.key.value) === key,
   );
+}
+
+// Whether `node` is called right where it is named, as `f()` or `o.f()`, so its options show.
+function isCalledInPlace(node) {
+  const member = node.parent?.type === "MemberExpression" && node.parent.property === node;
+  const callee = member ? node.parent : node;
+  return callee.parent?.type === "CallExpression" && callee.parent.callee === callee;
 }
 
 export default {
@@ -71,6 +80,12 @@ export default {
         if (!TIMERS.has(node.name) || isPropertyRead(node)) return;
         if (isObjectKey(node) && node.parent.parent?.type !== "ObjectPattern") return;
         context.report({ node, messageId: "timer", data: { name: node.name } });
+      },
+      // requestIdleCallback renamed or handed on, whose options the rule can no longer see.
+      "Identifier[name='requestIdleCallback']"(node) {
+        if (isCalledInPlace(node)) return;
+        if (isObjectKey(node) && node.parent.parent?.type !== "ObjectPattern") return;
+        context.report({ node, messageId: "idleTimeout" });
       },
       MemberExpression(node) {
         const name = propertyName(node);

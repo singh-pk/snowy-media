@@ -5,7 +5,8 @@
 // `expect` or `assert`, or calls a function declared in the same file that does. A function the
 // body only defines, without passing it to a call, does not count, since it may never run.
 // Helpers imported from another file are not followed: assert in the test, or declare the
-// helper beside it.
+// helper beside it. A callback counts as run when it is handed to a call, so one an empty
+// collection never calls is left to review.
 
 function isFunction(node) {
   return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
@@ -34,9 +35,12 @@ function rootName(callee) {
   return node.type === "Identifier" ? node.name : undefined;
 }
 
-// A nested function runs only when it is handed straight to a call, as `map` or `forEach` take it.
+// A nested function runs only when it is handed straight to a call, as `map`, `forEach` or
+// `new Promise` take it.
 function mayRun(node) {
-  return node.parent?.type === "CallExpression" && node.parent.arguments.includes(node);
+  const call = node.parent;
+  const isCall = call?.type === "CallExpression" || call?.type === "NewExpression";
+  return isCall && call.arguments.includes(node);
 }
 
 function calledNames(body) {
