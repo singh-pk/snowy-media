@@ -520,9 +520,30 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     check();
     // Unless a pause came while it started.
     if (!state.playing) return;
-    await context.resume();
-    await until(() => stopped() || !state.playing || started.heard());
+    // Not awaited alone: without a user gesture it stays pending until one, and a pause or a
+    // stop meanwhile settles this play.
+    const resumed = resume(context);
+    await until(() => stopped() || !state.playing || resumed.failed || started.heard());
+    if (resumed.failed) throw resumed.error;
     check();
+  }
+
+  // Resumes `context`; whether it failed, and why, on the change that says so.
+  function resume(context: AudioContext) {
+    const resumed = { failed: false, error: undefined as unknown };
+
+    async function run() {
+      try {
+        await context.resume();
+      } catch (e) {
+        resumed.failed = true;
+        resumed.error = e;
+        changed();
+      }
+    }
+
+    void run();
+    return resumed;
   }
 
   // `playback` once it has started; if it fails to, it is no longer what plays.
@@ -617,7 +638,12 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     state.moved = false;
     state.played = false;
     const seeks = ++state.seeks;
-    if (state.playing) return play();
+
+    // Paused while it starts, it goes on as a paused seek: its frame up before it resolves.
+    if (state.playing) {
+      await play();
+      if (state.playing) return;
+    }
 
     try {
       const { started } = await begin();
