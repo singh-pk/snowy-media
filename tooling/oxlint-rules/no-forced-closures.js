@@ -8,6 +8,8 @@
 // a call, however it is wrapped (an options object, an array, a cast, `??` or `?:`): it is the
 // call's argument, not state kept. So is one returned or thrown, which is built at most once.
 
+import { isFunction } from "./ast.js";
+
 const LOOPS = new Set([
   "ForStatement",
   "ForInStatement",
@@ -15,10 +17,6 @@ const LOOPS = new Set([
   "WhileStatement",
   "DoWhileStatement",
 ]);
-
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
 
 // Expressions that pass a value on unchanged, as far as where it ends up is concerned.
 const WRAPPERS = new Set([

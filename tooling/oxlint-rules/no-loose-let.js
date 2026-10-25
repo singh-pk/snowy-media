@@ -13,6 +13,8 @@
 //   one turn or call. A value that runs code, such as `performance.now()`, may be read where it
 //   is declared on purpose, so it is left to review, as is a `let` declared with no value.
 
+import { isFunction } from "./ast.js";
+
 const LOOPS = new Set([
   "ForStatement",
   "ForInStatement",
@@ -22,10 +24,6 @@ const LOOPS = new Set([
 ]);
 
 const BLOCKS = new Set(["BlockStatement", "StaticBlock", "Program", "SwitchCase"]);
-
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
 
 function contains(outer, node) {
   return (

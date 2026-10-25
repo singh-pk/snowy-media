@@ -10,6 +10,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { launch } from "./support/browsers";
 import { MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import type * as PageSupport from "./support/page";
 
 interface Hash {
   id: number;
@@ -41,7 +42,7 @@ for (const capacity of [1 << 18, 1 << 12]) {
 
       const hashes = await tab.evaluate(
         async ({ page, worker, files, size }) => {
-          const support: typeof import("./support/page") = await import(page);
+          const support: typeof PageSupport = await import(page);
           const media = support.startMedia(worker);
           const all: Record<string, Awaited<ReturnType<typeof support.hashRing>>> = {};
 
@@ -85,7 +86,7 @@ test("a pump that fails ends the ring with FAILED", async () => {
 
     const results = await tab.evaluate(
       async ({ page, worker }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch("/test/fixtures/h264-aac.mp4");
         const blob = await res.blob();

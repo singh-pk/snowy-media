@@ -13,6 +13,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { decodable, launch } from "./support/browsers";
 import { MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import type * as PageSupport from "./support/page";
 
 interface Colour {
   primaries: string;
@@ -66,7 +67,7 @@ test("decodes the first frame of every fixture with the config the engine makes"
 
     const checked = await tab.evaluate(
       async ({ page, worker, all }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         type Checked = Awaited<ReturnType<typeof support.checkVideoConfig>>;
         // An error names its fixture instead of ending the run.

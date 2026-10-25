@@ -19,14 +19,12 @@
 // ArrayBuffer it doesn't), `new Map(m)` and `new Set(s)`, `Object.assign` into an object that
 // already exists, and what a `postMessage` clones.
 
+import { isFunction } from "./ast.js";
+
 const COPIES = new Set(["slice", "concat", "toSorted", "toReversed", "toSpliced", "with"]);
 const READBACKS = new Set(["mapAsync", "copyTextureToBuffer", "copyTo"]);
 const BUILDERS = new Set(["map", "filter", "flatMap", "take", "drop"]);
 const REASON = /^\s*(copy|readback):\s*\S/;
-
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
 
 function methodName(callee) {
   return callee.type === "MemberExpression" && !callee.computed ? callee.property.name : undefined;

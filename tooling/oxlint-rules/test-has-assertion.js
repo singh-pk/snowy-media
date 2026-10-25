@@ -8,22 +8,7 @@
 // helper beside it. A callback counts as run when it is handed to a call, so one an empty
 // collection never calls is left to review.
 
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
-
-function children(node) {
-  const out = [];
-
-  for (const key of Object.keys(node)) {
-    if (key === "parent") continue;
-    const value = node[key];
-    if (Array.isArray(value)) out.push(...value.filter((v) => typeof v?.type === "string"));
-    else if (typeof value?.type === "string") out.push(value);
-  }
-
-  return out;
-}
+import { isFunction, mayRun, children } from "./ast.js";
 
 function rootName(callee) {
   let node = callee;
@@ -33,14 +18,6 @@ function rootName(callee) {
   }
 
   return node.type === "Identifier" ? node.name : undefined;
-}
-
-// A nested function runs only when it is handed straight to a call, as `map`, `forEach` or
-// `new Promise` take it.
-function mayRun(node) {
-  const call = node.parent;
-  const isCall = call?.type === "CallExpression" || call?.type === "NewExpression";
-  return isCall && call.arguments.includes(node);
 }
 
 function calledNames(body) {

@@ -13,6 +13,7 @@ import type { Entry } from "./entry";
 import { combine, createHistory, type Change, type Merging } from "./history";
 import { itemId, type KeyId } from "./ids";
 import type { Snapshot } from "./project";
+import { createSerial } from "./serial";
 
 type BranchId = Batch["branch"];
 type History = ReturnType<typeof createHistory>;
@@ -50,21 +51,6 @@ function gather(changes: Changes, branch: BranchId, change: Change) {
   else combine(into, change);
 }
 
-// Waits for a call that came before, whatever it did: its caller has its error.
-async function settledOf(previous: Promise<unknown>) {
-  try {
-    await previous;
-  } catch {
-    // Reported to that call's caller.
-  }
-}
-
-// Runs `work` once `previous` has settled, however it settled.
-async function afterSettled<T>(previous: Promise<unknown>, work: () => Promise<T>) {
-  await settledOf(previous);
-  return work();
-}
-
 /**
  * A project's branches, with main sequenced by `sequencer` from `from`, or empty. Batches and
  * entries handed to it must already be verified, as `createHistory` asks. Its calls run one at a
@@ -77,14 +63,7 @@ export function createBranches(options: { sequencer: KeyId; from?: Snapshot }) {
   // Batches and entries for branches not created here yet, in the order they arrived.
   let waitingBatches: Array<{ batch: Batch; hash: string }> = [];
   let waitingEntries: Entry[] = [];
-  let last: Promise<unknown> = Promise.resolve();
-
-  // Runs `work` once every call before it has finished.
-  function serial<T>(work: () => Promise<T>): Promise<T> {
-    const run = afterSettled(last, work);
-    last = run;
-    return run;
-  }
+  const serial = createSerial();
 
   // What a merge into `target` brings: entries of a branch, once this peer has them all. A
   // merge of the target itself is only ever one a merge brought, and brings nothing new.
@@ -243,6 +222,7 @@ export function createBranches(options: { sequencer: KeyId; from?: Snapshot }) {
   }
 
   return {
+    // jscpd:ignore-start: the same calls as createHistory's, for every branch
     /** Takes a verified batch, for its branch's history, or to wait until the branch is created. */
     pend: (batch: Batch, hash: string) => serial(() => pendNow(batch, hash)),
     /**
@@ -256,6 +236,7 @@ export function createBranches(options: { sequencer: KeyId; from?: Snapshot }) {
      * have waits for the next call after they arrive.
      */
     sequence: (peer: CryptoKeyPair) => serial(() => sequenceNow(peer)),
+    // jscpd:ignore-end
     /** The branches, main first, then in the order they were created here. */
     branches: (): ReadonlyArray<Readonly<Branch>> =>
       [...branches.values()].map(({ branch }) => branch),

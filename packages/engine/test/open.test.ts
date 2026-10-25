@@ -10,6 +10,8 @@ import { serve } from "../../../tooling/test-server";
 import { launch } from "./support/browsers";
 import type { Track } from "../src/index";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
+import type * as EngineModule from "../src/index";
+import type * as PageSupport from "./support/page";
 
 interface Expected {
   format: string;
@@ -41,8 +43,8 @@ test("opens every fixture", async () => {
     // Each fixture's MediaInfo, or the error; and the error for a file that is not media.
     const { opened, notMedia } = await tab.evaluate(
       async ({ entry, page, names }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const started = await engine.createEngine({ canvas: document.createElement("canvas") });
 
         async function open(path: string) {
@@ -109,7 +111,7 @@ async function failures(url: URL) {
     await tab.goto(url.href);
 
     return await tab.evaluate(async (entry) => {
-      const engine: typeof import("../src/index") = await import(entry);
+      const engine: typeof EngineModule = await import(entry);
       // Made here, not with test/support/page.ts, which the broken server does not serve.
       const root = await navigator.storage.getDirectory();
       const file = await root.getFileHandle("empty", { create: true });
