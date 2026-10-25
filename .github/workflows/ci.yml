@@ -153,6 +153,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       SNOWY_GPU: ${{ matrix.gpu }}
+      # Line coverage of the unit tests, held to coverage-floor.json (tooling/coverage.ts).
+      SNOWY_COVERAGE: "1"
     # It takes about 5 minutes; a browser that hangs would otherwise hold the runner for 6 hours.
     timeout-minutes: 20
     defaults:
@@ -179,6 +181,7 @@ jobs:
       # --with-deps installs the libraries Chromium needs on Linux, and nothing elsewhere.
       - run: bunx playwright install --with-deps chromium
       - run: bun run test
+      - run: bun ../../tooling/check-coverage.ts engine
       # For reading only: shared runners are too noisy to fail on (packages/engine/bench).
       - run: bun run bench --runs 5 >> "$GITHUB_STEP_SUMMARY"
 
@@ -188,6 +191,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.sync == 'true'
     runs-on: ubuntu-latest
+    env:
+      SNOWY_COVERAGE: "1"
     defaults:
       run:
         working-directory: packages/sync
@@ -202,6 +207,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx playwright install --with-deps chromium
       - run: bun run test
+      - run: bun ../../tooling/check-coverage.ts sync
 
   # Unit tests in Chromium (packages/timeline/AGENTS.md).
   timeline:
@@ -209,6 +215,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.timeline == 'true'
     runs-on: ubuntu-latest
+    env:
+      SNOWY_COVERAGE: "1"
     defaults:
       run:
         working-directory: packages/timeline
@@ -223,6 +231,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx playwright install --with-deps chromium
       - run: bun run test
+      - run: bun ../../tooling/check-coverage.ts timeline
 
   # The one check the main ruleset requires, so adding, renaming or skipping a job never
   # needs a ruleset change; a new job must be added to needs below. Skipped jobs pass;
