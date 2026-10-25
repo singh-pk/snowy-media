@@ -207,4 +207,8 @@ test("what is heard comes from the output timestamp, carried forward while it ru
   // Suspended: what is heard stays where the output stopped.
   control.publishOutput(0.1, 5000, false);
   expect(control.heard(9000)).toBeCloseTo(10.1, 12);
+  // Held by a pause: that media time is heard, whatever the context time, and it does not run.
+  control.publishOutput(0.3, 9000, true, 10.12);
+  expect(control.heard(9500)).toBeCloseTo(10.12, 12);
+  expect(control.outputRunning()).toBe(false);
 });

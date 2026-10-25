@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `engine.currentTime` no longer goes back as `pause` stops it, by up to 20 ms, which could leave the frame on screen two frames ahead of the paused clock.
 - WebCodecs video decoders now get the colour the file states (primaries, transfer, matrix and range), so a VP9 HDR stream, whose bitstream does not state its transfer, is no longer decoded as BT.709 SDR.
 
 ## [0.1.0] - 2026-10-24

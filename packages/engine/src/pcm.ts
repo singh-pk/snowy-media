@@ -40,11 +40,15 @@ const BELL = 12;
 const START = 7;
 // The output timestamp, written by the main thread under a seqlock of its own, every word
 // with Atomics as for the clock: the context time being heard and when, in whole
-// microseconds as two 32-bit halves each, and whether the context is running.
+// microseconds as two 32-bit halves each, and whether the context is running; or, held, the
+// media time heard in place of the context time.
 const OUTPUT_SEQUENCE = 16;
 const OUTPUT_RUNNING = 17;
 const OUTPUT_TIME = 18;
 const OUTPUT_AT = 20;
+const STOPPED = 0;
+const RUNNING = 1;
+const HELD = 2;
 const DATA = 128;
 const HALF = 2 ** 32;
 
@@ -285,18 +289,21 @@ export function createPcmControl(ring: SharedArrayBuffer) {
   /**
    * Publishes the context's output timestamp, from the main thread: context time
    * `contextTime` is heard at `at`, in milliseconds on the clock of `performance.timeOrigin +
-   * performance.now()`, which every thread shares; and whether the context is running.
+   * performance.now()`, which every thread shares; and whether the context is running. Or,
+   * with `held`, that media time (seconds) is heard, whatever the context time: a stopped clock
+   * held as the worklet's clock moves.
    */
-  function publishOutput(contextTime: number, at: number, running: boolean) {
+  function publishOutput(contextTime: number, at: number, running: boolean, held?: number) {
     const sequence = control[OUTPUT_SEQUENCE] ?? 0;
-    const time = Math.round(contextTime * 1e6);
+    const state = held === undefined ? (running ? RUNNING : STOPPED) : HELD;
+    const time = Math.round((held ?? contextTime) * 1e6);
     const when = Math.round(at * 1e3);
     Atomics.store(control, OUTPUT_SEQUENCE, (sequence + 1) | 0);
     Atomics.store(control, OUTPUT_TIME, time % HALF);
     Atomics.store(control, OUTPUT_TIME + 1, Math.floor(time / HALF));
     Atomics.store(control, OUTPUT_AT, when % HALF);
     Atomics.store(control, OUTPUT_AT + 1, Math.floor(when / HALF));
-    Atomics.store(control, OUTPUT_RUNNING, running ? 1 : 0);
+    Atomics.store(control, OUTPUT_RUNNING, state);
     Atomics.store(control, OUTPUT_SEQUENCE, (sequence + 2) | 0);
   }
 
@@ -311,15 +318,16 @@ export function createPcmControl(ring: SharedArrayBuffer) {
       if (sequence & 1) continue;
       const time = whole(OUTPUT_TIME) / 1e6;
       const when = whole(OUTPUT_AT) / 1e3;
-      const running = Atomics.load(control, OUTPUT_RUNNING) === 1;
+      const state = Atomics.load(control, OUTPUT_RUNNING);
       if (Atomics.load(control, OUTPUT_SEQUENCE) !== sequence) continue;
-      return mediaTime(running ? time + (at - when) / 1000 : time);
+      if (state === HELD) return time;
+      return mediaTime(state === RUNNING ? time + (at - when) / 1000 : time);
     }
   }
 
   /** Whether the last output timestamp published runs (`publishOutput`). */
   function outputRunning() {
-    return Atomics.load(control, OUTPUT_RUNNING) === 1;
+    return Atomics.load(control, OUTPUT_RUNNING) === RUNNING;
   }
 
   /** Whether the producer waits for room. */

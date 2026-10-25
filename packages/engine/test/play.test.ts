@@ -164,6 +164,8 @@ test(
       expect(new Set(got.paused.map(([time]) => time)).size).toBe(1);
       expect(new Set(got.paused.map(([, id]) => id)).size).toBe(1);
       const [[pausedAt, pausedId] = [0, 0]] = got.paused;
+      // The clock stopped where it was heard, not back at an older timestamp.
+      expect(pausedAt, "the clock went back as it paused").toBeGreaterThanOrEqual(last);
       // The frame due then, or the one after: the last one shown was for a refresh later.
       expect([0, 1], `paused at ${pausedAt} on frame ${pausedId}`).toContain(
         pausedId - frameAt(video, pausedAt),
@@ -224,7 +226,11 @@ test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
       // Paused: one time, one frame.
       expect(new Set(play.paused.map(([time]) => time)).size).toBe(1);
       expect(new Set(play.paused.map(([, id]) => id)).size).toBe(1);
-      // On the frame due then, or the one after, as in the test above.
+      // Not back from the last read playing, and on the frame due then, or the one after, as
+      // in the test above.
+      expect(pausedAt, `${file} went back as it paused`).toBeGreaterThanOrEqual(
+        play.first.at(-1)?.[0] ?? 0,
+      );
       expect([0, 1], `${file} paused at ${pausedAt} on frame ${pausedId}`).toContain(
         pausedId - frameAt(v, pausedAt),
       );
