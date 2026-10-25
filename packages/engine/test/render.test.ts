@@ -361,7 +361,11 @@ for (const [file, { video }] of Object.entries(expected)) {
         { page: PAGE, worker: MEDIA_WORKER, n: file, stream: video.id },
       );
       if (!got) return;
-      const [median = 0, p95 = 0] = got.off;
+
+      // Its planes are read, which the test above checks.
+      if (!got.off) return;
+
+      const [median = Infinity, p95 = Infinity] = got.off;
       expect(median, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[0] ?? 0);
       expect(p95, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[1] ?? 0);
     } finally {

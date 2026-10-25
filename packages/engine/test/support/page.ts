@@ -9,7 +9,7 @@
 
 import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
 import { createAudioOutput } from "../../src/audio";
-import { colorSpace, type VideoParams, videoConfig } from "../../src/codec";
+import { type VideoParams, videoConfig } from "../../src/codec";
 import { createCompositor, createRoute, type Route } from "../../src/compositor";
 import { createPcmControl, createPcmRing } from "../../src/pcm";
 import type { FromMedia, ToMedia } from "../../src/protocol";
@@ -306,34 +306,28 @@ async function decodeFrameId(config: VideoDecoderConfig, keyframe: Uint8Array) {
 /**
  * The decoder config of a stream with parameters `p` and first packet `keyframe`, whether
  * the browser's VideoDecoder takes it, and if it does, the frame number and colour space of
- * the frame it decodes, and the colour space the stream states as FFmpeg `names` it; and the
- * frame number for the stream as it would be without a configuration record, its parameter
- * sets in band.
+ * the frame it decodes; and the frame number for the stream as it would be without a
+ * configuration record, its parameter sets in band.
  */
-export async function checkVideoConfig(
-  p: VideoParams,
-  keyframe: Uint8Array,
-  names: Parameters<typeof colorSpace>[0],
-) {
+export async function checkVideoConfig(p: VideoParams, keyframe: Uint8Array) {
   const config = videoConfig(p, keyframe);
   const inBandKeyframe = inBand(p, keyframe);
   const inBandConfig = videoConfig({ ...p, extradata: new Uint8Array() }, inBandKeyframe);
   const { supported = false } = await VideoDecoder.isConfigSupported(config);
   const result = { codec: config.codec, inBandCodec: inBandConfig.codec, supported };
-  const none = { id: undefined, inBandId: undefined, colour: undefined, stated: undefined };
+  const none = { id: undefined, inBandId: undefined, colour: undefined };
   if (!supported) return { ...result, ...none };
   const { id, colour } = await decodeFrameId(config, keyframe);
   const { id: inBandId } = await decodeFrameId(inBandConfig, inBandKeyframe);
-  // The colour the stream states, as the decoded frame should carry it.
-  const stated = colorSpace(names);
-  return { ...result, id, inBandId, colour, stated };
+  return { ...result, id, inBandId, colour };
 }
 
 /**
  * The first frame of video stream `stream` of the file open in `media`, with parameters `p`,
  * decoded with WebCodecs and drawn at its size through the compositor both ways: from its
- * planes, and the way its measured route goes. Returns the route, and how far the two drawings
- * are apart in 8-bit levels, at the median and the 95th percentile of the channels.
+ * planes, and the way its measured route goes. Returns the route, and, for a route that imports
+ * it, how far the two drawings are apart in 8-bit levels, at the median and the 95th percentile
+ * of the channels.
  */
 export async function compareRoutes(
   media: ReturnType<typeof startMedia>,
@@ -388,7 +382,7 @@ export async function compareRoutes(
     // Measured as it goes up from its planes.
     await drawn(route);
     await compositor.measured();
-    if (route.via !== "imported" && route.via !== "apple") return { via: route.via, off: [0, 0] };
+    if (route.via !== "imported" && route.via !== "apple") return { via: route.via };
     const imported = await drawn(route);
     const off: number[] = [];
 

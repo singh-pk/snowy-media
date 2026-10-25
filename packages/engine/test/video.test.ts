@@ -26,11 +26,33 @@ const expected: Record<
   string,
   { video: { id: number; codec: string; codecString?: string; colour: Colour } }
 > = decodable(generated);
-const files = Object.entries(expected).map(([name, e]) => ({
-  name,
-  stream: e.video.id,
-  colour: e.video.colour,
-}));
+const files = Object.entries(expected).map(([name, e]) => ({ name, stream: e.video.id }));
+// The codecs WebCodecs decodes; FFmpeg's `video-ext` module decodes QuickTime RLE, and its
+// `video` module the rest (test/render.test.ts).
+const WEBCODECS = ["h264", "hevc", "vp8", "vp9", "av1"];
+// ffprobe's names of what the fixtures state, as WebCodecs names them
+// (https://w3c.github.io/webcodecs/#videocolorspace).
+const WEBCODECS_NAMES: Record<string, string> = {
+  bt2020: "bt2020",
+  smpte2084: "pq",
+  bt2020nc: "bt2020-ncl",
+};
+
+// The colour fixture colour `c` states, as a decoded frame should carry it.
+function stated(c: Colour) {
+  const space: Record<string, string | boolean> = {};
+
+  for (const key of ["primaries", "transfer", "matrix"] as const) {
+    if (!c[key]) continue;
+    const name = WEBCODECS_NAMES[c[key]];
+    if (!name) throw new Error(`${c[key]}: add WebCodecs' name for it`);
+    space[key] = name;
+  }
+
+  if (c.range) space.fullRange = c.range === "pc";
+  return space;
+}
+
 const server = await serveEngine("<!doctype html><title>test</title>");
 
 afterAll(() => server.stop(true));
@@ -50,7 +72,7 @@ test("decodes the first frame of every fixture with the config the engine makes"
         // An error names its fixture instead of ending the run.
         const results: Record<string, Checked | { error: string } | { decoder: string }> = {};
 
-        for (const { name: n, stream, colour } of all) {
+        for (const { name: n, stream } of all) {
           const res = await fetch(`/test/fixtures/${n}`);
           const blob = await res.blob();
           const opened = await media.request({ type: "open", file: new File([blob], n) });
@@ -67,7 +89,7 @@ test("decodes the first frame of every fixture with the config the engine makes"
           const keyframe = await support.firstPacket(media, stream);
 
           try {
-            results[n] = await support.checkVideoConfig(params, keyframe, colour);
+            results[n] = await support.checkVideoConfig(params, keyframe);
           } catch (e) {
             results[n] = { error: String(e) };
           }
@@ -86,17 +108,18 @@ test("decodes the first frame of every fixture with the config the engine makes"
       if ("error" in got) throw new Error(`${file}: ${got.error}`);
 
       if ("decoder" in got) {
-        // QuickTime RLE is the one in video-ext.
         const module = video.codec === "qtrle" ? "video-ext" : "video";
         expect(got.decoder, `${file} decoder`).toBe(module);
+        expect(WEBCODECS, `${file} decoder`).not.toContain(video.codec);
         continue;
       }
 
+      expect(WEBCODECS, `${file} decoder`).toContain(video.codec);
       expect(got.supported, `${file} ${got.codec} supported`).toBe(true);
       expect(got.id, `${file} first frame`).toBe(0);
 
       // The decoded frame carries the colour the file states.
-      expect(got.colour, `${file} colour`).toMatchObject(got.stated ?? {});
+      expect(got.colour, `${file} colour`).toMatchObject(stated(video.colour));
 
       expect(got.inBandId, `${file} first frame in band`).toBe(0);
       // A record names HEVC hvc1 (parameter sets out of band), parameter sets in band hev1.
