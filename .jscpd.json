@@ -1,0 +1,18 @@
+{
+  "path": ["."],
+  "format": ["typescript", "javascript"],
+  "minLines": 8,
+  "minTokens": 60,
+  "ignore": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/*.d.ts",
+    "packages/*/test/fixtures/**",
+    "packages/ffmpeg/bench/variants/**",
+    "packages/ffmpeg/bench/media/**",
+    "packages/ffmpeg/bench/results/**",
+    "tooling/oxlint-rules/fixtures/**"
+  ],
+  "gitignore": true,
+  "silent": true
+}

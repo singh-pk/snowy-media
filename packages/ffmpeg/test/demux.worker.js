@@ -275,6 +275,16 @@ async function createDemuxer() {
     }
   }
 
+  // Apart from resampleTwice, whose passes would otherwise nest too deep to follow.
+  function readAll(ctx, pkt, take) {
+    for (;;) {
+      const ret = core._sny_read(ctx, pkt);
+      if (ret === AVERROR_EOF) return;
+      check(ret, "read");
+      take(pkt);
+    }
+  }
+
   // Resamples audio stream 0 of `file` to the end, flushes the resampler as a seek does, and
   // resamples it again from the start: "same" when both passes match, as they must.
   async function resampleTwice(file) {
@@ -298,13 +308,9 @@ async function createDemuxer() {
         const decoder = await openDecoder(ctx, 0);
 
         try {
-          for (;;) {
-            const ret = core._sny_read(ctx, pkt);
-            if (ret === AVERROR_EOF) break;
-            check(ret, "read");
-            decoder.decode(pkt, (m, fltp, frame) => resample(d, m, frame));
-          }
-
+          readAll(ctx, pkt, (packet) =>
+            decoder.decode(packet, (m, fltp, frame) => resample(d, m, frame)),
+          );
           decoder.decode(0, (m, fltp, frame) => resample(d, m, frame));
           resample(d, core, 0);
         } finally {

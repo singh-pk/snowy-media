@@ -8,36 +8,13 @@
 // assertion, as `if (!r.ok) return;` before the first `expect`, is reported too. A loop that runs
 // no times, or a callback an empty collection never calls, is left to review.
 
+import { isFunction, mayRun, children } from "./ast.js";
+
 const CONDITIONAL = new Set(["CatchClause", "ConditionalExpression", "SwitchCase"]);
 const JUMPS = new Set(["ContinueStatement", "BreakStatement", "ReturnStatement"]);
 
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
-
 function isTestBody(node) {
   return node.parent?.type === "CallExpression" && node.parent.callee.name === "test";
-}
-
-// A nested function runs on the enclosing path when it is handed straight to a call, as `map`,
-// `forEach` or `new Promise` take it.
-function mayRun(node) {
-  const call = node.parent;
-  const isCall = call?.type === "CallExpression" || call?.type === "NewExpression";
-  return isCall && call.arguments.includes(node);
-}
-
-function children(node) {
-  const out = [];
-
-  for (const key of Object.keys(node)) {
-    if (key === "parent") continue;
-    const value = node[key];
-    if (Array.isArray(value)) out.push(...value.filter((v) => typeof v?.type === "string"));
-    else if (typeof value?.type === "string") out.push(value);
-  }
-
-  return out;
 }
 
 // Whether `node` calls `expect`, outside any function nested in it.

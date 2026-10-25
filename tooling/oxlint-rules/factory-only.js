@@ -15,11 +15,9 @@
 //   dictionary with no prototype, is allowed.
 // A function reached through a cast, or a name built at run time, is left to review.
 
-const FILLS = new Set(["assign", "defineProperty", "defineProperties"]);
+import { isFunction } from "./ast.js";
 
-function isFunction(node) {
-  return node.type.endsWith("FunctionExpression") || node.type === "FunctionDeclaration";
-}
+const FILLS = new Set(["assign", "defineProperty", "defineProperties"]);
 
 function isInClass(node) {
   for (let parent = node.parent; parent; parent = parent.parent) {

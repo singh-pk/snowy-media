@@ -11,6 +11,9 @@ import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import { cpuTime, launch, PROFILE } from "../test/support/browsers";
 import { ENTRY, MEDIA_WORKER, PAGE, RING_WORKER, serveEngine } from "../test/support/serve";
+import type * as EngineModule from "../src/index";
+import type * as PageSupport from "../test/support/page";
+import type { RingJob, RingResult } from "./ring.worker";
 
 const { values: args } = parseArgs({
   options: {
@@ -37,7 +40,7 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   // Cold is the first engine in the page, warm a second one once the worker script is cached.
   startup: (tab) =>
     tab.evaluate(async (entry) => {
-      const engine: typeof import("../src/index") = await import(entry);
+      const engine: typeof EngineModule = await import(entry);
 
       async function time() {
         const start = performance.now();
@@ -57,8 +60,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   open: (tab) =>
     tab.evaluate(
       async ({ entry, page }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("../test/support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const started = await engine.createEngine({ canvas: document.createElement("canvas") });
 
         const dir = "/test/fixtures/";
@@ -89,18 +92,16 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   ring: (tab) =>
     tab.evaluate(
       async ({ page, worker }) => {
-        const { createRing, RING_CAPACITY }: typeof import("../test/support/page") = await import(
-          page
-        );
+        const { createRing, RING_CAPACITY }: typeof PageSupport = await import(page);
         const total = 256 << 20;
 
         async function run(size: number, count: number, interval: number) {
           const ring = createRing(RING_CAPACITY);
           const [consumer, producer] = [0, 1].map(() => new Worker(worker, { type: "module" }));
-          const done = new Promise<import("./ring.worker").RingResult>((resolve) => {
+          const done = new Promise<RingResult>((resolve) => {
             consumer?.addEventListener("message", (e) => resolve(e.data), { once: true });
           });
-          const jobs: import("./ring.worker").RingJob[] = [
+          const jobs: RingJob[] = [
             { role: "consume", ring },
             { role: "produce", ring, size, count, interval },
           ];
@@ -138,7 +139,7 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   audio: (tab) =>
     tab.evaluate(
       async ({ page, worker }) => {
-        const support: typeof import("../test/support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch("/test/fixtures/sync-10min.mp4");
         const blob = await res.blob();
@@ -189,8 +190,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   scrub: (tab) =>
     tab.evaluate(
       async ({ entry, page, file, times, speed, to }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("../test/support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.createElement("canvas");
         [canvas.width, canvas.height] = [320, 180];
         document.body.append(canvas);
@@ -236,8 +237,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   play: (tab) =>
     tab.evaluate(
       async ({ entry, page, file, times, seconds }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("../test/support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.createElement("canvas");
         [canvas.width, canvas.height] = [320, 180];
         document.body.append(canvas);

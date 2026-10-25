@@ -13,6 +13,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { decodable, launch, SLOW_DRAWING } from "./support/browsers";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
+import type * as EngineModule from "../src/index";
+import type * as PageSupport from "./support/page";
 
 interface Video {
   codec: string;
@@ -117,8 +119,8 @@ test(
       await tab.goto(server.url.href);
       const got = await tab.evaluate(
         async ({ entry, page, plan: files, settle }) => {
-          const engine: typeof import("../src/index") = await import(entry);
-          const support: typeof import("./support/page") = await import(page);
+          const engine: typeof EngineModule = await import(entry);
+          const support: typeof PageSupport = await import(page);
           const canvas = document.querySelector("canvas");
           if (!canvas) throw new Error("no canvas");
           const player = await engine.createEngine({ canvas });
@@ -180,8 +182,8 @@ test(`plays on from a seek while ${LONG} plays`, async () => {
     await tab.mouse.click(1, 1);
     const reads = await tab.evaluate(
       async ({ entry, page, file, at }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });
@@ -226,8 +228,8 @@ test(`scrubs through ${SCRUBBED} and back, then plays on from where it is let go
     await tab.mouse.click(1, 1);
     const got = await tab.evaluate(
       async ({ entry, page, file, frames, to, back, again, settle }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const screen: HTMLCanvasElement = canvas;
@@ -331,8 +333,8 @@ test("clears the canvas when another file opens", async () => {
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ entry, page, file, settle }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });
@@ -377,8 +379,8 @@ test("a seek after another file opens leaves it paused", async () => {
     await tab.mouse.click(1, 1);
     const got = await tab.evaluate(
       async ({ entry, page, file, settle }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });

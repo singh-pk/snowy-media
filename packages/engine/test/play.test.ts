@@ -15,6 +15,8 @@ import { afterAll, expect, test } from "bun:test";
 import { PCM_RATE } from "./support/audio";
 import { launch, SLOW_DRAWING, SOFTWARE_GPU } from "./support/browsers";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
+import type * as EngineModule from "../src/index";
+import type * as PageSupport from "./support/page";
 
 interface Video {
   timeBase: string;
@@ -112,8 +114,8 @@ test(
       await tab.mouse.click(1, 1);
       const got = await tab.evaluate(
         async ({ entry, page, file, seconds }) => {
-          const engine: typeof import("../src/index") = await import(entry);
-          const support: typeof import("./support/page") = await import(page);
+          const engine: typeof EngineModule = await import(entry);
+          const support: typeof PageSupport = await import(page);
           const canvas = document.querySelector("canvas");
           if (!canvas) throw new Error("no canvas");
           const player = await engine.createEngine({ canvas });
@@ -198,8 +200,8 @@ test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
     await tab.mouse.click(1, 1);
     const got = await tab.evaluate(
       async ({ entry, page, files, seconds }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });
@@ -287,8 +289,8 @@ test(`plays ${SPARSE} to the end with each frame on time`, async () => {
     const end = audio.resampled.frames / PCM_RATE;
     const reads = await tab.evaluate(
       async ({ entry, page, file, watch }) => {
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });
@@ -337,8 +339,8 @@ test("a pause settles a play that waits for the browser to allow audio", async (
           return new Promise<void>(() => {});
         };
 
-        const engine: typeof import("../src/index") = await import(entry);
-        const support: typeof import("./support/page") = await import(page);
+        const engine: typeof EngineModule = await import(entry);
+        const support: typeof PageSupport = await import(page);
         const canvas = document.querySelector("canvas");
         if (!canvas) throw new Error("no canvas");
         const player = await engine.createEngine({ canvas });

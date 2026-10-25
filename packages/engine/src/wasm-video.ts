@@ -118,7 +118,6 @@ export function createWasmVideo(
   const text = new TextDecoder();
   // Where a failure's message is copied to be decoded: TextDecoder takes no shared memory.
   const reason = new Uint8Array(1024);
-  const dequeue = (decoder: Open) => decoder.events.dequeue();
 
   // Writes a record that must go: one that does not fit means the spare room is spent.
   function put(
@@ -196,7 +195,7 @@ export function createWasmVideo(
     } else if (kind === FROM_VIDEO.decoded) {
       if (decoder) decoder.queued--;
       // A packet decoded, of any decoder, closed ones too, makes room in the ring for every one.
-      open.forEach(dequeue);
+      for (const each of open.values()) each.events.dequeue();
     } else if (kind === FROM_VIDEO.failed) {
       reason.set(record.data);
       decoder?.events.error(new Error(text.decode(reason.subarray(0, record.data.length))));

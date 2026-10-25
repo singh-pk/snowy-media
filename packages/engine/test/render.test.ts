@@ -12,6 +12,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { decodable, launch } from "./support/browsers";
 import { MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import type * as PageSupport from "./support/page";
 
 interface Video {
   id: number;
@@ -101,7 +102,7 @@ test("a decoder the video decode worker fails reports why, closes cleanly, and t
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ page, worker, n }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch(`/test/fixtures/${n}`);
         const blob = await res.blob();
@@ -134,7 +135,7 @@ test("a demux that fails stops decoding, leaving the media worker's error the on
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ page, worker, n }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch(`/test/fixtures/${n}`);
         const blob = await res.blob();
@@ -170,7 +171,7 @@ test("a frame put up for a time goes up even if the time stops short of it", asy
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ page, worker, n, stream, size }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch(`/test/fixtures/${n}`);
         const blob = await res.blob();
@@ -212,7 +213,7 @@ test("a decoder closed partway through handing over a packet leaves the next dec
     await tab.goto(server.url.href);
     const got = await tab.evaluate(
       async ({ page, worker, n, size }) => {
-        const support: typeof import("./support/page") = await import(page);
+        const support: typeof PageSupport = await import(page);
         const media = support.startMedia(worker);
         const res = await fetch(`/test/fixtures/${n}`);
         const blob = await res.blob();
@@ -255,7 +256,7 @@ for (const [file, { video }] of Object.entries(expected)) {
       await tab.goto(server.url.href);
       const got = await tab.evaluate(
         async ({ page, worker, n, stream, size }) => {
-          const support: typeof import("./support/page") = await import(page);
+          const support: typeof PageSupport = await import(page);
           const media = support.startMedia(worker);
           const res = await fetch(`/test/fixtures/${n}`);
           const blob = await res.blob();
@@ -305,7 +306,7 @@ for (const [file, { video }] of Object.entries(expected)) {
       await tab.goto(server.url.href);
       const got = await tab.evaluate(
         async ({ page, worker, n, stream, size }) => {
-          const support: typeof import("./support/page") = await import(page);
+          const support: typeof PageSupport = await import(page);
           const media = support.startMedia(worker);
           const res = await fetch(`/test/fixtures/${n}`);
           const blob = await res.blob();
@@ -345,7 +346,7 @@ for (const [file, { video }] of Object.entries(expected)) {
       await tab.goto(server.url.href);
       const got = await tab.evaluate(
         async ({ page, worker, n, stream }) => {
-          const support: typeof import("./support/page") = await import(page);
+          const support: typeof PageSupport = await import(page);
           const media = support.startMedia(worker);
           const res = await fetch(`/test/fixtures/${n}`);
           const blob = await res.blob();

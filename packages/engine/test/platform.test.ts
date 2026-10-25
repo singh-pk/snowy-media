@@ -8,6 +8,7 @@ import { afterAll, expect, test } from "bun:test";
 import type { LaunchOptions, Page } from "playwright";
 import { launch } from "./support/browsers";
 import { ENTRY, serveEngine } from "./support/serve";
+import type * as EngineModule from "../src/index";
 
 const page = "<!doctype html><title>test</title>";
 const isolated = await serveEngine(page);
@@ -27,7 +28,7 @@ async function start(url: URL, options?: LaunchOptions) {
     await tab.goto(url.href);
 
     return await tab.evaluate(async (entry) => {
-      const engine: typeof import("../src/index") = await import(entry);
+      const engine: typeof EngineModule = await import(entry);
 
       try {
         const started = await engine.createEngine({ canvas: document.createElement("canvas") });

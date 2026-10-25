@@ -6,6 +6,8 @@
 // time, but not its `timeout` option, which turns it back into a delay; nor
 // `scheduler.postTask` with a `delay`.
 
+import { isObjectKey, isPropertyRead } from "./ast.js";
+
 const TIMERS = new Set(["setTimeout"]);
 const WAITS = new Set(["wait", "waitAsync"]);
 
@@ -14,19 +16,6 @@ function propertyName(member) {
   if (!member.computed) return member.property.name;
   const { property } = member;
   return property.type === "Literal" && typeof property.value === "string" ? property.value : "";
-}
-
-function isObjectKey(node) {
-  return node.parent?.type === "Property" && node.parent.key === node;
-}
-
-// `o.setTimeout` read as a property and not called, as an options object's field is.
-function isPropertyRead(node) {
-  const parent = node.parent;
-  const isProperty = parent?.type === "MemberExpression" && parent.property === node;
-  if (!isProperty || parent.computed) return false;
-  const call = parent.parent;
-  return !(call?.type === "CallExpression" && call.callee === parent);
 }
 
 // Whether `node` is `Atomics`, or `globalThis.Atomics` and the like.

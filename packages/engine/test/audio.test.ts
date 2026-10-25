@@ -12,6 +12,8 @@ import { afterAll, expect, test } from "bun:test";
 import { PCM_RATE, SAMPLE_FRAMES } from "./support/audio";
 import { launch } from "./support/browsers";
 import { AUDIO_WORKLET, MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import type * as PageSupport from "./support/page";
+import type { Page } from "playwright";
 
 interface Audio {
   id: number;
@@ -32,16 +34,16 @@ const server = await serveEngine("<!doctype html><title>test</title>");
 
 afterAll(() => server.stop(true));
 
-type Played = Awaited<ReturnType<typeof import("./support/page").play>>;
+type Played = Awaited<ReturnType<typeof PageSupport.play>>;
 
 // Plays the audio of fixture `name` on `channels` channels, a second longer than it lasts.
-async function play(tab: import("playwright").Page, name: string, audio: Audio, channels: number) {
+async function play(tab: Page, name: string, audio: Audio, channels: number) {
   const { frames } = audio.resampled;
   const seconds = Math.ceil(frames / PCM_RATE) + 1;
 
   return tab.evaluate(
     async ({ page, worker, worklet, n, s, options }) => {
-      const support: typeof import("./support/page") = await import(page);
+      const support: typeof PageSupport = await import(page);
       const media = support.startMedia(worker);
       const res = await fetch(`/test/fixtures/${n}`);
       const blob = await res.blob();

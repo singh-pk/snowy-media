@@ -56,7 +56,12 @@
     "repo/factory-only": "error",
     "repo/no-forced-closures": "error",
     "repo/no-loose-let": "error",
-    "repo/no-process-comments": "error"
+    "repo/no-process-comments": "error",
+    "max-depth": ["error", 4],
+    "no-else-return": "error",
+    "unicorn/no-useless-spread": "error",
+    "unicorn/no-array-for-each": "error",
+    "typescript/consistent-type-imports": ["error", { "fixStyle": "inline-type-imports" }]
   },
   "jsPlugins": [
     {
