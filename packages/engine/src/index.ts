@@ -201,8 +201,11 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     // The id of what plays, whose failures count, or -1; and the next one.
     current: -1,
     next: 0,
-    // Whether the last call was play, not pause.
+    // Whether the last call was play, not pause, and nothing has stopped it since: an open, a
+    // failure, or a play rejecting with no seek taking over. A seek or a scrub plays on only
+    // then. And how many pauses there have been, so a play knows a pause stopped it.
     playing: false,
+    pauses: 0,
     // Where the next play starts, in microseconds, or where a scrub has moved the paused one
     // on to (`moved`, so its audio starts before); and how many seeks there have been.
     from: 0,
@@ -255,6 +258,7 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
 
   function fail(error: Error) {
     state.failure ??= error;
+    state.playing = false;
     state.from = 0;
     state.moved = false;
     state.played = false;
@@ -449,6 +453,7 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     stop();
     render.postMessage({ type: "clear" } satisfies ToRender);
     state.failure = undefined;
+    state.playing = false;
     state.opened = undefined;
     state.from = 0;
     state.moved = false;
@@ -481,6 +486,7 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
 
   async function play() {
     if (state.failure) throw state.failure;
+    const pauses = state.pauses;
     state.playing = true;
     state.played = true;
     state.scrub.to = undefined;
@@ -500,9 +506,14 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
         await playOnce();
         return;
       } catch (e) {
-        if (state.seeks === seeks || state.failure) throw e;
-        // A pause that came meanwhile wins.
-        if (!state.playing) return;
+        if (state.seeks === seeks || state.failure) {
+          state.playing = false;
+          throw e;
+        }
+
+        // A pause that came meanwhile wins; whatever else stopped it rejects this play too.
+        if (!state.playing && state.pauses !== pauses) return;
+        if (!state.playing) throw e;
       }
     }
   }
@@ -559,6 +570,7 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
   async function pause() {
     if (state.failure) throw state.failure;
     state.playing = false;
+    state.pauses++;
     changed();
     await state.context?.suspend();
     // Published now, not on the next animation frame, so the clock holds once pause resolves,
