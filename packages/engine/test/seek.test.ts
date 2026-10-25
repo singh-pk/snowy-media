@@ -367,3 +367,42 @@ test("clears the canvas when another file opens", async () => {
     await browser.close();
   }
 }, 60_000);
+
+test("a seek after another file opens leaves it paused", async () => {
+  const browser = await launch();
+
+  try {
+    const tab = await browser.newPage();
+    await tab.goto(server.url.href);
+    await tab.mouse.click(1, 1);
+    const got = await tab.evaluate(
+      async ({ entry, page, file, settle }) => {
+        const engine: typeof import("../src/index") = await import(entry);
+        const support: typeof import("./support/page") = await import(page);
+        const canvas = document.querySelector("canvas");
+        if (!canvas) throw new Error("no canvas");
+        const player = await engine.createEngine({ canvas });
+        const res = await fetch(`/test/fixtures/${file}`);
+        const blob = await res.blob();
+        const handle = await support.fileHandle(file, blob);
+        await player.open(handle);
+        await player.play();
+        await player.open(handle);
+        await player.seek(1);
+        const reads = await support.watchScreen(player, canvas, settle * 3);
+        player.close();
+        return reads.map(([time]) => time);
+      },
+      { entry: ENTRY, page: PAGE, file: LONG, settle: SETTLE },
+    );
+
+    // The open stopped what played: the clock holds at the seek's target, never past it. Held
+    // where the audio was heard, it may fall short of it by part of a sample (18 µs on CI's
+    // software runners).
+    expect(got.length).toBeGreaterThan(0);
+    expect(Math.max(...got)).toBeLessThanOrEqual(1);
+    expect(Math.min(...got)).toBeGreaterThanOrEqual(1 - SAMPLE);
+  } finally {
+    await browser.close();
+  }
+}, 60_000);
