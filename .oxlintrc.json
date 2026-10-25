@@ -72,6 +72,12 @@
       }
     },
     {
+      "files": ["packages/engine/src/**", "packages/sync/src/**"],
+      "rules": {
+        "repo/copy-needs-reason": "error"
+      }
+    },
+    {
       "files": ["packages/ffmpeg/src/io.js"],
       "globals": {
         "addToLibrary": "readonly",

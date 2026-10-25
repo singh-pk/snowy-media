@@ -77,7 +77,7 @@ export function createChatReceiver(options: ChatReceiverOptions) {
    * version vector sent on reconnect fills them.
    */
   async function restore(records: ReadonlyMap<KeyId, ChatRecords>) {
-    const restores = [...records].map(([author, { messages, checkpoints }]) =>
+    const restores = Array.from(records, ([author, { messages, checkpoints }]) =>
       holdings.restore(author, messages, checkpoints),
     );
     await Promise.all(restores);

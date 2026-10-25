@@ -162,7 +162,7 @@ function unescape(nal: Uint8Array) {
 
 // The first NAL unit that `match`es in the extradata, then in the keyframe, as Annex B.
 function findNal(p: VideoParams, keyframe: Uint8Array, match: (nal: Uint8Array) => boolean) {
-  const found = [...nalUnits(p.extradata), ...nalUnits(keyframe)].find(match);
+  const found = nalUnits(p.extradata).find(match) ?? nalUnits(keyframe).find(match);
   if (!found) throw new Error(`${p.codec}: no configuration record and no parameter sets`);
   return found;
 }
@@ -188,9 +188,9 @@ export function hevcCodec(prefix: string, ptl: Uint8Array) {
     (((ptl[1] ?? 0) << 24) | ((ptl[2] ?? 0) << 16) | ((ptl[3] ?? 0) << 8) | (ptl[4] ?? 0)) >>> 0;
   let reversed = 0;
   for (let i = 0; i < 32; i++) reversed = reversed * 2 + ((flags >>> i) & 1);
-  const constraints = Array.from(ptl.subarray(5, 11));
-  while (constraints.length > 0 && constraints.at(-1) === 0) constraints.pop();
-  const tail = constraints.map((b) => `.${hex(b)}`).join("");
+  const constraints = ptl.subarray(5, 11);
+  const kept = constraints.subarray(0, constraints.findLastIndex((b) => b !== 0) + 1);
+  const tail = Array.from(kept, (b) => `.${hex(b)}`).join("");
   return `${prefix}.${space}${first & 31}.${reversed.toString(16).toUpperCase()}.${tier}${ptl[11] ?? 0}${tail}`;
 }
 
@@ -400,11 +400,7 @@ export function makesFrame(p: VideoParams, data: Uint8Array) {
  */
 export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderConfig {
   const [num, den] = p.sampleAspect;
-  // Non-square pixels make the displayed size differ from the coded size.
-  const aspect =
-    num > 0 && den > 0 && num !== den
-      ? { displayAspectWidth: p.width * num, displayAspectHeight: p.height * den }
-      : {};
+  const isSquare = !(num > 0 && den > 0 && num !== den);
   // With each frame out as soon as the stream allows. Without it, Chromium holds more
   // frames than the stream reorders, and in sparse video those wait seconds for the packets
   // that let them out. Decoding 4K is about as fast with it
@@ -413,6 +409,7 @@ export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderC
   // bitstream states no transfer, for BT.709 SDR, HDR included. What the stream leaves out is
   // as FFmpeg takes it: BT.601 limited Y′CbCr, and primaries and a transfer Chromium leaves as
   // they are, so a frame it converts matches the compositor's (docs/architecture.md#colour).
+  // copy: once per stream, the stated colour over the defaults.
   const colour: VideoColorSpaceInit = {
     primaries: "bt709",
     transfer: "bt709",
@@ -423,14 +420,20 @@ export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderC
   const size = {
     codedWidth: p.width,
     codedHeight: p.height,
-    ...aspect,
+    // Non-square pixels make the displayed size differ from the coded size.
+    ...(isSquare ? {} : { displayAspectWidth: p.width * num, displayAspectHeight: p.height * den }),
     colorSpace: colour,
     optimizeForLatency: true,
   };
-  if (p.codec === "h264") return { ...h264(p, keyframe), ...size };
-  if (p.codec === "hevc") return { ...hevc(p, keyframe), ...size };
-  if (p.codec === "vp9") return { codec: vp9Codec(keyframe, p.width, p.height, p.level), ...size };
-  if (p.codec === "vp8") return { codec: "vp8", ...size };
-  if (p.codec === "av1") return { ...av1(p, keyframe), ...size };
+  return Object.assign(codecOf(p, keyframe), size);
+}
+
+// The codec string, and the description where the codec has one, for WebCodecs.
+function codecOf(p: VideoParams, keyframe: Uint8Array): VideoDecoderConfig {
+  if (p.codec === "h264") return h264(p, keyframe);
+  if (p.codec === "hevc") return hevc(p, keyframe);
+  if (p.codec === "vp9") return { codec: vp9Codec(keyframe, p.width, p.height, p.level) };
+  if (p.codec === "vp8") return { codec: "vp8" };
+  if (p.codec === "av1") return av1(p, keyframe);
   throw new Error(`${p.codec}: not a codec WebCodecs decodes`);
 }

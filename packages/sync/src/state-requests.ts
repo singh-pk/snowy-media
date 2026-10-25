@@ -95,8 +95,8 @@ export function createStateAsk(options: StateAskOptions) {
   // Asks the next candidate whose link is open, unless the whole state is held: then, or once no
   // candidate is left, the ask ends.
   function next() {
-    const open = ask.candidates.slice(ask.asked + 1).findIndex((c) => options.linked(c));
-    ask.asked = open === -1 ? ask.candidates.length : ask.asked + 1 + open;
+    const open = ask.candidates.findIndex((c, i) => i > ask.asked && options.linked(c));
+    ask.asked = open === -1 ? ask.candidates.length : open;
     const peer = waiting();
 
     if (peer === undefined || records.complete()) {
@@ -133,13 +133,12 @@ export function createStateAsk(options: StateAskOptions) {
     if (records.complete()) return;
     ask.starts++;
     const call = ask.starts;
-    const others = await rank(
+    const ranked = await rank(
       candidates.filter((c) => c !== source),
       "state",
     );
     if (records.complete() || call !== ask.starts) return;
-    const first = source !== undefined && candidates.includes(source) ? [source] : [];
-    const ranked = [...first, ...others];
+    if (source !== undefined && candidates.includes(source)) ranked.unshift(source);
 
     if (waiting() === undefined) {
       ask.candidates = ranked;
@@ -148,8 +147,9 @@ export function createStateAsk(options: StateAskOptions) {
       return;
     }
 
-    const asked = ask.candidates.slice(0, ask.asked + 1);
-    ask.candidates = [...asked, ...ranked.filter((c) => !asked.includes(c))];
+    // The peers asked so far stay first, in order; the rest follow as ranked now.
+    ask.candidates.length = ask.asked + 1;
+    for (const c of ranked) if (!ask.candidates.includes(c)) ask.candidates.push(c);
   }
 
   /** A `state-gone` or `state-sent` from a peer, for this peer's latest request or not. */

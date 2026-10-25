@@ -143,11 +143,13 @@ function checkSetup(value: unknown) {
     counts[field] = count;
   }
 
+  // copy: the few counts, into the record and the setup below.
   const record = { track, codec, ...(bytes === undefined ? {} : { description }), ...counts };
   const setup: CodecSetup = {
     track,
     codec,
     ...(bytes === undefined ? {} : { description: bytes }),
+    // copy: as for the record.
     ...counts,
   };
   return { record, setup };
@@ -199,6 +201,7 @@ export async function decodeCatalog(sessionKey: CryptoKey, key: string, bytes: B
  */
 export async function encodeSetup(session: CryptoKeyPair, setup: CodecSetup) {
   const { description, ...rest } = setup;
+  // copy: the setup's fields, with its description as text.
   const { record } = checkSetup({
     ...rest,
     ...(description === undefined ? {} : { description: base64(description) }),

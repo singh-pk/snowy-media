@@ -19,6 +19,7 @@ type Ask = {
 };
 
 // A set of candidates as one string, whatever their order.
+// copy: sorted without reordering the caller's.
 const together = (candidates: KeyId[]) => candidates.toSorted().join("\n");
 
 export function createChatRepairs(send: (peer: KeyId, author: KeyId, firstSeq: number) => void) {

@@ -288,10 +288,9 @@ export function undoMatrix(
 
 const srgbDecode = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
-// The value at fraction `q` of the first `count` of `values`.
-function quantile(values: Float32Array, count: number, q: number) {
-  const sorted = values.subarray(0, count).toSorted();
-  return sorted[Math.min(count - 1, Math.floor(q * count))] ?? Infinity;
+// The value at fraction `q` of `sorted`.
+function quantile(sorted: Float32Array, q: number) {
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? Infinity;
 }
 
 // How far Chromium's conversion of the points in `data` (see verdict), Apple's gamma undone
@@ -357,8 +356,10 @@ export function verdict(
   if (differences(data, false, undo, off) < MIN_POINTS || coloured < MIN_COLOURED) return undefined;
 
   const matches = (apple: boolean) => {
-    const count = differences(data, apple, undo, off);
-    return quantile(off, count, 0.5) <= MEDIAN_OFF && quantile(off, count, 0.95) <= P95_OFF;
+    const sorted = off.subarray(0, differences(data, apple, undo, off));
+    // In place, as `differences` fills `off` afresh each time.
+    sorted.sort();
+    return quantile(sorted, 0.5) <= MEDIAN_OFF && quantile(sorted, 0.95) <= P95_OFF;
   };
 
   if (matches(false)) return "imported";
@@ -470,7 +471,8 @@ function planesOf(
   width: number,
   height: number,
 ): { yuv: boolean; depth: number; planes: [GPUTextureFormat, number, number][] } {
-  const half = [(width + 1) >> 1, (height + 1) >> 1] as const;
+  const halfWidth = (width + 1) >> 1;
+  const halfHeight = (height + 1) >> 1;
 
   if (format === "NV12") {
     return {
@@ -478,7 +480,7 @@ function planesOf(
       depth: 8,
       planes: [
         ["r8uint", width, height],
-        ["rg8uint", ...half],
+        ["rg8uint", halfWidth, halfHeight],
       ],
     };
   }
@@ -494,9 +496,9 @@ function planesOf(
   const depth = format.includes("P12") ? 12 : format.includes("P10") ? 10 : 8;
   const sample = depth > 8 ? "r16uint" : "r8uint";
   const [cw, ch] = format.startsWith("I420")
-    ? half
+    ? [halfWidth, halfHeight]
     : format.startsWith("I422")
-      ? [half[0], height]
+      ? [halfWidth, height]
       : [width, height];
   return {
     yuv: true,
@@ -723,10 +725,12 @@ export function createCompositor(
 
       for (const [i, t] of targets.entries()) {
         const at = { buffer, offset: i * GRID_HEIGHT * GRID_ROW, bytesPerRow: GRID_ROW };
+        // readback: a small grid, of a few frames per stream, until they decide the route.
         encoder.copyTextureToBuffer({ texture: t }, at, [GRID_WIDTH, GRID_HEIGHT]);
       }
 
       device.queue.submit([encoder.finish()]);
+      // readback: the grid above, compared on the CPU.
       await buffer.mapAsync(GPUMapMode.READ);
       const via = verdict(
         new Float32Array(buffer.getMappedRange()),
@@ -751,6 +755,7 @@ export function createCompositor(
     if (!(frame instanceof VideoFrame)) return { data: frame.memory.buffer, layout: frame.layout };
     const size = frame.allocationSize();
     if (size > staging.buffer.byteLength) staging.buffer = new ArrayBuffer(size);
+    // readback: a frame on the read route, whose planes Chromium would convert unlike FFmpeg.
     const layout = await frame.copyTo(staging.buffer);
     return { data: staging.buffer, layout };
   }

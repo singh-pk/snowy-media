@@ -215,7 +215,8 @@ export async function openChatStore(session: FileSystemDirectoryHandle) {
  * after its newest checkpoint, which may never have been published and are sent again.
  */
 export function unsent({ messages, checkpoints }: ChatRecords) {
+  // copy: in seq order, without reordering the caller's.
   const sorted = messages.toSorted((a, b) => a.seq - b.seq);
-  const sent = Math.max(0, ...checkpoints.map((cp) => cp.seq));
+  const sent = checkpoints.reduce((max, cp) => Math.max(max, cp.seq), 0);
   return { last: sorted.at(-1), pending: sorted.filter((m) => m.seq > sent) };
 }

@@ -27,6 +27,8 @@ export function createFileSource(core: CoreModule) {
     // A file changed or removed since it was picked fails to read. An exception would unwind
     // through FFmpeg and skip its cleanup, so FFmpeg gets an error instead.
     try {
+      // copy: FileReaderSync reads only into a new buffer, so each read is copied into FFmpeg's
+      // once. The Blob slice itself copies nothing.
       core.HEAPU8.set(new Uint8Array(reader.readAsArrayBuffer(file.slice(pos, end))), buf);
     } catch {
       return AVERROR_EIO;

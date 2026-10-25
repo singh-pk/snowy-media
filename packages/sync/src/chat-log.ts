@@ -95,7 +95,7 @@ export function createChatLog() {
    * missing below it, so a reply also fills the gaps.
    */
   const versions = () =>
-    Object.fromEntries([...authors].map(([author, { contiguous }]) => [author, contiguous]));
+    Object.fromEntries(authors.entries().map(([author, { contiguous }]) => [author, contiguous]));
 
   /** The text messages to show, in order, with edits, deletes and reactions applied. */
   function entries(): ChatEntry[] {
@@ -145,12 +145,6 @@ export function createChatLog() {
 }
 
 function grouped(reactions?: Map<string, { reactor: KeyId; emoji: string; on: boolean }>) {
-  const byEmoji = new Map<string, KeyId[]>();
-
-  for (const { reactor, emoji, on } of reactions?.values() ?? []) {
-    if (!on) continue;
-    byEmoji.set(emoji, [...(byEmoji.get(emoji) ?? []), reactor]);
-  }
-
-  return [...byEmoji].map(([emoji, peers]) => ({ emoji, peers }));
+  const byEmoji = Map.groupBy(reactions?.values().filter((r) => r.on) ?? [], (r) => r.emoji);
+  return Array.from(byEmoji, ([emoji, held]) => ({ emoji, peers: held.map((r) => r.reactor) }));
 }

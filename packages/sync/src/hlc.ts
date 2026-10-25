@@ -25,8 +25,8 @@ export const isHlc = (value: unknown): value is Hlc =>
 function parse(hlc: string): Parts {
   if (!FORMAT.test(hlc)) throw new RangeError(`not a clock value: ${hlc}`);
   return {
-    wall: Number.parseInt(hlc.slice(0, WALL_DIGITS), 16),
-    counter: Number.parseInt(hlc.slice(WALL_DIGITS), 16),
+    wall: Number.parseInt(hlc.substring(0, WALL_DIGITS), 16),
+    counter: Number.parseInt(hlc.substring(WALL_DIGITS), 16),
   };
 }
 
@@ -57,7 +57,9 @@ export function createClock(now: () => number = Date.now, last?: Hlc) {
   function send() {
     const wall = wallTime(now);
     state =
-      wall > state.wall ? { wall, counter: 0 } : carried({ ...state, counter: state.counter + 1 });
+      wall > state.wall
+        ? { wall, counter: 0 }
+        : carried({ wall: state.wall, counter: state.counter + 1 });
     return format(state);
   }
 

@@ -148,6 +148,7 @@ export function checkMessage(value: unknown): ChatMessage {
     hlc: value.hlc,
     mediaUs: value.mediaUs,
     kind,
+    // copy: once per message read, its kind's fields.
     ...checkKindFields(kind, value),
   };
 }
@@ -196,6 +197,7 @@ export async function signCheckpoint(
   const head = await messageHash(newest);
   const signed = { author, seq: newest.seq, head };
   const sig = await sign(peer.privateKey, checkpointBytes(signed));
+  // copy: once per checkpoint, the signed fields with their signature.
   return { ...signed, sig: sig.toBase64({ alphabet: "base64url", omitPadding: true }) };
 }
 
@@ -253,7 +255,8 @@ export async function proven(messages: ChatMessage[], checkpoint: Checkpoint, si
     expected = message.prev;
   }
 
-  return chain.toReversed();
+  chain.reverse();
+  return chain;
 }
 
 // The candidate whose hash is the one expected.

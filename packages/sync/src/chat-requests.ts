@@ -35,7 +35,7 @@ export function checkChatControl(value: unknown): ChatControl | undefined {
   }
 
   if (type === "chat-versions" && isVersions(versions)) {
-    return { type, versions: { ...versions } };
+    return { type, versions };
   }
 
   return undefined;

@@ -116,6 +116,7 @@ function createMedia(core: CoreModule) {
     const at = core.HEAP32[out >>> 2] ?? 0;
     core._free(out);
     check(size, "params_export");
+    // copy: out of FFmpeg's memory, which is freed below.
     const params = core.HEAPU8.slice(at, at + size);
     core._free(at);
     return params;
@@ -143,6 +144,7 @@ function createMedia(core: CoreModule) {
       tag: tag
         ? String.fromCodePoint(tag & 255, (tag >>> 8) & 255, (tag >>> 16) & 255, tag >>> 24)
         : "",
+      // copy: out of FFmpeg's memory, once per stream, for the decoder on another thread.
       extradata: core.HEAPU8.slice(data, data + core._sny_codec_extradata_size(st)),
       width: core._sny_codec_width(st),
       height: core._sny_codec_height(st),
@@ -324,6 +326,7 @@ function createMedia(core: CoreModule) {
         throw new Error("queue: out of memory");
       }
 
+      // copy: only as the queue grows, its slots starting from the head.
       queued.slots = [...slots.slice(head), ...slots.slice(0, head), ...more];
       queued.head = 0;
     }
@@ -649,7 +652,7 @@ async function handle(message: ToMedia) {
     const media = await ready;
 
     if (message.type === "open") {
-      post({ type: "opened", id, ...media.open(message.file) });
+      post(Object.assign(media.open(message.file), { type: "opened" as const, id }));
     } else {
       const buffered = () => post({ type: "buffered", id });
       const { ring, streams, from, audio } = message;

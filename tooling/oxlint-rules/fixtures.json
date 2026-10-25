@@ -12,6 +12,7 @@
   "rules": {
     "no-debugger": "error",
     "repo/blank-line-around-blocks": "error",
+    "repo/copy-needs-reason": "error",
     "repo/disable-needs-reason": "error",
     "repo/factory-only": "error",
     "repo/no-access-modifiers": "error",

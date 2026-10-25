@@ -546,7 +546,8 @@ export async function connectRelay(options: RelayOptions) {
   // Ends everything this peer published or watched.
   function release() {
     for (const { shut } of links.values()) shut();
-    for (const published of [...ownTracks.values(), ...sourceTracks.values()]) published.stop();
+    for (const published of ownTracks.values()) published.stop();
+    for (const published of sourceTracks.values()) published.stop();
     local.close();
     remote.close();
   }
