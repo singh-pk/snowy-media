@@ -87,10 +87,27 @@ test("closing the ring stops a producer that waits for room, and ends the consum
 
 test("closing an empty ring ends the consumer's own wait for a packet", async () => {
   const consumer = createConsumer(createRing(4096));
-  const waiting = consumer.wait();
+  const state = { ended: false };
+
+  async function waitForPacket() {
+    await consumer.wait();
+    state.ended = true;
+  }
+
+  const waiting = waitForPacket();
+  // A message to this thread comes back as a task of its own, after any wait that ended at once.
+  const { port1, port2 } = new MessageChannel();
+  const echoed = new Promise((resolve) =>
+    port1.addEventListener("message", resolve, { once: true }),
+  );
+  port1.start();
+  port2.postMessage(undefined);
+  await echoed;
+  expect(state.ended).toBe(false);
   consumer.close();
   // A wait that never ends fails the file (tooling/run-unit.ts).
   await waiting;
+  expect(state.ended).toBe(true);
 });
 
 test("a write to an empty ring wakes the waiting consumer", async () => {
@@ -241,13 +258,16 @@ test("a packet larger than the ring arrives whole, with other records between it
   const big = pattern(1, 1000);
   const small = pattern(2, 8);
   const got: string[] = [];
+  const offered = { small: false };
+  // The length of the big packet each time it is peeked again before its release.
+  const peekedAgain: (number | undefined)[] = [];
 
   // Offered until it is all in, a piece of 64 bytes at a time as room frees, with a small
   // record offered between its pieces, as the render worker hands frames back meanwhile.
   for (let rounds = 0; got.length < 2; rounds++) {
     if (rounds > 100) throw new Error("no progress");
     const done = producer.offer(5, KEY_FLAG, 7n, 6n, 3, big, 0, big.length);
-    if (rounds === 1) expect(producer.offer(9, 0, 0n, 0n, 0, small, 0, small.length)).toBe(true);
+    if (rounds === 1) offered.small = producer.offer(9, 0, 0n, 0n, 0, small, 0, small.length);
     if (done) got.push("offered");
 
     for (let packet = consumer.peek(); packet; packet = consumer.peek()) {
@@ -255,13 +275,15 @@ test("a packet larger than the ring arrives whole, with other records between it
       const want = stream === 5 ? big : small;
       const intact = data.length === want.length && data.every((b, i) => b === want[i]);
       got.push(`${stream} ${flags} ${pts} ${dts} ${duration} ${intact}`);
-      // Peeked again before it is released, it is the same packet.
-      if (stream === 5) expect(consumer.peek()?.data.length).toBe(big.length);
+      if (stream === 5) peekedAgain.push(consumer.peek()?.data.length);
       consumer.release();
     }
   }
 
+  expect(offered.small).toBe(true);
   expect(got).toEqual(["9 0 0 0 0 true", "offered", "5 1 7 6 3 true"]);
+  // Peeked again before it is released, it is the same packet.
+  expect(peekedAgain).toEqual([big.length]);
   // Each piece is offered once: the ring is empty and the next packet starts afresh.
   expect(producer.offer(5, 0, 8n, 8n, 3, big, 0, 100)).toBe(true);
   expect(consumer.peek()?.data).toEqual(big.subarray(0, 100));

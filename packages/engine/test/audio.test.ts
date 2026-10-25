@@ -86,8 +86,10 @@ test("plays every fixture as ffmpeg -ar -ac resamples it", async () => {
     const tab = await browser.newPage();
     await tab.goto(server.url.href);
 
-    for (const [file, { audio }] of Object.entries(expected)) {
-      if (file === LONG) continue;
+    // The long fixture has its own test below.
+    const fixtures = Object.entries(expected).filter(([file]) => file !== LONG);
+
+    for (const [file, { audio }] of fixtures) {
       const played = await play(tab, file, audio, 2);
       checkClock(file, played, audio);
       const want = audio.resampled.probe;

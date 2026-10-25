@@ -2,8 +2,8 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.ts"],
-      "project": ["scripts/**/*.ts", "tooling/**/*.{ts,js}"]
+      "entry": ["scripts/*.ts", "tooling/check-*.ts"],
+      "project": ["scripts/**/*.ts", "tooling/**/*.{ts,js}", "!tooling/oxlint-rules/fixtures/**"]
     },
     "packages/engine": {
       "entry": [

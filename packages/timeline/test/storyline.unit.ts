@@ -170,9 +170,11 @@ test("thousands of random edits agree with laying the storyline out from scratch
   expect([...storyline.items()]).toEqual(expected);
   expect(storyline.duration()).toBe(start);
 
-  for (const item of expected) {
-    expect(storyline.start(item.id)).toBe(item.start);
-    if (item.duration > 0) expect(storyline.at(item.start + item.duration - 1)?.id).toBe(item.id);
+  for (const item of expected) expect(storyline.start(item.id)).toBe(item.start);
+
+  // An empty clip covers no time, so only clips with a duration are found at a time.
+  for (const item of expected.filter((i) => i.duration > 0)) {
+    expect(storyline.at(item.start + item.duration - 1)?.id).toBe(item.id);
   }
 });
 

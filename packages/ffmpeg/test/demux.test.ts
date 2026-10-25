@@ -88,18 +88,22 @@ describe("every fixture", () => {
       expect(rest).toEqual({ ...wantRest, rewind: "ok" });
       expect(streams.map(withoutSamples)).toEqual(want.map(withoutSamples));
 
-      for (const [i, s] of streams.entries()) {
-        const w = want[i]?.audio;
-        if (s.audio && w) expect(audioDiff(s.audio, w)).toBeLessThanOrEqual(FLOAT_TOLERANCE);
-
-        if (s.audio?.resampled && w?.resampled) {
-          expect(s.audio.resampled.samples).toBe(w.resampled.samples);
-          const diff = probeDiff(s.audio.resampled.probe, w.resampled.probe);
-          expect(diff).toBeLessThanOrEqual(FLOAT_TOLERANCE);
-        }
-
+      // What withoutSamples leaves out, stream by stream, as native FFmpeg has it.
+      for (const [i, w] of want.entries()) {
+        const s = streams[i] ?? {};
         // Every decoded frame, converted, must be something WebCodecs can display.
-        if (s.video) expect(s.video.videoFrame).toBe("ok");
+        expect(s.video?.videoFrame).toBe(w.video ? "ok" : undefined);
+        if (!w.audio) continue;
+
+        if (!s.audio) throw new Error(`${name} stream ${i}: no audio`);
+        expect(audioDiff(s.audio, w.audio)).toBeLessThanOrEqual(FLOAT_TOLERANCE);
+        // Only some fixtures have native FFmpeg's resampled output (RESAMPLED in
+        // scripts/gen-fixtures.ts).
+        if (!w.audio.resampled) continue;
+
+        expect(s.audio.resampled?.samples).toBe(w.audio.resampled.samples);
+        const diff = probeDiff(s.audio.resampled?.probe ?? [], w.audio.resampled.probe);
+        expect(diff).toBeLessThanOrEqual(FLOAT_TOLERANCE);
       }
 
       // Copying a stream to another module must not change a single sample.

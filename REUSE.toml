@@ -14,6 +14,7 @@ path = [
   ".gitignore",
   ".editorconfig",
   "bun.lock",
+  "tooling/oxlint-rules/fixtures/**",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 The Snowy Authors"

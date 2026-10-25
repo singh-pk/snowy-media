@@ -22,6 +22,8 @@ interface Video {
   pts: number[];
   shown: [number, number];
   grid: number[];
+  // Set for a codec WebCodecs decodes, which video.test.ts checks.
+  codecString?: string;
   scale?: number;
 }
 
@@ -276,6 +278,7 @@ for (const [file, { video }] of Object.entries(expected)) {
       expect(got.shown.map((s) => s.drawn)).toEqual(drawn);
       const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
       // A turned frame's number is not where the reader looks; its grid shows the turn.
+      // oxlint-disable-next-line repo/no-conditional-expect -- the grid below checks a turned frame
       if (!turned) expect(ids).toEqual(frames);
       const r = correlation(got.grid, video.grid);
       expect(r, `${file} grid ${JSON.stringify(got.grid)}`).toBeGreaterThan(MIN_CORRELATION);
@@ -331,6 +334,9 @@ for (const [file, { video }] of Object.entries(expected)) {
     }
   }, 60_000);
 
+  // FFmpeg's frames are always read from its memory.
+  if (!video.codecString) continue;
+
   test(`draws ${file} straight from the GPU as from its planes, where it measures so`, async () => {
     const browser = await launch();
 
@@ -347,12 +353,7 @@ for (const [file, { video }] of Object.entries(expected)) {
           if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
           const params = opened.video[stream];
           if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
-
-          // FFmpeg's frames are always read from its memory.
-          if (params.decoder !== "webcodecs") {
-            media.stop();
-            return undefined;
-          }
+          if (params.decoder !== "webcodecs") throw new Error(`${n}: ${params.decoder}`);
 
           const result = await support.compareRoutes(media, stream, params);
           media.stop();
@@ -360,9 +361,10 @@ for (const [file, { video }] of Object.entries(expected)) {
         },
         { page: PAGE, worker: MEDIA_WORKER, n: file, stream: video.id },
       );
-      if (!got) return;
 
-      // Its planes are read, which the test above checks.
+      // Drawn from its planes, which the test above checks, when this machine's GPU measures the
+      // frame unlike them or the frame is too grey to measure.
+      // oxlint-disable-next-line repo/no-conditional-expect -- the route depends on the machine's GPU
       if (!got.off) return;
 
       const [median = Infinity, p95 = Infinity] = got.off;

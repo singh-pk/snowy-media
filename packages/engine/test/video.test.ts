@@ -124,10 +124,15 @@ test("decodes the first frame of every fixture with the config the engine makes"
       expect(got.inBandId, `${file} first frame in band`).toBe(0);
       // A record names HEVC hvc1 (parameter sets out of band), parameter sets in band hev1.
       expect(got.inBandCodec, `${file} in band`).toBe(got.codec.replace(/^hvc1/, "hev1"));
+    }
 
-      if (video.codecString) {
-        expect(got.codec.toLowerCase(), `${file} codec`).toBe(video.codecString.toLowerCase());
-      }
+    // Where native FFmpeg writes a codec string, the engine's is the same.
+    for (const [file, { video }] of Object.entries(expected).filter(
+      ([, e]) => e.video.codecString,
+    )) {
+      const got = checked[file];
+      const codec = got && "codec" in got ? got.codec : undefined;
+      expect(codec?.toLowerCase(), `${file} codec`).toBe(video.codecString?.toLowerCase());
     }
   } finally {
     await browser.close();

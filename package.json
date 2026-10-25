@@ -20,9 +20,10 @@
     "format:check": "oxfmt --check && clang-format --dry-run --Werror packages/ffmpeg/src/*.c packages/ffmpeg/src/*.h",
     "lint": "oxlint --type-aware --max-warnings 0 --report-unused-disable-directives-severity error",
     "lint:md": "markdownlint-cli2",
+    "lint:rules": "bun tooling/check-lint-rules.ts",
     "lint:unused": "knip",
     "typecheck": "tsc && bun --filter \"*\" typecheck",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run lint:md && bun run lint:unused"
+    "check": "bun run format:check && bun run lint && bun run lint:rules && bun run typecheck && bun run lint:md && bun run lint:unused"
   },
   "devDependencies": {
     "@types/bun": "1.4.3",

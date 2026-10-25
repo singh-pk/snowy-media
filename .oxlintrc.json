@@ -16,7 +16,8 @@
     "packages/ffmpeg/bench/variants/**",
     "packages/ffmpeg/bench/media/**",
     "packages/*/test/fixtures/**",
-    "packages/ffmpeg/bench/results/**"
+    "packages/ffmpeg/bench/results/**",
+    "tooling/oxlint-rules/fixtures/**"
   ],
   "rules": {
     "eqeqeq": "error",
@@ -39,7 +40,6 @@
     "repo/no-classes": "error",
     "repo/no-module-let": "error",
     "repo/no-nested-await": "error",
-    "repo/no-plan-comments": "error",
     "repo/no-promise-chains": "error",
     "repo/no-set-interval": "error",
     "no-restricted-imports": [
@@ -52,7 +52,9 @@
           }
         ]
       }
-    ]
+    ],
+    "repo/disable-needs-reason": "error",
+    "repo/no-process-comments": "error"
   },
   "jsPlugins": [
     {
@@ -105,6 +107,14 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "files": ["packages/*/test/**"],
+      "rules": {
+        "repo/no-focused-tests": "error",
+        "repo/test-has-assertion": "error",
+        "repo/no-conditional-expect": "error"
       }
     }
   ]
