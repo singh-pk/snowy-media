@@ -119,6 +119,52 @@ test("a decoder the video decode worker fails reports why, and the next decodes"
   }
 }, 60_000);
 
+test("a frame put up for a time goes up even if the time stops short of it", async () => {
+  const browser = await launch();
+  const file = "h264-aac.mp4";
+  const video = expected[file]?.video;
+  if (!video) throw new Error(`no video in ${file}`);
+  const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
+  const micros = (frame: number) => Math.round(((video.pts[frame] ?? 0) * num * 1e6) / den);
+  // Frame 5 is taken as due, its upload coming after; then the time stops between frames 4
+  // and 5, as a pause stops the clock short of the refresh a frame was put up for.
+  const times = [micros(5), Math.floor((micros(4) + micros(5)) / 2)];
+
+  try {
+    const tab = await browser.newPage();
+    await tab.goto(server.url.href);
+    const got = await tab.evaluate(
+      async ({ page, worker, n, stream, size }) => {
+        const support: typeof import("./support/page") = await import(page);
+        const media = support.startMedia(worker);
+        const res = await fetch(`/test/fixtures/${n}`);
+        const blob = await res.blob();
+        const opened = await media.request({ type: "open", file: new File([blob], n) });
+        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
+        const params = opened.video[stream];
+        if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
+        const result = await support.render(media, stream, params, size);
+        media.stop();
+        return result.shown;
+      },
+      {
+        page: PAGE,
+        worker: MEDIA_WORKER,
+        n: file,
+        stream: video.id,
+        size: { times, width: video.width, height: video.height, ahead: true },
+      },
+    );
+
+    // The setup holds: 5 was not up by the first time, only taken, with 3 and 4 closed.
+    expect(got[0]?.id).toBeLessThan(4);
+    // Frames 3 and 4 were closed when 5 was taken: 5 goes up, not an older frame left on screen.
+    expect(got.at(-1)).toEqual({ drawn: true, id: 5 });
+  } finally {
+    await browser.close();
+  }
+}, 60_000);
+
 for (const [file, { video }] of Object.entries(expected)) {
   test(`shows ${file} at its timestamps, as FFmpeg shows it`, async () => {
     const browser = await launch();

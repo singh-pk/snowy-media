@@ -85,6 +85,10 @@ export function createVideoOutput(
     waiting: false,
     // The media time last shown, and the first frame's: decoding runs TIME_AHEAD past the later.
     at: -Infinity,
+    // The latest frame taken as due: the ones before it are closed, so it goes up once it is
+    // uploaded even if the time then stops short of it, as a pause stops the clock short of
+    // the refresh it was taken for.
+    due: -Infinity,
     first: -Infinity,
     // Waiting for the media time to reach the frames decoded.
     far: false,
@@ -150,7 +154,11 @@ export function createVideoOutput(
     // Before the stream's first frame, as at a seek to the start of a file whose video starts
     // later, that frame stands for the time before it.
     const due = queue.take(Math.max(time, start));
-    if (due) send(due);
+
+    if (due) {
+      state.due = due.timestamp;
+      send(due);
+    }
 
     // A scrub holds the time at its target, where it moves on far past the frames after it:
     // one ahead, not to hold up the upload of the frame due at the next target.
@@ -290,7 +298,7 @@ export function createVideoOutput(
    */
   function present(time: number) {
     state.at = time;
-    const picture = pictures.take(Math.max(time, start));
+    const picture = pictures.take(Math.max(time, start, state.due));
     // Waiting for the media time, only its nearing lets decoding on.
     if (state.far ? !far() : picture) wake.room();
 

@@ -408,13 +408,20 @@ export async function failInWorker(p: VideoParams) {
  * Plays video stream `stream` of the file open in `media` through the engine's video output
  * into a `width` × `height` canvas, showing it at each of `times` (microseconds) in turn
  * once the frames up to it are decoded. Returns, for each time, whether a new frame went up
- * and the frame number on the canvas, and the brightness grid of the first frame shown.
+ * and the frame number on the canvas, and the brightness grid of the first frame shown. Each
+ * time is shown once its frame is uploaded; or, `ahead`, as the render worker's animation
+ * frames show it: with what is up, the frame due then going up for the next.
  */
 export async function render(
   media: ReturnType<typeof startMedia>,
   stream: number,
   p: VideoParams,
-  { times, width, height }: { times: number[]; width: number; height: number },
+  {
+    times,
+    width,
+    height,
+    ahead = false,
+  }: { times: number[]; width: number; height: number; ahead?: boolean },
 ) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("no GPU adapter");
@@ -469,9 +476,10 @@ export async function render(
     for (const time of times) {
       await decoded(time);
       if (failure.error) throw failure.error;
-      // Uploaded first, as the render worker's animation frames would wait for it.
-      await output.prepare(time);
+      // Uploaded first, as if the render worker's animation frames waited for it; or after.
+      if (!ahead) await output.prepare(time);
       const drawn = output.present(time);
+      if (ahead) await output.prepare(time);
 
       // Nothing new on screen: the canvas still shows the last frame, which was read already.
       if (!drawn) {
