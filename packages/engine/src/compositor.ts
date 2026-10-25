@@ -99,11 +99,13 @@ const RGB_SHADER = /* wgsl */ `${VERTEX}
 `;
 
 // A frame converted by Chromium into a picture of its size. Where Chromium took it for Apple's
-// BT.709, a gamma of 1.961, and encoded it as sRGB (`apple`), that is undone, leaving the
-// frame's R′G′B′ (docs/architecture.md#colour).
+// BT.709, a gamma of 1.961, and encoded it as sRGB (`apple`), that is undone; and where it took
+// another matrix or range than the stream's, `undo` takes its R′G′B′ back through its matrix to
+// the planes and on through the stream's, leaving the frame's R′G′B′ (docs/architecture.md#colour).
 const IMPORT_SHADER = /* wgsl */ `${VERTEX}
 @group(0) @binding(0) var frame: texture_external;
 @group(0) @binding(1) var linear: sampler;
+@group(0) @binding(2) var<uniform> undo: mat4x4f;
 override apple = false;
 
 fn srgbDecode(c: vec3f) -> vec3f {
@@ -113,11 +115,10 @@ fn srgbDecode(c: vec3f) -> vec3f {
 @fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
   let uv = clip * vec2f(0.5, -0.5) + 0.5;
   let rgb = textureSampleBaseClampToEdge(frame, linear, uv).rgb;
-  if (!apple) {
-    return vec4f(rgb, 1.0);
-  }
-
-  return vec4f(pow(srgbDecode(max(rgb, vec3f(0.0))), vec3f(1.0 / 1.961)), 1.0);
+  // Mirrored about 0, as Chromium encodes a value below 0: the matrix after mixes the channels.
+  let undone = sign(rgb) * pow(srgbDecode(abs(rgb)), vec3f(1.0 / 1.961));
+  let encoded = select(rgb, undone, apple);
+  return vec4f((undo * vec4f(encoded, 1.0)).rgb, 1.0);
 }
 `;
 
@@ -167,19 +168,37 @@ const MAX_TRIES = 60;
 // of 255.
 const MEDIAN_OFF = 1.5 / 255;
 const P95_OFF = 6 / 255;
+// Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped: shown by at
+// least BEYOND_POINTS of its channels further than BEYOND below 0, and as many above 1, as one
+// clip may be at one end only. Where Chromium clips, as into an 8-bit texture, a saturated
+// colour would not come back; a frame whose colours all fit shows nothing either way.
+const BEYOND = 2 / 255;
+const BEYOND_POINTS = 10;
 
 /**
  * How a stream's frames whose planes can be read go up, worked out from its own frames
  * (docs/architecture.md#colour): read back and converted here until measured; then imported, as
- * Chromium converts them, as they are (`imported`) or with Apple's gamma undone (`apple`), or
- * read back still where neither matches (`read`).
+ * Chromium converts them, as they are (`imported`) or with Apple's gamma undone (`apple`), and
+ * through `undo` where Chromium took another matrix or range; or read back still where none of
+ * these matches (`read`).
  */
 export interface Route {
   readonly stated: VideoColorSpaceInit;
   via: "unmeasured" | "imported" | "apple" | "read";
   // The frames measured so far.
   tries: number;
+  // From Chromium's R′G′B′, Apple's gamma undone where `apple`, to the stream's: column-major.
+  readonly undo: Float32Array;
 }
+
+// The matrices and ranges Chromium may take a stream's frames for instead of the stream's own:
+// the two of SD and HD, in either range.
+const ASSUMED: readonly VideoColorSpaceInit[] = [
+  { matrix: "bt709", fullRange: false },
+  { matrix: "bt709", fullRange: true },
+  { matrix: "smpte170m", fullRange: false },
+  { matrix: "smpte170m", fullRange: true },
+];
 
 // What Chromium converts as FFmpeg does, which converts neither primaries nor transfer: BT.709's
 // primaries, and the transfers it takes for sRGB's, all a stream that states none is decoded as
@@ -199,7 +218,72 @@ const KEPT_TRANSFERS = new Set<VideoTransferCharacteristics | null | undefined>(
  */
 export function createRoute(stated: VideoColorSpaceInit): Route {
   const kept = KEPT_PRIMARIES.has(stated.primaries) && KEPT_TRANSFERS.has(stated.transfer);
-  return { stated, via: kept ? "unmeasured" : "read", tries: 0 };
+  const undo = new Float32Array(16);
+  identity(undo);
+  return { stated, via: kept ? "unmeasured" : "read", tries: 0, undo };
+}
+
+// Makes `out` the 4 × 4 identity.
+function identity(out: Float32Array) {
+  out.fill(0);
+  for (let i = 0; i < 4; i++) out[i * 5] = 1;
+}
+
+/**
+ * Writes into `out` the map from R′G′B′ as Chromium converts `depth`-bit planes it takes for
+ * `assumed` to R′G′B′ as the stream states, `stated`: back through the one matrix to the planes,
+ * and on through the other. Both are affine, so the map is too.
+ */
+export function undoMatrix(
+  out: Float32Array,
+  stated: VideoColorSpaceInit,
+  assumed: VideoColorSpaceInit,
+  depth: number,
+) {
+  const to = new Float32Array(16);
+  const from = new Float32Array(16);
+  yuvMatrix(to, stated, depth);
+  yuvMatrix(from, assumed, depth);
+  // Column-major: row r, column c at c * 4 + r.
+  const m = (r: number, c: number) => from[c * 4 + r] ?? 0;
+  const det =
+    m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) -
+    m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) +
+    m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
+  // The inverse of `from`'s 3 × 3, then its offset.
+  const inverse = new Float32Array(16);
+  inverse.set([
+    (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) / det,
+    (m(1, 2) * m(2, 0) - m(1, 0) * m(2, 2)) / det,
+    (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0)) / det,
+    0,
+    (m(0, 2) * m(2, 1) - m(0, 1) * m(2, 2)) / det,
+    (m(0, 0) * m(2, 2) - m(0, 2) * m(2, 0)) / det,
+    (m(0, 1) * m(2, 0) - m(0, 0) * m(2, 1)) / det,
+    0,
+    (m(0, 1) * m(1, 2) - m(0, 2) * m(1, 1)) / det,
+    (m(0, 2) * m(1, 0) - m(0, 0) * m(1, 2)) / det,
+    (m(0, 0) * m(1, 1) - m(0, 1) * m(1, 0)) / det,
+    0,
+  ]);
+
+  for (let r = 0; r < 3; r++) {
+    inverse[12 + r] = -(
+      (inverse[r] ?? 0) * m(0, 3) +
+      (inverse[4 + r] ?? 0) * m(1, 3) +
+      (inverse[8 + r] ?? 0) * m(2, 3)
+    );
+  }
+
+  inverse[15] = 1;
+
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += (to[k * 4 + r] ?? 0) * (inverse[c * 4 + k] ?? 0);
+      out[c * 4 + r] = sum;
+    }
+  }
 }
 
 const srgbDecode = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -210,40 +294,86 @@ function quantile(values: Float32Array, count: number, q: number) {
   return sorted[Math.min(count - 1, Math.floor(q * count))] ?? Infinity;
 }
 
+// How far Chromium's conversion of the points in `data` (see verdict), Apple's gamma undone
+// where `apple`, then mapped by `undo`, is from this one's: a difference for each midtone
+// channel, in `off`. Returns how many.
+function differences(data: Float32Array, apple: boolean, undo: Float32Array, off: Float32Array) {
+  const read = GRID_HEIGHT * (GRID_ROW / 4);
+  // Mirrored about 0, as the shader undoes it.
+  const encode = (v: number) => (apple ? Math.sign(v) * srgbDecode(Math.abs(v)) ** (1 / 1.961) : v);
+  let count = 0;
+
+  for (let i = 0; i < read; i += 4) {
+    const r = encode(data[i] ?? 0);
+    const g = encode(data[i + 1] ?? 0);
+    const b = encode(data[i + 2] ?? 0);
+
+    // Alpha is left out.
+    for (let c = 0; c < 3; c++) {
+      const truth = data[read + i + c] ?? 0;
+      if (truth < MIDTONES[0] || truth > MIDTONES[1]) continue;
+      const mapped =
+        (undo[c] ?? 0) * r + (undo[4 + c] ?? 0) * g + (undo[8 + c] ?? 0) * b + (undo[12 + c] ?? 0);
+      off[count++] = Math.abs(mapped - truth);
+    }
+  }
+
+  return count;
+}
+
 /**
- * Which way a stream goes, from a grid read back (`data`): Chromium's conversion of each point,
- * then this one's, in rows of GRID_ROW bytes. Undecided while too few channels are midtones or
- * too few points coloured. `asIs` and `undone` hold a difference for each channel.
+ * Which way a stream whose colour is `stated`, of `depth`-bit planes, goes, from a grid read
+ * back (`data`): Chromium's conversion of each point, then this one's, in rows of GRID_ROW bytes.
+ * Undecided while too few channels are midtones or too few points coloured. Chromium's
+ * conversion is tried as it is, then, where it is unclipped, through each matrix and range it may
+ * have taken instead, each with and without Apple's gamma undone; the first that matches is
+ * written into `undo`.
+ * `off` holds a difference for each channel.
  */
 export function verdict(
   data: Float32Array,
-  asIs: Float32Array,
-  undone: Float32Array,
+  off: Float32Array,
+  stated: VideoColorSpaceInit,
+  depth: number,
+  undo: Float32Array,
 ): Route["via"] | undefined {
   const read = GRID_HEIGHT * (GRID_ROW / 4);
-  let count = 0;
   let coloured = 0;
+  let below = 0;
+  let above = 0;
 
   for (let i = 0; i < read; i += 4) {
     const [r = 0, g = 0, b = 0] = data.subarray(read + i, read + i + 3);
     if (Math.max(r, g, b) - Math.min(r, g, b) > COLOURED) coloured++;
 
-    // Alpha is left out.
     for (let c = i; c < i + 3; c++) {
-      const truth = data[read + c] ?? 0;
-      if (truth < MIDTONES[0] || truth > MIDTONES[1]) continue;
       const imported = data[c] ?? 0;
-      asIs[count] = Math.abs(imported - truth);
-      undone[count] = Math.abs(srgbDecode(Math.max(imported, 0)) ** (1 / 1.961) - truth);
-      count++;
+      if (imported < -BEYOND) below++;
+      if (imported > 1 + BEYOND) above++;
     }
   }
 
-  if (count < MIN_POINTS || coloured < MIN_COLOURED) return undefined;
-  const off = (values: Float32Array) =>
-    quantile(values, count, 0.5) <= MEDIAN_OFF && quantile(values, count, 0.95) <= P95_OFF;
-  if (off(asIs)) return "imported";
-  return off(undone) ? "apple" : "read";
+  identity(undo);
+  if (differences(data, false, undo, off) < MIN_POINTS || coloured < MIN_COLOURED) return undefined;
+
+  const matches = (apple: boolean) => {
+    const count = differences(data, apple, undo, off);
+    return quantile(off, count, 0.5) <= MEDIAN_OFF && quantile(off, count, 0.95) <= P95_OFF;
+  };
+
+  if (matches(false)) return "imported";
+  if (matches(true)) return "apple";
+
+  if (below >= BEYOND_POINTS && above >= BEYOND_POINTS) {
+    for (const assumed of ASSUMED) {
+      undoMatrix(undo, stated, assumed, depth);
+      if (matches(false)) return "imported";
+      if (matches(true)) return "apple";
+    }
+  }
+
+  identity(undo);
+  return "read";
 }
 
 // FFmpeg's identity display matrix: 16.16 fixed point, and 2.30 in the last column.
@@ -443,6 +573,11 @@ export function createCompositor(
   const applePipeline = pipeline(IMPORT_SHADER, [IMPORTED], { apple: 1 });
   const measurePipeline = pipeline(MEASURE_SHADER, [MEASURED, MEASURED]);
   const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  // The import's `undo`, written before each frame imported.
+  const undoBuffer = device.createBuffer({
+    size: 64,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
   // mat2x2f, then vec2f, padded to 32 bytes.
   const view = new Float32Array(8);
   const viewBuffer = device.createBuffer({
@@ -476,9 +611,8 @@ export function createCompositor(
     busy: false,
     targets: undefined as [GPUTexture, GPUTexture] | undefined,
     buffer: undefined as GPUBuffer | undefined,
-    // A difference for each channel of the grid, as is and with Apple's gamma undone.
-    asIs: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
-    undone: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
+    // A difference for each channel of the grid.
+    off: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
     // Resolved as the measurement under way ends, for the tests.
     done: Promise.withResolvers<void>(),
   };
@@ -546,8 +680,9 @@ export function createCompositor(
 
   // Converts the points of the grid of `frame` both ways, from its planes uploaded into `picture`
   // and as Chromium converts it, and decides `route` by them, or leaves it for a later frame,
-  // up to MAX_TRIES. A measurement that fails reads the planes from then on.
-  async function measure(frame: VideoFrame, picture: Slot, route: Route) {
+  // up to MAX_TRIES. A measurement that fails reads the planes from then on. The planes are
+  // `depth`-bit.
+  async function measure(frame: VideoFrame, picture: Slot, route: Route, depth: number) {
     measuring.busy = true;
     route.tries++;
 
@@ -595,8 +730,10 @@ export function createCompositor(
       await buffer.mapAsync(GPUMapMode.READ);
       const via = verdict(
         new Float32Array(buffer.getMappedRange()),
-        measuring.asIs,
-        measuring.undone,
+        measuring.off,
+        route.stated,
+        depth,
+        route.undo,
       );
       buffer.unmap();
       if (via) route.via = via;
@@ -688,15 +825,16 @@ export function createCompositor(
 
       if (unmeasured && frame instanceof VideoFrame) {
         measuring.done = Promise.withResolvers<void>();
-        void measure(frame, picture, route);
+        void measure(frame, picture, route, depth);
       }
     }
 
     return picture;
   }
 
-  // Converts `frame` into a picture with Chromium's conversion, undoing Apple's gamma (`apple`).
-  function uploadImported(frame: VideoFrame, apple: boolean) {
+  // Converts `frame` into a picture with Chromium's conversion, undoing Apple's gamma (`apple`)
+  // and then mapping it by `undo`.
+  function uploadImported(frame: VideoFrame, apple: boolean, undo: Float32Array) {
     const width = visibleWidth(frame);
     const height = visibleHeight(frame);
     const key = keyOf(IMPORTED, width, height);
@@ -726,8 +864,10 @@ export function createCompositor(
       entries: [
         { binding: 0, resource: device.importExternalTexture({ source: frame }) },
         { binding: 1, resource: sampler },
+        { binding: 2, resource: { buffer: undoBuffer } },
       ],
     });
+    device.queue.writeBuffer(undoBuffer, 0, undo);
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: into, loadOp: "clear", storeOp: "store" }],
@@ -756,7 +896,7 @@ export function createCompositor(
       const imported = route.via === "imported" || route.via === "apple";
       const uploading =
         frame instanceof VideoFrame && (imported || !frame.format)
-          ? uploadImported(frame, route.via === "apple")
+          ? uploadImported(frame, route.via === "apple", route.undo)
           : uploadPlanes(frame, route);
       const picture = await uploading;
       picture.timestamp = frame.timestamp;
