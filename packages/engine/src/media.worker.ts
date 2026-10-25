@@ -253,7 +253,7 @@ function createMedia(core: CoreModule) {
       throw new RangeError(`demux: stream ${stream} is not audio`);
     }
 
-    // Loading audio-ext for the long tail of codecs is still to come.
+    // The media worker decodes with the core's decoders alone: a codec in audio-ext fails.
     const module = str(core._sny_codec_module(ctx, stream));
     if (!module) throw new Error(`demux: no module decodes stream ${stream}`);
 

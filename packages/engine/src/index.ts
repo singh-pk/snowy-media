@@ -270,7 +270,7 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     const opened = state.opened;
     if (!opened) throw new Error("play: no file is open");
     const audio = opened.info.tracks.find((t) => t.kind === "audio");
-    // Video-only files need a clock without audio; they come later.
+    // The clock is the audio's, so a file without audio has none.
     if (!audio) throw new Error("play: a file without audio does not play yet");
     const video = opened.info.tracks.find((t) => t.kind === "video");
     const params = video && opened.video[video.id];

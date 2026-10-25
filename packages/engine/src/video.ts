@@ -258,7 +258,7 @@ export function createVideoOutput(
       }
 
       // A missing pts takes the dts, right for a stream without B-frames. A raw stream with
-      // them has neither and is not played yet.
+      // them has neither, and fails here.
       const pts = packet.pts === NO_TIMESTAMP ? packet.dts : packet.pts;
       if (pts === NO_TIMESTAMP) throw new Error("a video packet has no timestamp");
       const timestamp = micros(Number(pts));
