@@ -39,16 +39,18 @@ export async function signRecord(session: CryptoKeyPair, domain: string, record:
   return encoder.encode(JSON.stringify({ ...record, sig: base64(sig) }));
 }
 
-/** The record in `bytes`, split into its signature and the rest, or an `InvalidRecordError`. */
-export function parseRecord(bytes: Bytes) {
-  let value: unknown;
-
+// The JSON in `bytes`, or an `InvalidRecordError` for anything that isn't UTF-8 JSON.
+function parseJson(bytes: Bytes): unknown {
   try {
-    value = JSON.parse(decoder.decode(bytes));
+    return JSON.parse(decoder.decode(bytes));
   } catch {
     throw new InvalidRecordError("not UTF-8 JSON");
   }
+}
 
+/** The record in `bytes`, split into its signature and the rest, or an `InvalidRecordError`. */
+export function parseRecord(bytes: Bytes) {
+  const value = parseJson(bytes);
   if (!isRecord(value)) throw new InvalidRecordError("not an object");
   const { sig, ...fields } = value;
   return { sig, fields };

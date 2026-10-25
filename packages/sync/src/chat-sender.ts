@@ -124,17 +124,19 @@ export function createChatSender(options: ChatSenderOptions) {
     return flush();
   }
 
-  async function seal(messages: ChatMessage[]) {
-    const closes = state.closes;
-    let sealed: Awaited<ReturnType<typeof encodeBatch>>;
-
+  async function encoded(messages: ChatMessage[]) {
     try {
-      sealed = await encodeBatch(options.peer, options.content, messages);
+      return await encodeBatch(options.peer, options.content, messages);
     } catch (error) {
       // Nothing is lost: the messages wait for the next writable event.
       queue.unshift(...messages);
       throw error;
     }
+  }
+
+  async function seal(messages: ChatMessage[]) {
+    const closes = state.closes;
+    const sealed = await encoded(messages);
 
     // The stream closed while the batch was sealed, even if it has reopened: the batch goes
     // again, with whatever queued since, once the stream is writable.

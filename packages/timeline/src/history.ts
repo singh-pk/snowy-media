@@ -196,6 +196,12 @@ async function settledOf(previous: Promise<unknown>) {
   }
 }
 
+// Runs `work` once `previous` has settled, however it settled.
+async function afterSettled<T>(previous: Promise<unknown>, work: () => Promise<T>) {
+  await settledOf(previous);
+  return work();
+}
+
 /**
  * The history of `branch`, sequenced by `sequencer`, whose document starts from `from`, or empty.
  * Batches handed to it must already be verified: signed by their author and chained to the
@@ -243,11 +249,7 @@ export function createHistory(options: {
 
   // Runs `work` once every call before it has finished.
   function serial<T>(work: () => Promise<T>): Promise<T> {
-    const previous = last;
-    const run = (async () => {
-      await settledOf(previous);
-      return work();
-    })();
+    const run = afterSettled(last, work);
     last = run;
     return run;
   }

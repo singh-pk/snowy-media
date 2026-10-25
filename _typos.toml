@@ -14,6 +14,7 @@ caf = "caf" # Core Audio Format
 seeked = "seeked" # the HTML media event name
 als = "als" # MPEG-4 Audio Lossless Coding decoder
 alls = "alls" # strength option of FFmpeg's noise filter
+iif = "iif" # as typos splits IIFEs, immediately invoked function expressions
 
 [default.extend-identifiers]
 f64toi64 = "f64toi64" # libav.js API
