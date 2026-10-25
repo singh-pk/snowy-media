@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media worker's demux pump in Chromium: through a ring much smaller
-// than each file, every stream's packets (timestamps, key flag, size and bytes) equal native
-// ffprobe's (test/fixtures/expected.json); and a pump that fails ends the ring with FAILED.
+// The media worker's demux pump in Chromium: through a ring much smaller than each file, and
+// through one smaller than most packets, which go in pieces, every stream's packets
+// (timestamps, key flag, size and bytes) equal native ffprobe's (test/fixtures/expected.json);
+// and a pump that fails ends the ring with FAILED.
 // Usage: bun run test.
 
 import { afterAll, expect, test } from "bun:test";
@@ -28,50 +29,52 @@ const server = await serveEngine("<!doctype html><title>test</title>");
 
 afterAll(() => server.stop(true));
 
-test("demuxes every fixture as ffprobe does", async () => {
-  const browser = await launch();
+// 256 KiB: room for an uncompressed frame, and smaller than the larger fixtures, so records
+// wrap and the pump waits. 4 KiB: a packet over 2 KiB goes in pieces.
+for (const capacity of [1 << 18, 1 << 12]) {
+  test(`demuxes every fixture as ffprobe does, through a ring of ${capacity >> 10} KiB`, async () => {
+    const browser = await launch();
 
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
+    try {
+      const tab = await browser.newPage();
+      await tab.goto(server.url.href);
 
-    const hashes = await tab.evaluate(
-      async ({ page, worker, files }) => {
-        const support: typeof import("./support/page") = await import(page);
-        const media = support.startMedia(worker);
-        const all: Record<string, Awaited<ReturnType<typeof support.hashRing>>> = {};
+      const hashes = await tab.evaluate(
+        async ({ page, worker, files, size }) => {
+          const support: typeof import("./support/page") = await import(page);
+          const media = support.startMedia(worker);
+          const all: Record<string, Awaited<ReturnType<typeof support.hashRing>>> = {};
 
-        for (const { name: n, dts, streams } of files) {
-          const res = await fetch(`/test/fixtures/${n}`);
-          const blob = await res.blob();
-          await media.request({ type: "open", file: new File([blob], n) });
-          // 256 KiB: room for an uncompressed frame, and smaller than the larger fixtures, so
-          // records wrap and the pump waits.
-          const ring = support.createRing(1 << 18);
-          const hashed = support.hashRing(ring, dts);
-          await media.request({ type: "demux", ring, streams, from: 0 });
-          all[n] = await hashed;
-        }
+          for (const { name: n, dts, streams } of files) {
+            const res = await fetch(`/test/fixtures/${n}`);
+            const blob = await res.blob();
+            await media.request({ type: "open", file: new File([blob], n) });
+            const ring = support.createRing(size);
+            const hashed = support.hashRing(ring, dts);
+            await media.request({ type: "demux", ring, streams, from: 0 });
+            all[n] = await hashed;
+          }
 
-        media.stop();
-        return all;
-      },
-      { page: PAGE, worker: MEDIA_WORKER, files: fixtures },
-    );
+          media.stop();
+          return all;
+        },
+        { page: PAGE, worker: MEDIA_WORKER, files: fixtures, size: capacity },
+      );
 
-    for (const [file, { video, audio }] of Object.entries(expected)) {
-      const got = hashes[file];
-      if (typeof got !== "object") throw new Error(`${file}: ${String(got)}`);
-      const want = (h: Hash) => ({ packets: h.packets, packetsSha256: h.packetsSha256 });
-      expect(got[video.id], `${file} video`).toEqual(want(video));
-      expect(got[audio.id], `${file} audio`).toEqual(want(audio));
+      for (const [file, { video, audio }] of Object.entries(expected)) {
+        const got = hashes[file];
+        if (typeof got !== "object") throw new Error(`${file}: ${String(got)}`);
+        const want = (h: Hash) => ({ packets: h.packets, packetsSha256: h.packetsSha256 });
+        expect(got[video.id], `${file} video`).toEqual(want(video));
+        expect(got[audio.id], `${file} audio`).toEqual(want(audio));
+      }
+    } finally {
+      await browser.close();
     }
-  } finally {
-    await browser.close();
-  }
-}, 120_000);
+  }, 120_000);
+}
 
-// The pump fails on a packet larger than the ring, and on a stream the file lacks.
+// The pump fails on a stream the file lacks.
 test("a pump that fails ends the ring with FAILED", async () => {
   const browser = await launch();
 
@@ -101,15 +104,13 @@ test("a pump that fails ends the ring with FAILED", async () => {
           }
         }
 
-        const tooSmall = await demux(64, [0]);
         const noStream = await demux(1 << 16, [7]);
         media.stop();
-        return { tooSmall, noStream };
+        return { noStream };
       },
       { page: PAGE, worker: MEDIA_WORKER },
     );
 
-    expect(results.tooSmall).toEqual([expect.stringContaining("exceeds the ring"), "failed"]);
     expect(results.noStream).toEqual(["Error: demux: no stream 7", "failed"]);
   } finally {
     await browser.close();

@@ -198,6 +198,47 @@ test("a frame put up for a time goes up even if the time stops short of it", asy
   }
 }, 60_000);
 
+test("a decoder closed partway through handing over a packet leaves the next decoder whole frames", async () => {
+  const browser = await launch();
+  const name = "mpeg2-aac.mov";
+  const { video } = expected[name] ?? { video: undefined };
+  if (!video) throw new Error(`${name}: no expected results`);
+  const { frames, times } = plan(video);
+
+  try {
+    const tab = await browser.newPage();
+    await tab.goto(server.url.href);
+    const got = await tab.evaluate(
+      async ({ page, worker, n, size }) => {
+        const support: typeof import("./support/page") = await import(page);
+        const media = support.startMedia(worker);
+        const res = await fetch(`/test/fixtures/${n}`);
+        const blob = await res.blob();
+        const opened = await media.request({ type: "open", file: new File([blob], n) });
+        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
+        const params = opened.video[0];
+        if (!params) throw new Error(`${n}: no video parameters`);
+        const capacity = 1 << 16;
+        const decoders = support.startDecoders(capacity);
+        const partial = support.abandonPacket(decoders, params, capacity);
+        const rings = { packets: 1 << 12, decoders };
+        const { shown } = await support.render(media, 0, params, size, rings);
+        media.stop();
+        return { partial, ids: shown.filter((s) => s.drawn).map((s) => s.id) };
+      },
+      {
+        page: PAGE,
+        worker: MEDIA_WORKER,
+        n: name,
+        size: { times, width: video.width, height: video.height },
+      },
+    );
+    expect(got).toEqual({ partial: true, ids: frames });
+  } finally {
+    await browser.close();
+  }
+}, 60_000);
+
 for (const [file, { video }] of Object.entries(expected)) {
   test(`shows ${file} at its timestamps, as FFmpeg shows it`, async () => {
     const browser = await launch();
@@ -243,6 +284,48 @@ for (const [file, { video }] of Object.entries(expected)) {
       expect(difference, `${file} grid ${JSON.stringify(got.grid)}`).toBeLessThan(
         MAX_LEVEL_DIFFERENCE,
       );
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  // Through a packet ring of 4 KiB and a ring of 64 KiB to the video decode worker, its larger
+  // packets go in pieces, a frame of FFmpeg's video handed over in parts as room frees.
+  test(`shows ${file} through rings smaller than its packets`, async () => {
+    const browser = await launch();
+    const { frames, times } = plan(video);
+    const scale = video.scale ?? 1;
+    const [width, height] = [video.shown[0] / scale, video.shown[1] / scale];
+
+    try {
+      const tab = await browser.newPage();
+      await tab.goto(server.url.href);
+      const got = await tab.evaluate(
+        async ({ page, worker, n, stream, size }) => {
+          const support: typeof import("./support/page") = await import(page);
+          const media = support.startMedia(worker);
+          const res = await fetch(`/test/fixtures/${n}`);
+          const blob = await res.blob();
+          const opened = await media.request({ type: "open", file: new File([blob], n) });
+          if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
+          const params = opened.video[stream];
+          if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
+          const rings = { packets: 1 << 12, decoders: support.startDecoders(1 << 16) };
+          const result = await support.render(media, stream, params, size, rings);
+          media.stop();
+          return result;
+        },
+        {
+          page: PAGE,
+          worker: MEDIA_WORKER,
+          n: file,
+          stream: video.id,
+          size: { times, width, height },
+        },
+      );
+      const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
+      if (video.shown[0] === video.width) expect(ids).toEqual(frames);
+      else expect(ids.length).toBe(frames.length);
     } finally {
       await browser.close();
     }

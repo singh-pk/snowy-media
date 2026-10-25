@@ -43,9 +43,35 @@ function crc32(data: Uint8Array) {
 
 // The video decode worker, started once for every render, as the render worker keeps one.
 // This page is test/dist/test/support/page.js; the engine's workers are in test/dist.
-const wasm = createWasmVideo(
-  () => new Worker(new URL("../../video.worker.js", import.meta.url), { type: "module" }),
-);
+const startVideoWorker = () =>
+  new Worker(new URL("../../video.worker.js", import.meta.url), { type: "module" });
+const wasm = createWasmVideo(startVideoWorker);
+
+/** The decoders in a video decode worker of their own, its ring `capacity` bytes. */
+export const startDecoders = (capacity: number) => createWasmVideo(startVideoWorker, capacity);
+
+/**
+ * Hands a decoder of `decoders` for the stream with parameters `p` a packet twice the size of
+ * their ring, and closes it partway. Whether the packet went in part, as it must.
+ */
+export function abandonPacket(
+  decoders: ReturnType<typeof startDecoders>,
+  p: VideoParams,
+  capacity: number,
+) {
+  const events = {
+    output: (f: { close(): void }) => f.close(),
+    dequeue: () => {},
+    error: () => {},
+  };
+  const decoder = decoders.createDecoder(p, events);
+  const data = new Uint8Array(2 * capacity);
+  const packet = { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data };
+  const whole = decoder.decode(packet, 0n, 0, 0);
+  decoder.close();
+  return !whole;
+}
+
 const timestamp = (t: bigint) => (t === AV_NOPTS_VALUE ? "" : String(t));
 
 /**
@@ -442,7 +468,8 @@ export async function failDemux(
  * once the frames up to it are decoded. Returns, for each time, whether a new frame went up
  * and the frame number on the canvas, and the brightness grid of the first frame shown. Each
  * time is shown once its frame is uploaded; or, `ahead`, as the render worker's animation
- * frames show it: with what is up, the frame due then going up for the next.
+ * frames show it: with what is up, the frame due then going up for the next. With `rings`,
+ * the packet ring holds `packets` bytes and FFmpeg's video goes to `decoders`.
  */
 export async function render(
   media: ReturnType<typeof startMedia>,
@@ -454,6 +481,7 @@ export async function render(
     height,
     ahead = false,
   }: { times: number[]; width: number; height: number; ahead?: boolean },
+  rings?: { packets: number; decoders: ReturnType<typeof startDecoders> },
 ) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("no GPU adapter");
@@ -465,12 +493,14 @@ export async function render(
   // COPY_SRC, to read back what was drawn.
   const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
   context.configure({ device, format, usage, alphaMode: "opaque" });
-  const ring = createRing(RING_CAPACITY);
+  const ring = createRing(rings?.packets ?? RING_CAPACITY);
   const demuxed = media.request({ type: "demux", ring, streams: [stream], from: 0 });
   // Wakes the wait for frames below on every change in how far decoding is.
   const decoding = { changed: () => {} };
   const compositor = createCompositor(device, context, format);
-  const output = createVideoOutput(ring, p, compositor, wasm, () => decoding.changed());
+  const output = createVideoOutput(ring, p, compositor, rings?.decoders ?? wasm, () =>
+    decoding.changed(),
+  );
   // Rows of a texture copy are a multiple of 256 bytes apart.
   const stride = Math.ceil((width * 4) / 256) * 256;
   const buffer = device.createBuffer({

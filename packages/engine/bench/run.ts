@@ -84,8 +84,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
       { entry: ENTRY, page: PAGE },
     ),
   // The packet ring between two workers (ring.worker.ts), at the engine's capacity: moving
-  // 256 MiB in packets of 1 KiB, 64 KiB and 1 MiB, and how late the consumer wakes up for a
-  // packet written every 2 ms (median and 99th percentile).
+  // 256 MiB in packets of 1 KiB, 64 KiB, 1 MiB and 4 MiB (in pieces), and how
+  // late the consumer wakes up for a packet written every 2 ms (median and 99th percentile).
   ring: (tab) =>
     tab.evaluate(
       async ({ page, worker }) => {
@@ -118,6 +118,7 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
           ["1 KiB", 1 << 10],
           ["64 KiB", 1 << 16],
           ["1 MiB", 1 << 20],
+          ["4 MiB", 1 << 22],
         ] as const) {
           const { ms } = await run(size, total / size, 0);
           timings[`256 MiB in ${label}`] = ms;
