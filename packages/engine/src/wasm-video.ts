@@ -21,10 +21,10 @@ import {
 import { RING_CAPACITY, createConsumer, createProducer, createRing, type Packet } from "./ring";
 
 // The ring to the worker: room for the packets of a decoder, which waits while the next does not
-// fit (`fits`), and as much again for another's, with SPARE kept for the records that must
-// always go, the frames going back above all. The ring back holds small records only.
+// fit (`fits`), and as much again for another's, with a sixteenth (SPARE) kept for the records
+// that must always go, the frames going back above all. The ring back holds small records only.
 const TO_CAPACITY = 2 * RING_CAPACITY;
-const SPARE = 1 << 20;
+const SPARE = 1 / 16;
 // A frame's `packed` word as the record's pts.
 const PACKED = [0n, 1n] as const;
 const FROM_CAPACITY = 1 << 16;
@@ -65,13 +65,18 @@ export interface Decoder {
   /**
    * Decodes `packet`, whose frame is due at `pts`, in the stream's time base: at `timestamp`,
    * for `duration`, in microseconds. `pts` is the packet's, or its dts where it has none.
+   * Whether it has all of it: a packet larger than the room `fits` saw goes in parts, the
+   * rest on later calls with the same packet, each once it `fits`.
    */
-  decode(packet: Packet, pts: bigint, timestamp: number, duration: number): void;
+  decode(packet: Packet, pts: bigint, timestamp: number, duration: number): boolean;
   /** Resolves once every packet is decoded and its frames are out. */
   flush(): Promise<void>;
   /** Packets handed over and not yet decoded. */
   queued(): number;
-  /** Whether a packet of `size` bytes can be handed over now; if not, one decoded makes room. */
+  /**
+   * Whether a packet of `size` bytes, or its next part, can be handed over now; if not, one
+   * decoded makes room.
+   */
   fits(size: number): boolean;
   close(): void;
 }
@@ -81,14 +86,20 @@ interface Open {
   queued: number;
   // Made by a flush, so a close without one rejects nothing no one awaits.
   flushed?: PromiseWithResolvers<void>;
+  // Part of a packet is in the worker's ring, the rest waiting for room.
+  handing: boolean;
+  // Whether a `roomFor` waits for the rest of the packet, so one at a time does.
+  waiting: boolean;
 }
 
 /**
  * The decoders, in the worker `start` starts: the bundled src/video.worker.ts next to this
- * file, written out as is so that a bundler finds the worker.
+ * file, written out as is so that a bundler finds the worker. Packets go to it through a ring of
+ * `capacity` bytes.
  */
 export function createWasmVideo(
   start = () => new Worker(new URL("./video.worker.js", import.meta.url), { type: "module" }),
+  capacity = TO_CAPACITY,
 ) {
   const state = {
     // The ring to the worker, once it is started.
@@ -235,7 +246,7 @@ export function createWasmVideo(
   // after.
   function worker() {
     if (state.records) return state.records;
-    const to = createRing(TO_CAPACITY);
+    const to = createRing(capacity);
     const from = createRing(FROM_CAPACITY);
     const records = createProducer(to);
     const started = start();
@@ -273,7 +284,7 @@ export function createWasmVideo(
     }
 
     const id = state.next++;
-    const decoder: Open = { events, queued: 0 };
+    const decoder: Open = { events, queued: 0, handing: false, waiting: false };
     open.set(id, decoder);
     const [num, den] = p.timeBase;
     const index = VIDEO_MODULES.indexOf(module);
@@ -287,12 +298,50 @@ export function createWasmVideo(
       p.params.length,
     );
 
+    // Wakes the decode loop once the next part of a packet of `size` bytes fits: the worker frees
+    // each piece as it copies it, with no packet decoded to say so. The flag goes up before the
+    // count is read, so a piece freed after the check moves the count.
+    async function roomFor(size: number) {
+      const records = worker();
+      decoder.waiting = true;
+      records.waitingForRoom(true);
+
+      for (;;) {
+        const seen = records.bell();
+        if (!open.has(id) || records.hasRoom(size, capacity * SPARE)) break;
+        await records.moved(seen);
+      }
+
+      records.waitingForRoom(false);
+      decoder.waiting = false;
+      if (open.has(id)) events.dequeue();
+    }
+
     return {
       // Copied from the packet ring into the worker's, which `fits` has made room in.
       decode(packet, pts) {
         const { data, dts, duration, flags } = packet;
+        const kind = (id << KIND_BITS) | TO_VIDEO.packet;
+        const spare = capacity * SPARE;
+        decoder.handing = !worker().offer(
+          kind,
+          flags,
+          pts,
+          dts,
+          duration,
+          data,
+          0,
+          data.length,
+          spare,
+        );
+
+        if (decoder.handing) {
+          if (!decoder.waiting) void roomFor(data.length);
+          return false;
+        }
+
         decoder.queued++;
-        put((id << KIND_BITS) | TO_VIDEO.packet, flags, pts, dts, duration, data, data.length);
+        return true;
       },
       flush() {
         decoder.flushed = Promise.withResolvers<void>();
@@ -300,11 +349,16 @@ export function createWasmVideo(
         return decoder.flushed.promise;
       },
       queued: () => decoder.queued,
-      fits: (size) => worker().hasRoom(size, SPARE),
+      fits: (size) => worker().hasRoom(size, capacity * SPARE),
       // A flush under way ends, as VideoDecoder.close() ends one.
       close() {
         if (!open.delete(id)) return;
         decoder.flushed?.reject(new DOMException("closed", "AbortError"));
+
+        if (decoder.handing && !worker().abandon()) {
+          throw new Error("video decode worker: its ring is full");
+        }
+
         put((id << KIND_BITS) | TO_VIDEO.close);
       },
     };

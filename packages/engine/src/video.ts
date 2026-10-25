@@ -40,6 +40,7 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
       // The chunk copies the data, so the packet can be released at once.
       const type = packet.flags & KEY_FLAG ? "key" : "delta";
       decoder.decode(new EncodedVideoChunk({ type, timestamp, duration, data: packet.data }));
+      return true;
     },
     flush: () => decoder.flush(),
     queued: () => decoder.decodeQueueSize,
@@ -97,6 +98,8 @@ export function createVideoOutput(
     // lead it are left out.
     started: false,
     leading: false,
+    // Part of the packet in hand is with the decoder, the rest waiting for room.
+    handing: false,
     // Where it plays from, which a scrub moves on, and whether one has.
     from,
     moved: false,
@@ -254,26 +257,30 @@ export function createVideoOutput(
         continue;
       }
 
-      const first = !state.started;
-      state.started = true;
-
-      // Started at a CRA, as after a seek, the RASL pictures after it refer to pictures the
-      // decoder never had.
-      if (!first && state.leading && isRasl(p, packet.data)) {
-        consumer.release();
-        continue;
-      }
-
-      state.leading = first;
       // A missing pts takes the dts, right for a stream without B-frames. A raw stream with
       // them has neither and is not played yet.
       const pts = packet.pts === NO_TIMESTAMP ? packet.dts : packet.pts;
       if (pts === NO_TIMESTAMP) throw new Error("a video packet has no timestamp");
       const timestamp = micros(Number(pts));
-      const dts = micros(Number(packet.dts === NO_TIMESTAMP ? pts : packet.dts));
-      decoding.feed(timestamp, dts, makesFrame(p, packet.data));
-      decoder.decode(packet, pts, timestamp, micros(packet.duration));
-      consumer.release();
+
+      if (!state.handing) {
+        const first = !state.started;
+        state.started = true;
+
+        // Started at a CRA, as after a seek, the RASL pictures after it refer to pictures the
+        // decoder never had.
+        if (!first && state.leading && isRasl(p, packet.data)) {
+          consumer.release();
+          continue;
+        }
+
+        state.leading = first;
+        const dts = micros(Number(packet.dts === NO_TIMESTAMP ? pts : packet.dts));
+        decoding.feed(timestamp, dts, makesFrame(p, packet.data));
+      }
+
+      state.handing = !decoder.decode(packet, pts, timestamp, micros(packet.duration));
+      if (!state.handing) consumer.release();
     }
 
     await decoder.flush();

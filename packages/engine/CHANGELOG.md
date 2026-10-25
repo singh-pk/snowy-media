@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Paused while video runs behind, the frame due no longer stays off screen for the whole pause, an older frame showing instead.
 - A `pause`, `open` or `close` settles a `play` still waiting for the browser to allow audio; it no longer stays pending until a user gesture.
 - `play` resolves once the frame due by the clock heard is on screen, not as soon as the clock runs, and a `seek` while playing that a `pause` interrupts resolves once its frame is on screen, as a paused seek does.
+- A video packet larger than 8 MiB, as a 4K FFV1 or ProRes 4444 XQ frame may be, plays: it goes through the rings between threads in pieces, where it failed with `exceeds the ring`.
 - A demux failure reports its own error, not `demuxing failed`, and the media worker never hangs reporting it while its ring is full and no longer read.
 - Closing an FFmpeg-decoded video stream without flushing it no longer leaves an unhandled promise rejection in the render worker.
 - A `seek` or `fastSeek` after `open`, a failure or a `play` that rejected no longer starts playing: only a `play` since then makes a seek play on.
