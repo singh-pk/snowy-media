@@ -43,3 +43,10 @@ This package is the edit document of the Snowy editor: a magnetic timeline of se
 5. **Event-driven only.** No `setTimeout` or `setInterval`, and no polling. The package acts only when it is called.
 6. **Pure.** No dependency on another Snowy package, and no browser-only API, so it runs in Bun.
 7. **Rights come from grants only.** Who may edit is decided by signed grants alone; any further limit on who edits is the app's policy, applied outside the package.
+
+## Review
+
+Beyond the rules above and [docs/architecture.md](docs/architecture.md), a reviewer checks:
+
+- **Determinism.** Nothing depends on when or in what order something arrived rather than on its place in the history (rule 2). A test of a new operation replays it on a fresh document and compares.
+- **Small operations.** An operation names what changed, not the whole object it changed.
