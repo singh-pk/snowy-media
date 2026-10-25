@@ -161,7 +161,7 @@ const MIN_POINTS = 300;
 const COLOURED = 0.1;
 const MIN_COLOURED = 400;
 // The frames measured before giving up on a stream, as in a dark or grey one: its planes are
-// read, as before.
+// read back from then on, as when there is no measurement.
 const MAX_TRIES = 60;
 // How far Chromium's conversion may be from this one's, at the median and the 95th percentile of
 // the points: the two filter differently at edges, and Apple's gamma moves a midtone by 11 levels

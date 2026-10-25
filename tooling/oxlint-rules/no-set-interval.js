@@ -20,8 +20,7 @@ export default {
     type: "suggestion",
     schema: [],
     messages: {
-      interval:
-        "Do not use setInterval. Schedule the next tick with setTimeout from inside the previous one, or wait on the event itself.",
+      interval: "Do not use setInterval. Wait on the event itself.",
     },
   },
   create(context) {

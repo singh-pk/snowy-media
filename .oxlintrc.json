@@ -39,6 +39,7 @@
     "repo/no-classes": "error",
     "repo/no-module-let": "error",
     "repo/no-nested-await": "error",
+    "repo/no-plan-comments": "error",
     "repo/no-promise-chains": "error",
     "repo/no-set-interval": "error",
     "no-restricted-imports": [
@@ -60,6 +61,12 @@
     }
   ],
   "overrides": [
+    {
+      "files": ["packages/*/src/**"],
+      "rules": {
+        "repo/no-timers": "error"
+      }
+    },
     {
       "files": ["packages/ffmpeg/src/io.js"],
       "globals": {
