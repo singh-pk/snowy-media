@@ -23,7 +23,8 @@ A full FFmpeg build takes 20+ minutes; changing only `src/` relinks in under a m
 | --- | --- |
 | `Dockerfile` | the only build path; every pinned version and checksum |
 | `build/configure.sh` | FFmpeg configure flags per module; which decoders go to `audio-ext` and `video` |
-| `src/*.c` | the entire JavaScript API of each module (getters, open/read/seek, decoding); `src/sny.h` lists which files each module has |
+| `src/*.c` | the entire JavaScript API of each module (getters, open/read/seek, decoding) |
+| `src/sny.h` | what the API files share, and which files each module is built from |
 | `src/io.js` | Emscripten imports that route AVIO reads to JavaScript hooks |
 | `scripts/gen-dts.ts` | generates `dist/<module>/index.{js,d.ts}` from `src/*.c` |
 | `scripts/gen-fixtures.ts` | builds `test/fixtures` and `expected.json` from native `ffprobe` |
@@ -31,6 +32,7 @@ A full FFmpeg build takes 20+ minutes; changing only `src/` relinks in under a m
 | `test/` | Playwright tests; `test/support/` is shared with `bench/` |
 | `bench/` | benchmark harness, library adapters, recorded results |
 | `docs/architecture.md` | design and the reasons behind it |
+| `docs/decoding.md` | decoding audio and video after demuxing, for users |
 
 ## Rules
 

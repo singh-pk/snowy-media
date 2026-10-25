@@ -18,6 +18,22 @@ Every peer keeps its own copy of what it receives, so playback, chat and editing
 > [!NOTE]
 > In development and not yet published, with no public API yet. So far it has the signed and encrypted objects that sessions exchange (media chunks, the catalog, codec setups, control records and chat batches), the source's newest records as each peer holds them and as a joiner asks for them, and chat: ordering, edits, deletes and reactions, sending, and repairing missed messages from other peers. [docs/architecture.md](docs/architecture.md) is the design.
 
+## How it works
+
+A watch session, as designed; the forwarders and direct connections are not built yet.
+
+```mermaid
+flowchart LR
+  file[("Local file")] --> source["Source"]
+  source -- "each chunk once,<br/>control, catalog" --> relay["Relay<br/>MoQ over WebTransport,<br/>stores nothing"]
+  relay -- "live media" --> forwarder["Forwarder"]
+  forwarder -- "WebRTC data channels" --> r1["Receiver"]
+  forwarder -- "WebRTC data channels" --> r2["Receiver"]
+  relay -. "chat, records, chunks<br/>no forwarder holds" .-> r1
+```
+
+A peer that turns on "Share my upload" and has the upload to spare forwards to a group, and every peer keeps what it received. [docs/architecture.md](docs/architecture.md) is the design, edit sessions included.
+
 ## Requirements
 
 A page served with cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) in desktop Chromium, as `@snowy-media/engine` needs, which also has WebTransport, WebRTC data channels, the Origin Private File System, IndexedDB, Ed25519 in Web Crypto, and the File System Access API: a source reads its media from a `FileSystemFileHandle` the app keeps, so it can serve the same file again after a reload. A session needs a MoQ relay, and a watch session two STUN endpoints for its peer groups; nothing else runs on a server.

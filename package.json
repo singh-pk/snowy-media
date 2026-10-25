@@ -22,9 +22,10 @@
     "lint:md": "markdownlint-cli2",
     "lint:rules": "bun tooling/check-lint-rules.ts",
     "lint:ratchet": "bun tooling/check-baseline.ts",
+    "lint:structure": "bun tooling/check-structure.ts",
     "lint:unused": "knip",
     "typecheck": "tsc && bun --filter \"*\" typecheck",
-    "check": "bun run format:check && bun run lint && bun run lint:rules && bun run lint:ratchet && bun run typecheck && bun run lint:md && bun run lint:unused"
+    "check": "bun run format:check && bun run lint && bun run lint:rules && bun run lint:ratchet && bun run lint:structure && bun run typecheck && bun run lint:md && bun run lint:unused"
   },
   "devDependencies": {
     "@types/bun": "1.4.3",
@@ -33,6 +34,7 @@
     "chai": "5.3.3",
     "jscpd": "5.4.1",
     "knip": "6.41.0",
+    "markdownlint": "0.41.1",
     "markdownlint-cli2": "0.23.3",
     "oxfmt": "0.73.0",
     "oxlint": "1.88.0",

@@ -13,6 +13,19 @@ The edit document of the [Snowy](https://github.com/singh-pk/snowy-media) editor
 > [!NOTE]
 > In development and not yet published, with no public API yet. So far it has time in flicks, item ids, storyline position keys, layout (the storyline's start times, connected items' times and lanes), batches of operations in signed canonical bytes, applying operations to a document (sequences, roles, assets, items, splits, joins, effects and keyframes), and a branch's history: signed entries, pending batches shown at once and settled by the sequencer, and concurrent entries marked; undo, redo, revert and going back to any entry; branches, created, merged and closed by entries; the logs and histories of the project folder, written in segments and opened again; and the render plan of a sequence's clips and transitions. [docs/architecture.md](docs/architecture.md) is the design.
 
+## How it works
+
+```mermaid
+flowchart LR
+  authors["Each person or agent<br/>signs batches of operations"] -- "batches" --> sequencer["Sequencer<br/>appends them in one order"]
+  authors -. "shown at once, pending" .-> document
+  sequencer -- "entries" --> history["A branch's history<br/>linear, append-only"]
+  history --> document["Document<br/>storylines, items, effects"]
+  document --> plan["Render plan<br/>for the engine to play"]
+```
+
+Every peer applies the same entries in the same order and reaches the same document; undo and revert are new batches.
+
 ## Licence
 
 The [Snowy License 1.0](https://github.com/singh-pk/snowy-media/blob/main/LICENSES/LicenseRef-Snowy-License-1.0.txt): free for individuals, companies of up to 3 people, non-profits, education, open-source projects and evaluation. Larger companies using it in production need a company licence ([LICENSE.md](https://github.com/singh-pk/snowy-media/blob/main/LICENSE.md)).
