@@ -59,6 +59,12 @@ async function settledOf(previous: Promise<unknown>) {
   }
 }
 
+// Runs `work` once `previous` has settled, however it settled.
+async function afterSettled<T>(previous: Promise<unknown>, work: () => Promise<T>) {
+  await settledOf(previous);
+  return work();
+}
+
 /**
  * A project's branches, with main sequenced by `sequencer` from `from`, or empty. Batches and
  * entries handed to it must already be verified, as `createHistory` asks. Its calls run one at a
@@ -75,11 +81,7 @@ export function createBranches(options: { sequencer: KeyId; from?: Snapshot }) {
 
   // Runs `work` once every call before it has finished.
   function serial<T>(work: () => Promise<T>): Promise<T> {
-    const previous = last;
-    const run = (async () => {
-      await settledOf(previous);
-      return work();
-    })();
+    const run = afterSettled(last, work);
     last = run;
     return run;
   }

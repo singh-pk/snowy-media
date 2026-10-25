@@ -73,6 +73,15 @@ export async function sealBatch(content: CryptoKey, { messages, checkpoint }: Ch
   return { key, bytes };
 }
 
+// The batch's plaintext, or an `InvalidBatchError` if it doesn't open under the content key.
+async function opened(content: CryptoKey, key: string, bytes: Bytes) {
+  try {
+    return await unseal(content, key, bytes);
+  } catch {
+    throw new InvalidBatchError("doesn't open under the content key");
+  }
+}
+
 function parse(plaintext: Bytes) {
   try {
     return JSON.parse(decoder.decode(plaintext)) as unknown;
@@ -120,13 +129,7 @@ export async function decodeBatch(
   if (match === null) throw new InvalidBatchError(`not a batch key: ${key}`);
 
   const [, author = "", first = "", last = ""] = match;
-  let plaintext: Bytes;
-
-  try {
-    plaintext = await unseal(content, key, bytes);
-  } catch {
-    throw new InvalidBatchError("doesn't open under the content key");
-  }
+  const plaintext = await opened(content, key, bytes);
 
   const batch = checkBody(parse(plaintext), author, Number(first), Number(last));
   const chain = await proven(batch.messages, batch.checkpoint);

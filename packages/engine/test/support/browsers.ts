@@ -119,15 +119,14 @@ export async function launch(options: LaunchOptions = {}) {
   // Confinements one after another; close waits for them, so a failure comes out there.
   const confined = { last: Promise.resolve() };
 
+  async function confineAfter(before: Promise<void>) {
+    await before;
+    await confine(browser);
+  }
+
   // Confines once the confinement before has finished.
   function again() {
-    const before = confined.last;
-
-    confined.last = (async () => {
-      await before;
-      await confine(browser);
-    })();
-
+    confined.last = confineAfter(confined.last);
     return confined.last;
   }
 

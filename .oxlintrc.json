@@ -38,7 +38,6 @@
     "repo/no-access-modifiers": "error",
     "repo/no-await-assertion": "error",
     "repo/no-classes": "error",
-    "repo/no-module-let": "error",
     "repo/no-nested-await": "error",
     "repo/no-promise-chains": "error",
     "repo/no-set-interval": "error",
@@ -54,6 +53,9 @@
       }
     ],
     "repo/disable-needs-reason": "error",
+    "repo/factory-only": "error",
+    "repo/no-forced-closures": "error",
+    "repo/no-loose-let": "error",
     "repo/no-process-comments": "error"
   },
   "jsPlugins": [
@@ -115,6 +117,12 @@
         "repo/no-focused-tests": "error",
         "repo/test-has-assertion": "error",
         "repo/no-conditional-expect": "error"
+      }
+    },
+    {
+      "files": ["packages/sync/src/relay-auth.ts"],
+      "rules": {
+        "repo/no-loose-let": "off"
       }
     }
   ]

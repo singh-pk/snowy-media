@@ -19,6 +19,15 @@ export const signature = string(/^[A-Za-z0-9_-]{85}[AQgw]$/);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+// The JSON in `bytes`, or an `InvalidError` for anything that isn't UTF-8 JSON.
+function parseJson(bytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(decoder.decode(bytes));
+  } catch {
+    throw new InvalidError("", "not UTF-8 JSON");
+  }
+}
+
 /** Bytes as unpadded base64url. */
 export const base64url = (bytes: ArrayBuffer) =>
   new Uint8Array(bytes).toBase64({ alphabet: "base64url", omitPadding: true });
@@ -48,15 +57,7 @@ export function signedFormat<S extends { sig: string }>(options: {
   /** Reads an object's bytes, refusing any that aren't its canonical bytes. */
   function decode(bytes: Uint8Array): S {
     if (bytes.byteLength > MAX_SIGNED_BYTES) throw new InvalidError("", `${noun} over 1 MiB`);
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(decoder.decode(bytes));
-    } catch {
-      throw new InvalidError("", "not UTF-8 JSON");
-    }
-
-    const value = check(parsed);
+    const value = check(parseJson(bytes));
     const canonical = bytesOf(value);
     const same =
       canonical.byteLength === bytes.byteLength && canonical.every((b, i) => b === bytes[i]);

@@ -156,17 +156,18 @@ export function checkMessage(value: unknown): ChatMessage {
 export const encodeMessage = (message: ChatMessage): Bytes =>
   encoder.encode(JSON.stringify(checkMessage(message)));
 
-/** Reads and checks a message's bytes. Throws an `InvalidMessageError` for anything else. */
-export function decodeMessage(bytes: Bytes): ChatMessage {
-  let value: unknown;
-
+// The JSON in `bytes`, or an `InvalidMessageError` for anything that isn't UTF-8 JSON.
+function parseJson(bytes: Bytes): unknown {
   try {
-    value = JSON.parse(decoder.decode(bytes));
+    return JSON.parse(decoder.decode(bytes));
   } catch {
     throw new InvalidMessageError("not UTF-8 JSON");
   }
+}
 
-  return checkMessage(value);
+/** Reads and checks a message's bytes. Throws an `InvalidMessageError` for anything else. */
+export function decodeMessage(bytes: Bytes): ChatMessage {
+  return checkMessage(parseJson(bytes));
 }
 
 /** The SHA-256 of a message's canonical bytes, as unpadded base64url: what `prev` names. */

@@ -61,10 +61,11 @@ for (const capacity of [1 << 18, 1 << 12]) {
         { page: PAGE, worker: MEDIA_WORKER, files: fixtures, size: capacity },
       );
 
+      const want = (h: Hash) => ({ packets: h.packets, packetsSha256: h.packetsSha256 });
+
       for (const [file, { video, audio }] of Object.entries(expected)) {
         const got = hashes[file];
         if (typeof got !== "object") throw new Error(`${file}: ${String(got)}`);
-        const want = (h: Hash) => ({ packets: h.packets, packetsSha256: h.packetsSha256 });
         expect(got[video.id], `${file} video`).toEqual(want(video));
         expect(got[audio.id], `${file} audio`).toEqual(want(audio));
       }

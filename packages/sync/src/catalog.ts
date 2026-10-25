@@ -153,18 +153,20 @@ function checkSetup(value: unknown) {
   return { record, setup };
 }
 
+// The bytes a description spells in base64url, or an `InvalidRecordError`.
+function decodeDescription(description: string): Bytes {
+  try {
+    return new Uint8Array(Uint8Array.fromBase64(description, { alphabet: "base64url" }));
+  } catch {
+    throw new InvalidRecordError("bad description");
+  }
+}
+
 // The description's bytes, in their one base64url spelling, so one setup has one signed form.
 function descriptionBytes(description: unknown) {
   if (typeof description !== "string") throw new InvalidRecordError("bad description");
 
-  let bytes: Bytes;
-
-  try {
-    bytes = new Uint8Array(Uint8Array.fromBase64(description, { alphabet: "base64url" }));
-  } catch {
-    throw new InvalidRecordError("bad description");
-  }
-
+  const bytes = decodeDescription(description);
   if (base64(bytes) !== description) throw new InvalidRecordError("bad description");
   return bytes;
 }
