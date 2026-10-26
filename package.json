@@ -23,9 +23,10 @@
     "lint:rules": "bun tooling/check-lint-rules.ts",
     "lint:duplication": "bun tooling/check-duplication.ts",
     "lint:structure": "bun tooling/check-structure.ts",
+    "lint:exceptions": "bun tooling/check-exceptions.ts",
     "lint:unused": "knip",
     "typecheck": "tsc && bun --filter \"*\" typecheck",
-    "check": "bun run format:check && bun run lint && bun run lint:rules && bun run lint:duplication && bun run lint:structure && bun run typecheck && bun run lint:md && bun run lint:unused"
+    "check": "bun run format:check && bun run lint && bun run lint:rules && bun run lint:duplication && bun run lint:structure && bun run lint:exceptions && bun run typecheck && bun run lint:md && bun run lint:unused"
   },
   "devDependencies": {
     "@types/bun": "1.4.3",

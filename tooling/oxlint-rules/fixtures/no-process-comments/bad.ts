@@ -1,4 +1,4 @@
-// expected lines: 2 3 4 5 6 7 8 9 10 11 12
+// expected lines: 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
 // TODO: split this
 // todo: split that
 // Keeps the old value for now.
@@ -10,4 +10,10 @@
 // fixed: the race on close
 // The next PR moves this to the worker.
 // This flag is no longer needed.
+// phase 3: drop the copy.
+// The limit is TBD.
+// On the roadmap: seeking.
+/**
+ * Phase 2 of the decoder.
+ */
 export const x = 1;

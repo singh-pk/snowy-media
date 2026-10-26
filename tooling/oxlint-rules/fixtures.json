@@ -17,6 +17,7 @@
     "repo/factory-only": "error",
     "repo/no-access-modifiers": "error",
     "repo/no-await-assertion": "error",
+    "repo/no-code-strings": "error",
     "repo/no-classes": "error",
     "repo/no-conditional-expect": "error",
     "repo/no-focused-tests": "error",
@@ -25,7 +26,6 @@
     "repo/no-nested-await": "error",
     "repo/no-process-comments": "error",
     "repo/no-promise-chains": "error",
-    "repo/no-set-interval": "error",
     "repo/no-timers": "error",
     "repo/test-has-assertion": "error"
   }

@@ -23,6 +23,9 @@ const SLOP = [
   /\bstate-of-the-art\b/i,
   /\bnext steps\b/i,
   /\bPhase \d+\b/,
+  /\bTBD\b/,
+  // A task-list item of work left: micromark splits off its box's `[`, leaving ` ] ` before the marker.
+  /^[ xX]?\]\s*(TODO|FIXME)\b/,
   /\b(TODO|FIXME|XXX)\s*[:(]/,
 ];
 // Pictographs drawn as emoji, not symbols such as ™ or ↔ that only may be.

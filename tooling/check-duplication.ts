@@ -4,7 +4,8 @@
 // Fails on any block of 8 lines and 60 tokens or more that TypeScript or JavaScript files share,
 // or that one file repeats (jscpd, configured in .jscpd.json). A block that must mirror another,
 // such as across packages, which share no code (AGENTS.md rule 1), sits between
-// `// jscpd:ignore-start: <reason>` and `// jscpd:ignore-end`.
+// jscpd's ignore-start marker, with its reason after a colon, and its ignore-end marker (AGENTS.md
+// rule 7).
 // Usage: bun tooling/check-duplication.ts
 
 import { mkdtemp, rm } from "node:fs/promises";
