@@ -57,22 +57,87 @@ async function load(name: Module): Promise<VideoModule> {
   return m;
 }
 
-// A decoder of stream parameters `params` in module `m`, the `module`th, with time base
-// `num`/`den`, sending each frame it decodes with `send`.
-function createDecoder(
-  m: VideoModule,
-  module: number,
-  params: Uint8Array,
-  num: number,
-  den: number,
-  send: () => void,
-) {
-  const check = (ret: number, what: string) => {
-    if (ret < 0) throw new Error(`${what}: ${m.UTF8ToString(m._sny_strerror(ret))}`);
-    return ret;
-  };
+// `ret`, unless it is an FFmpeg error, which throws with what `what` was.
+function check(m: VideoModule, ret: number, what: string) {
+  if (ret < 0) throw new Error(`${what}: ${m.UTF8ToString(m._sny_strerror(ret))}`);
+  return ret;
+}
 
-  const name = (ptr: Ptr) => (ptr ? m.UTF8ToString(ptr) : "");
+// A decoder opened from stream parameters `params`. `heap` gives a view of all of memory, taken
+// after the allocation because that can grow memory.
+function openDecoder(m: VideoModule, params: Uint8Array, heap: () => Uint8Array) {
+  const buf = m._malloc(params.length);
+  heap().set(params, buf);
+  const out = m._malloc(4);
+  const opened = m._sny_decoder_open_params(buf, params.length, THREADS, out);
+  const dec = new DataView(m.wasmMemory.buffer).getInt32(out, true);
+  m._free(out);
+  m._free(buf);
+  check(m, opened, "decoder_open_params");
+  return dec;
+}
+
+// The index of `held`'s format in PIXEL_FORMATS, remembered in `formats` by its name's pointer:
+// a static string.
+function pixelFormat(m: VideoModule, formats: Map<Ptr, number>, held: Ptr) {
+  const ptr = m._sny_frame_video_format(held);
+  const known = formats.get(ptr);
+  if (known !== undefined) return known;
+  const format = ptr ? m.UTF8ToString(ptr) : "";
+  const index = PIXEL_FORMATS.findIndex((f) => f === format);
+  if (index < 0) throw new Error(`no VideoFrame format for ${format}`);
+  formats.set(ptr, index);
+  return index;
+}
+
+// Puts where each plane of `held` starts in memory, and its stride, in the payload, and
+// returns how many it has; 0 if one is stored bottom row first (a negative stride), as a
+// texture is never uploaded. A format's unused planes have no data.
+function planes(m: VideoModule, held: Ptr) {
+  let i = 0;
+
+  for (; i < MAX_PLANES && m._sny_frame_data(held, i); i++) {
+    const stride = m._sny_frame_linesize(held, i);
+    if (stride <= 0) return 0;
+    words[FRAME.layout + 2 * i] = m._sny_frame_data(held, i);
+    words[FRAME.layout + 2 * i + 1] = stride;
+  }
+
+  return i;
+}
+
+// `held`, stored bottom row first, as a raw AVI's or a BMP's RGB is, packed top row first into
+// a buffer of its own, of `size` bytes, which stands for it from then on. Such a frame is RGB:
+// one plane, 4 bytes a pixel, `width` pixels a row. Returns the buffer.
+function pack(m: VideoModule, held: Ptr, size: number, width: number) {
+  if (m._sny_frame_data(held, 1)) throw new Error("a planar frame stored bottom row first");
+  const at = m._malloc(size);
+  if (!at) throw new Error("malloc: out of memory");
+  const packed = m._sny_frame_pack(held, at, size);
+
+  if (packed < 0) {
+    m._free(at);
+    check(m, packed, "frame_pack");
+  }
+
+  m._sny_frame_free(held);
+  words[FRAME.layout] = at;
+  words[FRAME.layout + 1] = width * 4;
+  return at;
+}
+
+// What a decoder is made from: stream parameters `params` for the `module`th module, a time base
+// of `num`/`den`, and `send`, which sends each frame it decodes.
+interface DecoderOptions {
+  module: number;
+  params: Uint8Array;
+  num: number;
+  den: number;
+  send: () => void;
+}
+
+// A decoder in module `m`.
+function createDecoder(m: VideoModule, { module, params, num, den, send }: DecoderOptions) {
   // Rounded as src/video.ts rounds the packets' timestamps, so a frame's matches its packet's.
   const micros = (t: bigint) => Math.round((Number(t) * num * 1e6) / den);
 
@@ -86,14 +151,7 @@ function createDecoder(
     return memory.view;
   };
 
-  const buf = m._malloc(params.length);
-  heap().set(params, buf);
-  const out = m._malloc(4);
-  const opened = m._sny_decoder_open_params(buf, params.length, THREADS, out);
-  const dec = new DataView(m.wasmMemory.buffer).getInt32(out, true);
-  m._free(out);
-  m._free(buf);
-  check(opened, "decoder_open_params");
+  const dec = openDecoder(m, params, heap);
   const pkt = m._sny_packet_alloc();
   const frame = m._sny_frame_alloc();
   const sws = m._sny_scaler_alloc();
@@ -110,56 +168,8 @@ function createDecoder(
     throw new Error("decoder: out of memory");
   }
 
-  // The index in PIXEL_FORMATS of each format name met, by its pointer: a static string.
+  // The index in PIXEL_FORMATS of each format name met, by its pointer.
   const formats = new Map<Ptr, number>();
-
-  // The index of `held`'s format in PIXEL_FORMATS.
-  function pixelFormat(held: Ptr) {
-    const ptr = m._sny_frame_video_format(held);
-    const known = formats.get(ptr);
-    if (known !== undefined) return known;
-    const format = name(ptr);
-    const index = PIXEL_FORMATS.findIndex((f) => f === format);
-    if (index < 0) throw new Error(`no VideoFrame format for ${format}`);
-    formats.set(ptr, index);
-    return index;
-  }
-
-  // Puts where each plane of `held` starts in memory, and its stride, in the payload, and
-  // returns how many it has; 0 if one is stored bottom row first (a negative stride), as a
-  // texture is never uploaded. A format's unused planes have no data.
-  function planes(held: Ptr) {
-    let i = 0;
-
-    for (; i < MAX_PLANES && m._sny_frame_data(held, i); i++) {
-      const stride = m._sny_frame_linesize(held, i);
-      if (stride <= 0) return 0;
-      words[FRAME.layout + 2 * i] = m._sny_frame_data(held, i);
-      words[FRAME.layout + 2 * i + 1] = stride;
-    }
-
-    return i;
-  }
-
-  // `held`, stored bottom row first, as a raw AVI's or a BMP's RGB is, packed top row first into
-  // a buffer of its own, of `size` bytes, which stands for it from then on. Such a frame is RGB:
-  // one plane, 4 bytes a pixel, `width` pixels a row. Returns the buffer.
-  function pack(held: Ptr, size: number, width: number) {
-    if (m._sny_frame_data(held, 1)) throw new Error("a planar frame stored bottom row first");
-    const at = m._malloc(size);
-    if (!at) throw new Error("malloc: out of memory");
-    const packed = m._sny_frame_pack(held, at, size);
-
-    if (packed < 0) {
-      m._free(at);
-      check(packed, "frame_pack");
-    }
-
-    m._sny_frame_free(held);
-    words[FRAME.layout] = at;
-    words[FRAME.layout + 1] = width * 4;
-    return at;
-  }
 
   // The decoded frame, held in a reference of its own (or converted into a frame of its own) so
   // the decoder does not reuse its buffers before it goes back, put in the payload.
@@ -168,25 +178,25 @@ function createDecoder(
     if (!held) throw new Error("frame_alloc: out of memory");
 
     try {
-      check(m._sny_to_video_format(sws, frame, held), "to_video_format");
+      check(m, m._sny_to_video_format(sws, frame, held), "to_video_format");
       const width = m._sny_frame_width(held);
       const height = m._sny_frame_height(held);
       const [sarNum, sarDen] = [m._sny_frame_sar_num(frame), m._sny_frame_sar_den(frame)];
       // Non-square pixels widen or narrow it, as a WebCodecs decoder's display aspect does.
       const displayWidth = sarNum > 0 && sarDen > 0 ? Math.round((width * sarNum) / sarDen) : width;
-      words[FRAME.format] = pixelFormat(held);
+      words[FRAME.format] = pixelFormat(m, formats, held);
       words[FRAME.module] = module;
       words[FRAME.codedWidth] = width;
       words[FRAME.codedHeight] = height;
       words[FRAME.displayWidth] = displayWidth;
-      const size = check(m._sny_frame_pack_size(held), "frame_pack_size");
+      const size = check(m, m._sny_frame_pack_size(held), "frame_pack_size");
       words[FRAME.size] = size;
       doubles[FRAME.timestamp] = micros(m._sny_frame_pts(frame));
-      const count = planes(held);
+      const count = planes(m, held);
       words[FRAME.planes] = count || 1;
       words[FRAME.packed] = count ? 0 : 1;
       // Last, as packing frees `held`.
-      words[FRAME.frame] = count ? held : pack(held, size, width);
+      words[FRAME.frame] = count ? held : pack(m, held, size, width);
     } catch (e) {
       m._sny_frame_free(held);
       throw e;
@@ -238,8 +248,13 @@ async function serve({ to, from }: ToVideo) {
   const decoders = new Map<number, Decoder | undefined>();
   const encoder = new TextEncoder();
 
-  const reply = (id: number, kind: number, data = payload, size = 0) =>
-    replies.write((id << KIND_BITS) | kind, 0, 0n, 0n, 0, data, 0, size);
+  const reply = (id: number, kind: number, data = payload, size = 0) => {
+    const { packet } = replies;
+    packet.stream = (id << KIND_BITS) | kind;
+    packet.data = data;
+    packet.size = size;
+    return replies.write(packet);
+  };
 
   // The `index`th module, loaded once; its memory goes to the render worker before any frame.
   async function module(index: number) {
@@ -260,7 +275,10 @@ async function serve({ to, from }: ToVideo) {
     const m = await module(record.duration);
     const send = () => reply(id, FROM_VIDEO.frame, payload, FRAME.bytes);
     const [num, den] = [Number(record.pts), Number(record.dts)];
-    decoders.set(id, createDecoder(m, record.duration, record.data, num, den, send));
+    decoders.set(
+      id,
+      createDecoder(m, { module: record.duration, params: record.data, num, den, send }),
+    );
   }
 
   // Handles any other `record` of decoder `id`; it is freed once this returns, or a packet's

@@ -14,6 +14,7 @@
 import { $, Glob } from "bun";
 import { rm } from "node:fs/promises";
 
+// jscpd:ignore-start: mirrors packages/ffmpeg/scripts/release.ts, since packages share no code
 const tag = process.argv[2] ?? "";
 const root = Bun.fileURLToPath(new URL("../", import.meta.url));
 const pkg = await Bun.file(`${root}package.json`).json();
@@ -23,6 +24,7 @@ if (tag !== `${pkg.name}@${version}`) throw new Error(`tag "${tag}" is not ${pkg
 const changelog = await Bun.file(`${root}CHANGELOG.md`).text();
 const section = changelog.split(/^## /m).find((s) => s.startsWith(`[${version}]`));
 if (!section) throw new Error(`CHANGELOG.md has no [${version}] section`);
+// jscpd:ignore-end
 
 // The engine was tested against @snowy-media/ffmpeg as it is in the repository, so that must
 // be what npm has: its version released, with nothing unreleased in its changelog. Packing
@@ -66,6 +68,7 @@ const expected = [
 if (!declarations.includes("dist/index.d.ts")) throw new Error("dist/index.d.ts is missing");
 await $`bun pm pack --quiet --destination ${out}`.cwd(root);
 const tarball = `${out}${name}.tgz`;
+// jscpd:ignore-start: mirrors packages/ffmpeg/scripts/release.ts, since packages share no code
 const listing = await $`tar -tzf ${tarball}`.text();
 const packed = listing
   .trim()
@@ -78,6 +81,7 @@ if (packed.join("\n") !== expected.join("\n")) {
     `the npm package holds\n${packed.join("\n")}\nbut should hold\n${expected.join("\n")}`,
   );
 }
+// jscpd:ignore-end
 
 const packedJson = await $`tar -xzOf ${tarball} package/package.json`.text();
 const manifest = JSON.parse(packedJson);

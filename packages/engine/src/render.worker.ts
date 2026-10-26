@@ -36,13 +36,63 @@ const wasm = createWasmVideo();
 const state = {
   compositor: undefined as ReturnType<typeof createCompositor> | undefined,
   // What plays, and its animation frame request.
-  playing: undefined as
-    | { id: number; output: ReturnType<typeof createVideoOutput>; frame: number; target: number }
-    | undefined,
+  playing: undefined as Playing | undefined,
 };
+
+type Playing = ReturnType<typeof createPlaying>;
+type Timing = ReturnType<typeof createTiming>;
 
 function post(message: FromRender) {
   self.postMessage(message);
+}
+
+// The play `id` of `output` from `from`, and what the main thread was last told of it.
+function createPlaying(id: number, output: ReturnType<typeof createVideoOutput>, from: number) {
+  return {
+    id,
+    output,
+    frame: 0,
+    first: Number.NaN,
+    reported: -1,
+    reportedReached: -1,
+    ahead: false,
+    stuck: false,
+    drawn: false,
+    shown: false,
+    // Where it plays from, which a scrub moves on, and the last such target reached, or -1.
+    target: from,
+    reached: -1,
+  };
+}
+
+function createTiming() {
+  return { last: 0, next: 0, gaps: new Float64Array(GAPS).fill(REFRESH) };
+}
+
+// Counts the animation frame that started at `time`, and returns the display's refresh.
+function refreshAt(timing: Timing, time: number) {
+  const gap = time - timing.last;
+
+  if (timing.last > 0 && gap < LONGEST_REFRESH) {
+    timing.gaps[timing.next] = gap;
+    timing.next = (timing.next + 1) % GAPS;
+  }
+
+  timing.last = time;
+  let refresh = LONGEST_REFRESH;
+  // Indexed: an iterator would allocate on every animation frame.
+  for (let i = 0; i < GAPS; i++) refresh = Math.min(refresh, timing.gaps[i] ?? REFRESH);
+  return refresh;
+}
+
+// Posts how far decoding is, and whether a frame went up by the running clock, if it changed.
+function report(playing: Playing) {
+  const { id, ahead, stuck, drawn, shown, reached } = playing;
+  const now = (ahead ? 1 : 0) | (stuck ? 2 : 0) | (drawn ? 4 : 0) | (shown ? 8 : 0);
+  if (now === playing.reported && reached === playing.reportedReached) return;
+  playing.reported = now;
+  playing.reportedReached = reached;
+  post({ type: "video", id, ahead, stuck, drawn, shown, reached });
 }
 
 // A device drawing into `canvas`, or what is missing for one.
@@ -134,31 +184,15 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
   const clock = createPcmControl(pcm);
   // Its events all come in later tasks, once `playing` below is made. The media worker waits on
   // the PCM ring's doorbell for room in either ring (src/pcm.ts).
-  const output = createVideoOutput(
-    ring,
-    params,
-    state.compositor,
+  const output = createVideoOutput(ring, params, {
+    compositor: state.compositor,
     wasm,
-    () => update(),
-    clock.wakeProducer,
+    changed: () => update(),
+    freed: clock.wakeProducer,
     from,
-  );
-  const playing = {
-    id,
-    output,
-    frame: 0,
-    first: Number.NaN,
-    reported: -1,
-    reportedReached: -1,
-    ahead: false,
-    stuck: false,
-    drawn: false,
-    shown: false,
-    // Where it plays from, which a scrub moves on, and the last such target reached, or -1.
-    target: from,
-    reached: -1,
-  };
-  const timing = { last: 0, next: 0, gaps: new Float64Array(GAPS).fill(REFRESH) };
+  });
+  const playing = createPlaying(id, output, from);
+  const timing = createTiming();
 
   // Reports the first failure of this play, unless it has stopped.
   function fail(e: unknown) {
@@ -169,17 +203,7 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
 
   // `time` is when this animation frame started; what it draws is seen one refresh later.
   function draw(time: number) {
-    const gap = time - timing.last;
-
-    if (timing.last > 0 && gap < LONGEST_REFRESH) {
-      timing.gaps[timing.next] = gap;
-      timing.next = (timing.next + 1) % GAPS;
-    }
-
-    timing.last = time;
-    let refresh = LONGEST_REFRESH;
-    // Indexed: an iterator would allocate on every animation frame.
-    for (let i = 0; i < GAPS; i++) refresh = Math.min(refresh, timing.gaps[i] ?? REFRESH);
+    const refresh = refreshAt(timing, time);
 
     try {
       // Read first: if the timestamp ran then, the time heard below was carried forward by it,
@@ -198,7 +222,7 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
         playing.drawn ||= drawn;
         playing.shown ||= shown;
         playing.reached = reached;
-        report();
+        report(playing);
       }
     } catch (e) {
       fail(e);
@@ -222,17 +246,7 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
     if (Number.isNaN(playing.first) && decoded > -Infinity) playing.first = Math.max(decoded, from);
     playing.ahead = decoded - playing.first >= PREROLL || output.ended();
     playing.stuck = blocked && (output.starved() || output.full());
-    report();
-  }
-
-  // Posts how far decoding is, and whether a frame went up by the running clock, if it changed.
-  function report() {
-    const { ahead, stuck, drawn, shown, reached } = playing;
-    const now = (ahead ? 1 : 0) | (stuck ? 2 : 0) | (drawn ? 4 : 0) | (shown ? 8 : 0);
-    if (now === playing.reported && reached === playing.reportedReached) return;
-    playing.reported = now;
-    playing.reportedReached = reached;
-    post({ type: "video", id, ahead, stuck, drawn, shown, reached });
+    report(playing);
   }
 
   async function watch() {

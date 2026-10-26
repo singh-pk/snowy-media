@@ -13,9 +13,8 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { PCM_RATE } from "./support/audio";
-import { launch, SLOW_DRAWING, SOFTWARE_GPU } from "./support/browsers";
+import { inPage, SLOW_DRAWING, SOFTWARE_GPU } from "./support/browsers";
 import { ENTRY, PAGE, serveEngine } from "./support/serve";
-import type * as EngineModule from "../src/index";
 import type * as PageSupport from "./support/page";
 
 interface Video {
@@ -105,230 +104,194 @@ function enough(reads: unknown[], seconds: number, what: string) {
 test(
   `plays ${FILE} with the frame on screen at the time heard`,
   async () => {
-    const browser = await launch();
+    const got = await inPage(
+      server.url.href,
+      (tab) =>
+        tab.evaluate(
+          async ({ entry, page, file, seconds }) => {
+            const support: typeof PageSupport = await import(page);
+            const { player, canvas } = await support.openEngine(entry, file);
+            await player.play();
+            const playing = await support.watchScreen(player, canvas, seconds * 1000);
+            await player.pause();
+            // A frame for the render worker to see the pause, then a second paused.
+            await support.watchScreen(player, canvas, 50);
+            const paused = await support.watchScreen(player, canvas, 1000);
+            player.close();
+            return { playing, paused };
+          },
+          { entry: ENTRY, page: PAGE, file: FILE, seconds: SECONDS },
+        ),
+      { gesture: true },
+    );
 
-    try {
-      const tab = await browser.newPage();
-      await tab.goto(server.url.href);
-      // A user gesture, so audio may start.
-      await tab.mouse.click(1, 1);
-      const got = await tab.evaluate(
-        async ({ entry, page, file, seconds }) => {
-          const engine: typeof EngineModule = await import(entry);
-          const support: typeof PageSupport = await import(page);
-          const canvas = document.querySelector("canvas");
-          if (!canvas) throw new Error("no canvas");
-          const player = await engine.createEngine({ canvas });
-          const res = await fetch(`/test/fixtures/${file}`);
-          const blob = await res.blob();
-          const handle = await support.fileHandle(file, blob);
-          await player.open(handle);
-          await player.play();
-          const playing = await support.watchScreen(player, canvas, seconds * 1000);
-          await player.pause();
-          // A frame for the render worker to see the pause, then a second paused.
-          await support.watchScreen(player, canvas, 50);
-          const paused = await support.watchScreen(player, canvas, 1000);
-          player.close();
-          return { playing, paused };
-        },
-        { entry: ENTRY, page: PAGE, file: FILE, seconds: SECONDS },
-      );
+    const checked = fresh(got.playing);
+    const early = { offset: 0, time: 0, id: 0 };
+    const late = { offset: 0, time: 0, id: 0 };
 
-      const checked = fresh(got.playing);
-      const early = { offset: 0, time: 0, id: 0 };
-      const late = { offset: 0, time: 0, id: 0 };
-
-      for (const [time, id] of checked) {
-        const o = offset(video, id, time);
-        if (o < early.offset) Object.assign(early, { offset: o, time, id });
-        if (o > late.offset) Object.assign(late, { offset: o, time, id });
-      }
-
-      const sorted = checked
-        .map(([time, id]) => Math.abs(offset(video, id, time)))
-        .toSorted((a, b) => a - b);
-      const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0;
-      const of = (w: typeof early) => `${w.offset} s, frame ${w.id} at ${w.time} s`;
-      const p = (q: number) => ms(sorted[Math.floor(sorted.length * q)] ?? 0);
-      // A summary for the log, so a failure on CI shows its shape.
-      console.log(
-        `${checked.length} reads;`,
-        `|offset| p50 ${p(0.5)} p95 ${p(0.95)} p99 ${p(0.99)} ms;`,
-        `early ${ms(early.offset)} ms at ${ms(early.time) / 1000} s;`,
-        `late ${ms(late.offset)} ms at ${ms(late.time) / 1000} s;`,
-        `over ${sorted.filter((x) => x >= MAX_OFFSET).length};`,
-        `last ${ms(got.playing.at(-1)?.[0] ?? 0) / 1000} s`,
-      );
-
-      enough(got.playing, SECONDS, FILE);
-      const last = got.playing.at(-1)?.[0] ?? 0;
-      // It played in real time, from the start.
-      expect(last).toBeGreaterThan(SECONDS - 1);
-      // Watching ends on an animation frame, which may come late on CI.
-      expect(last).toBeLessThan(SECONDS + 1);
-      // No frame early, and none late.
-      expect(-early.offset, `early by ${of(early)}`).toBeLessThan(earliness);
-      const start = got.playing.slice(0, 8).map(([time, id]) => `${ms(time)}:${id}`);
-      expect(late.offset, `late by ${of(late)}; first reads ${start.join(" ")}`).toBeLessThan(
-        lateness,
-      );
-      expect(p99, "the 99th percentile").toBeLessThan(SLOW_DRAWING ? SLOW_P99 : MAX_OFFSET);
-      // Paused: one time, one frame.
-      expect(new Set(got.paused.map(([time]) => time)).size).toBe(1);
-      expect(new Set(got.paused.map(([, id]) => id)).size).toBe(1);
-      const [[pausedAt, pausedId] = [0, 0]] = got.paused;
-      // The clock stopped where it was heard, not back at an older timestamp.
-      expect(pausedAt, "the clock went back as it paused").toBeGreaterThanOrEqual(last);
-      // The frame due then, or the one after: the last one shown was for a refresh later.
-      expect([0, 1], `paused at ${pausedAt} on frame ${pausedId}`).toContain(
-        pausedId - frameAt(video, pausedAt),
-      );
-    } finally {
-      await browser.close();
+    for (const [time, id] of checked) {
+      const o = offset(video, id, time);
+      if (o < early.offset) Object.assign(early, { offset: o, time, id });
+      if (o > late.offset) Object.assign(late, { offset: o, time, id });
     }
+
+    const sorted = checked
+      .map(([time, id]) => Math.abs(offset(video, id, time)))
+      .toSorted((a, b) => a - b);
+    const p99 = sorted[Math.floor(sorted.length * 0.99)] ?? 0;
+    const of = (w: typeof early) => `${w.offset} s, frame ${w.id} at ${w.time} s`;
+    const p = (q: number) => ms(sorted[Math.floor(sorted.length * q)] ?? 0);
+    // A summary for the log, so a failure on CI shows its shape.
+    console.log(
+      `${checked.length} reads;`,
+      `|offset| p50 ${p(0.5)} p95 ${p(0.95)} p99 ${p(0.99)} ms;`,
+      `early ${ms(early.offset)} ms at ${ms(early.time) / 1000} s;`,
+      `late ${ms(late.offset)} ms at ${ms(late.time) / 1000} s;`,
+      `over ${sorted.filter((x) => x >= MAX_OFFSET).length};`,
+      `last ${ms(got.playing.at(-1)?.[0] ?? 0) / 1000} s`,
+    );
+
+    enough(got.playing, SECONDS, FILE);
+    const last = got.playing.at(-1)?.[0] ?? 0;
+    // It played in real time, from the start.
+    expect(last).toBeGreaterThan(SECONDS - 1);
+    // Watching ends on an animation frame, which may come late on CI.
+    expect(last).toBeLessThan(SECONDS + 1);
+    // No frame early, and none late.
+    expect(-early.offset, `early by ${of(early)}`).toBeLessThan(earliness);
+    const start = got.playing.slice(0, 8).map(([time, id]) => `${ms(time)}:${id}`);
+    expect(late.offset, `late by ${of(late)}; first reads ${start.join(" ")}`).toBeLessThan(
+      lateness,
+    );
+    expect(p99, "the 99th percentile").toBeLessThan(SLOW_DRAWING ? SLOW_P99 : MAX_OFFSET);
+    // Paused: one time, one frame.
+    expect(new Set(got.paused.map(([time]) => time)).size).toBe(1);
+    expect(new Set(got.paused.map(([, id]) => id)).size).toBe(1);
+    const [[pausedAt, pausedId] = [0, 0]] = got.paused;
+    // The clock stopped where it was heard, not back at an older timestamp.
+    expect(pausedAt, "the clock went back as it paused").toBeGreaterThanOrEqual(last);
+    // The frame due then, or the one after: the last one shown was for a refresh later.
+    expect([0, 1], `paused at ${pausedAt} on frame ${pausedId}`).toContain(
+      pausedId - frameAt(video, pausedAt),
+    );
   },
   (SECONDS + 60) * 1000,
 );
 
 test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
-  const browser = await launch();
+  const got = await inPage(
+    server.url.href,
+    (tab) =>
+      tab.evaluate(
+        async ({ entry, page, files, seconds }) => {
+          const support: typeof PageSupport = await import(page);
+          const { player, canvas } = await support.startEngine(entry);
+          const plays = [];
 
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    await tab.mouse.click(1, 1);
-    const got = await tab.evaluate(
-      async ({ entry, page, files, seconds }) => {
-        const engine: typeof EngineModule = await import(entry);
-        const support: typeof PageSupport = await import(page);
-        const canvas = document.querySelector("canvas");
-        if (!canvas) throw new Error("no canvas");
-        const player = await engine.createEngine({ canvas });
-        const plays = [];
+          for (const file of files) {
+            const handle = await support.fixtureHandle(file);
+            await player.open(handle);
+            await player.play();
+            const first = await support.watchScreen(player, canvas, seconds * 1000);
+            await player.pause();
+            await support.watchScreen(player, canvas, 50);
+            const paused = await support.watchScreen(player, canvas, 300);
+            await player.play();
+            const second = await support.watchScreen(player, canvas, seconds * 1000);
+            plays.push({ first, paused, second });
+          }
 
-        for (const file of files) {
-          const res = await fetch(`/test/fixtures/${file}`);
-          const blob = await res.blob();
-          const handle = await support.fileHandle(file, blob);
-          await player.open(handle);
-          await player.play();
-          const first = await support.watchScreen(player, canvas, seconds * 1000);
-          await player.pause();
-          await support.watchScreen(player, canvas, 50);
-          const paused = await support.watchScreen(player, canvas, 300);
-          await player.play();
-          const second = await support.watchScreen(player, canvas, seconds * 1000);
-          plays.push({ first, paused, second });
-        }
+          player.close();
+          return plays;
+        },
+        { entry: ENTRY, page: PAGE, files: STARTS, seconds: WATCH },
+      ),
+    { gesture: true },
+  );
 
-        player.close();
-        return plays;
-      },
-      { entry: ENTRY, page: PAGE, files: STARTS, seconds: WATCH },
+  for (const [i, file] of STARTS.entries()) {
+    const { video: v, audio } = expected[file] ?? {};
+    const play = got[i];
+    if (!v || !audio || !play) throw new Error(`no ${file}`);
+    const end = audio.resampled.frames / PCM_RATE;
+    const [[pausedAt, pausedId] = [0, 0]] = play.paused;
+    console.log(`${file}: ${span(play.first)}; paused at ${pausedAt} s; ${span(play.second)}`);
+    enough(play.first, WATCH, `${file} first`);
+    enough(play.second, WATCH, `${file} second`);
+    // Started, and played from the start in real time, up to the end of the audio.
+    expect(Math.abs((play.first.at(-1)?.[0] ?? 0) - Math.min(end, WATCH))).toBeLessThan(realTime);
+    // Paused: one time, one frame.
+    expect(new Set(play.paused.map(([time]) => time)).size).toBe(1);
+    expect(new Set(play.paused.map(([, id]) => id)).size).toBe(1);
+    // Not back from the last read playing, and on the frame due then, or the one after, as
+    // in the test above.
+    expect(pausedAt, `${file} went back as it paused`).toBeGreaterThanOrEqual(
+      play.first.at(-1)?.[0] ?? 0,
+    );
+    expect([0, 1], `${file} paused at ${pausedAt} on frame ${pausedId}`).toContain(
+      pausedId - frameAt(v, pausedAt),
+    );
+    // Played on from where it paused.
+    const resumed = play.second[0]?.[0] ?? 0;
+    expect(resumed).toBeGreaterThanOrEqual(pausedAt);
+    expect(resumed - pausedAt).toBeLessThan(realTime);
+    expect(Math.abs((play.second.at(-1)?.[0] ?? 0) - Math.min(end, pausedAt + WATCH))).toBeLessThan(
+      realTime,
     );
 
-    for (const [i, file] of STARTS.entries()) {
-      const { video: v, audio } = expected[file] ?? {};
-      const play = got[i];
-      if (!v || !audio || !play) throw new Error(`no ${file}`);
-      const end = audio.resampled.frames / PCM_RATE;
-      const [[pausedAt, pausedId] = [0, 0]] = play.paused;
-      console.log(`${file}: ${span(play.first)}; paused at ${pausedAt} s; ${span(play.second)}`);
-      enough(play.first, WATCH, `${file} first`);
-      enough(play.second, WATCH, `${file} second`);
-      // Started, and played from the start in real time, up to the end of the audio.
-      expect(Math.abs((play.first.at(-1)?.[0] ?? 0) - Math.min(end, WATCH))).toBeLessThan(realTime);
-      // Paused: one time, one frame.
-      expect(new Set(play.paused.map(([time]) => time)).size).toBe(1);
-      expect(new Set(play.paused.map(([, id]) => id)).size).toBe(1);
-      // Not back from the last read playing, and on the frame due then, or the one after, as
-      // in the test above.
-      expect(pausedAt, `${file} went back as it paused`).toBeGreaterThanOrEqual(
-        play.first.at(-1)?.[0] ?? 0,
-      );
-      expect([0, 1], `${file} paused at ${pausedAt} on frame ${pausedId}`).toContain(
-        pausedId - frameAt(v, pausedAt),
-      );
-      // Played on from where it paused.
-      const resumed = play.second[0]?.[0] ?? 0;
-      expect(resumed).toBeGreaterThanOrEqual(pausedAt);
-      expect(resumed - pausedAt).toBeLessThan(realTime);
-      expect(
-        Math.abs((play.second.at(-1)?.[0] ?? 0) - Math.min(end, pausedAt + WATCH)),
-      ).toBeLessThan(realTime);
+    // Each frame due on screen as it plays.
+    for (const [phase, reads] of Object.entries({ first: play.first, second: play.second })) {
+      const checked = fresh(reads);
 
-      // Each frame due on screen as it plays.
-      for (const [phase, reads] of Object.entries({ first: play.first, second: play.second })) {
-        const checked = fresh(reads);
-
-        for (const [time, id] of checked) {
-          const o = offset(v, id, time);
-          const at = `${file} ${phase}: frame ${id} at ${time} s`;
-          expect(-o, at).toBeLessThan(earliness);
-          expect(o, at).toBeLessThan(lateness);
-        }
+      for (const [time, id] of checked) {
+        const o = offset(v, id, time);
+        const at = `${file} ${phase}: frame ${id} at ${time} s`;
+        expect(-o, at).toBeLessThan(earliness);
+        expect(o, at).toBeLessThan(lateness);
       }
     }
-  } finally {
-    await browser.close();
   }
 }, 60_000);
 
 // The decoder lets out sparse video's last frames only once it is flushed, at the END
 // record, so the demuxer reads ahead of the audio to reach it before they are due.
 test(`plays ${SPARSE} to the end with each frame on time`, async () => {
-  const browser = await launch();
+  const { video: v, audio } = expected[SPARSE] ?? {};
+  if (!v || !audio) throw new Error(`no ${SPARSE}`);
+  const end = audio.resampled.frames / PCM_RATE;
+  const reads = await inPage(
+    server.url.href,
+    (tab) =>
+      tab.evaluate(
+        async ({ entry, page, file, watch }) => {
+          const support: typeof PageSupport = await import(page);
+          const { player, canvas } = await support.openEngine(entry, file);
+          await player.play();
+          const watched = await support.watchScreen(player, canvas, watch);
+          player.close();
+          return watched;
+        },
+        // Half a second past the end, so the last frame is read at the end.
+        { entry: ENTRY, page: PAGE, file: SPARSE, watch: (end + 0.5) * 1000 },
+      ),
+    { gesture: true },
+  );
 
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    await tab.mouse.click(1, 1);
-    const { video: v, audio } = expected[SPARSE] ?? {};
-    if (!v || !audio) throw new Error(`no ${SPARSE}`);
-    const end = audio.resampled.frames / PCM_RATE;
-    const reads = await tab.evaluate(
-      async ({ entry, page, file, watch }) => {
-        const engine: typeof EngineModule = await import(entry);
-        const support: typeof PageSupport = await import(page);
-        const canvas = document.querySelector("canvas");
-        if (!canvas) throw new Error("no canvas");
-        const player = await engine.createEngine({ canvas });
-        const res = await fetch(`/test/fixtures/${file}`);
-        const blob = await res.blob();
-        const handle = await support.fileHandle(file, blob);
-        await player.open(handle);
-        await player.play();
-        const watched = await support.watchScreen(player, canvas, watch);
-        player.close();
-        return watched;
-      },
-      // Half a second past the end, so the last frame is read at the end.
-      { entry: ENTRY, page: PAGE, file: SPARSE, watch: (end + 0.5) * 1000 },
-    );
+  console.log(`${SPARSE}: ${span(reads)}`);
+  enough(reads, end + 0.5, SPARSE);
+  expect(Math.abs((reads.at(-1)?.[0] ?? 0) - end)).toBeLessThan(realTime);
+  expect(reads.at(-1)?.[1]).toBe(v.pts.length - 1);
 
-    console.log(`${SPARSE}: ${span(reads)}`);
-    enough(reads, end + 0.5, SPARSE);
-    expect(Math.abs((reads.at(-1)?.[0] ?? 0) - end)).toBeLessThan(realTime);
-    expect(reads.at(-1)?.[1]).toBe(v.pts.length - 1);
-
-    for (const [time, id] of fresh(reads)) {
-      const o = offset(v, id, time);
-      expect(-o, `frame ${id} at ${time} s`).toBeLessThan(earliness);
-      expect(o, `frame ${id} at ${time} s`).toBeLessThan(lateness);
-    }
-  } finally {
-    await browser.close();
+  for (const [time, id] of fresh(reads)) {
+    const o = offset(v, id, time);
+    expect(-o, `frame ${id} at ${time} s`).toBeLessThan(earliness);
+    expect(o, `frame ${id} at ${time} s`).toBeLessThan(lateness);
   }
 }, 60_000);
 
 test("a pause settles a play that waits for the browser to allow audio", async () => {
-  const browser = await launch();
-
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    const got = await tab.evaluate(
+  const got = await inPage(server.url.href, (tab) =>
+    tab.evaluate(
       async ({ entry, page, file }) => {
         // As Chromium holds resume until a user gesture, which Playwright's Chromium never
         // asks for: the context does not start, so play waits.
@@ -339,15 +302,8 @@ test("a pause settles a play that waits for the browser to allow audio", async (
           return new Promise<void>(() => {});
         };
 
-        const engine: typeof EngineModule = await import(entry);
         const support: typeof PageSupport = await import(page);
-        const canvas = document.querySelector("canvas");
-        if (!canvas) throw new Error("no canvas");
-        const player = await engine.createEngine({ canvas });
-        const res = await fetch(`/test/fixtures/${file}`);
-        const blob = await res.blob();
-        const handle = await support.fileHandle(file, blob);
-        await player.open(handle);
+        const { player } = await support.openEngine(entry, file);
         const playing = player.play();
         // Once it is waiting for audio to start.
         await asked.promise;
@@ -358,10 +314,8 @@ test("a pause settles a play that waits for the browser to allow audio", async (
         return time;
       },
       { entry: ENTRY, page: PAGE, file: FILE },
-    );
+    ),
+  );
 
-    expect(got).toBe(0);
-  } finally {
-    await browser.close();
-  }
+  expect(got).toBe(0);
 }, 30_000);

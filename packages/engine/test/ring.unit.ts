@@ -10,14 +10,19 @@ import { expect, test } from "../../../tooling/unit";
 import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
 import {
   createConsumer,
+  createOutgoingPacket,
   createProducer,
   createRing,
   END,
   FAILED,
   KEY_FLAG,
   NO_TIMESTAMP,
+  type OutgoingPacket,
 } from "../src/ring";
 import { size } from "./support/ring-packets";
+
+// A packet of stream 0 at time 0 with no bytes, but for `fields`.
+const out = (fields: Partial<OutgoingPacket>) => ({ ...createOutgoingPacket(), ...fields });
 
 function startProducer(ring: SharedArrayBuffer, count: number) {
   const worker = new Worker(new URL("support/ring-producer.js", import.meta.url), {
@@ -116,8 +121,8 @@ test("a write to an empty ring wakes the waiting consumer", async () => {
   const producer = createProducer(ring);
   const waiting = consumer.wait();
   // Two writes while it waits: the first takes the flag and notifies, the second does not.
-  producer.write(0, 0, 0n, 0n, 0, new Uint8Array(1), 0, 1);
-  producer.write(0, 0, 1n, 0n, 0, new Uint8Array(1), 0, 1);
+  producer.write(out({ data: new Uint8Array(1), size: 1 }));
+  producer.write(out({ pts: 1n, data: new Uint8Array(1), size: 1 }));
   // A wait that never ends fails the file (tooling/run-unit.ts).
   await waiting;
   expect(consumer.peek()?.pts).toBe(0n);
@@ -164,9 +169,9 @@ test("offer writes only what fits, and a waiting producer hears each release and
   const data = new Uint8Array(64);
   // A record of 64 bytes takes 96 with its header, and an END record 32: two of each fill the
   // 256 bytes.
-  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 64)).toBe(true);
-  expect(producer.offer(0, 0, 1n, 1n, 1, data, 0, 64)).toBe(true);
-  expect(producer.offer(0, 0, 2n, 2n, 1, data, 0, 64)).toBe(false);
+  expect(producer.offer(out({ duration: 1, data, size: 64 }))).toBe(true);
+  expect(producer.offer(out({ pts: 1n, dts: 1n, duration: 1, data, size: 64 }))).toBe(true);
+  expect(producer.offer(out({ pts: 2n, dts: 2n, duration: 1, data, size: 64 }))).toBe(false);
   expect(producer.offerEnd()).toBe(true);
   expect(producer.offerEnd()).toBe(true);
   expect(producer.offerEnd()).toBe(false);
@@ -183,7 +188,7 @@ test("offer writes only what fits, and a waiting producer hears each release and
   consumer.close();
   expect(freed.count).toBe(2);
   expect(producer.closed()).toBe(true);
-  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 1)).toBe(false);
+  expect(producer.offer(out({ duration: 1, data, size: 1 }))).toBe(false);
   expect(producer.offerEnd()).toBe(false);
 });
 
@@ -193,8 +198,8 @@ test("a producer fails at once on a full ring, and the consumer reads FAILED aft
   const consumer = createConsumer(ring);
   const data = new Uint8Array(64);
   // Two records of 64 bytes and two END records fill the 256 bytes.
-  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 64)).toBe(true);
-  expect(producer.offer(0, 0, 1n, 1n, 1, data, 0, 64)).toBe(true);
+  expect(producer.offer(out({ duration: 1, data, size: 64 }))).toBe(true);
+  expect(producer.offer(out({ pts: 1n, dts: 1n, duration: 1, data, size: 64 }))).toBe(true);
   expect(producer.offerEnd()).toBe(true);
   expect(producer.offerEnd()).toBe(true);
   expect(producer.hasRoom(0, 0)).toBe(false);
@@ -230,7 +235,7 @@ test("hasRoom says whether a record fits with room to spare", () => {
   // A record of 64 bytes takes 96 with its header: one leaves 160 bytes.
   expect(producer.hasRoom(64, 160)).toBe(true);
   expect(producer.hasRoom(64, 161)).toBe(false);
-  expect(producer.offer(0, 0, 0n, 0n, 1, data, 0, 64)).toBe(true);
+  expect(producer.offer(out({ duration: 1, data, size: 64 }))).toBe(true);
   expect(producer.hasRoom(64, 64)).toBe(true);
   expect(producer.hasRoom(64, 65)).toBe(false);
 });
@@ -245,7 +250,9 @@ test("a capacity or duration the ring cannot hold is an error", () => {
   expect(() => createRing(2 ** 30)).toThrow(RangeError);
   const producer = createProducer(createRing(64));
   const src = new Uint8Array(64);
-  expect(() => producer.write(0, 0, 0n, 0n, 2 ** 32 + 5, src, 0, 0)).toThrow(RangeError);
+  expect(() => producer.write(out({ duration: 2 ** 32 + 5, data: src, size: 0 }))).toThrow(
+    RangeError,
+  );
 });
 
 // Packet n of `length` bytes, byte i of it n + i, for a packet that fills more than one record.
@@ -266,8 +273,19 @@ test("a packet larger than the ring arrives whole, with other records between it
   // record offered between its pieces, as the render worker hands frames back meanwhile.
   for (let rounds = 0; got.length < 2; rounds++) {
     if (rounds > 100) throw new Error("no progress");
-    const done = producer.offer(5, KEY_FLAG, 7n, 6n, 3, big, 0, big.length);
-    if (rounds === 1) offered.small = producer.offer(9, 0, 0n, 0n, 0, small, 0, small.length);
+    const done = producer.offer(
+      out({
+        stream: 5,
+        flags: KEY_FLAG,
+        pts: 7n,
+        dts: 6n,
+        duration: 3,
+        data: big,
+        size: big.length,
+      }),
+    );
+    if (rounds === 1)
+      offered.small = producer.offer(out({ stream: 9, data: small, size: small.length }));
     if (done) got.push("offered");
 
     for (let packet = consumer.peek(); packet; packet = consumer.peek()) {
@@ -285,7 +303,9 @@ test("a packet larger than the ring arrives whole, with other records between it
   // Peeked again before it is released, it is the same packet.
   expect(peekedAgain).toEqual([big.length]);
   // Each piece is offered once: the ring is empty and the next packet starts afresh.
-  expect(producer.offer(5, 0, 8n, 8n, 3, big, 0, 100)).toBe(true);
+  expect(
+    producer.offer(out({ stream: 5, pts: 8n, dts: 8n, duration: 3, data: big, size: 100 })),
+  ).toBe(true);
   expect(consumer.peek()?.data).toEqual(big.subarray(0, 100));
   consumer.close();
 });
@@ -295,7 +315,7 @@ test("a packet given up partway arrives not at all, and the next arrives whole",
   const producer = createProducer(ring);
   const consumer = createConsumer(ring);
   const big = pattern(3, 1000);
-  expect(producer.offer(5, 0, 0n, 0n, 0, big, 0, big.length)).toBe(false);
+  expect(producer.offer(out({ stream: 5, data: big, size: big.length }))).toBe(false);
   // Its first pieces are read, and the rest never come.
   expect(consumer.peek()).toBeUndefined();
   expect(producer.abandon()).toBe(true);
@@ -303,7 +323,9 @@ test("a packet given up partway arrives not at all, and the next arrives whole",
 
   for (let rounds = 0; ; rounds++) {
     if (rounds > 100) throw new Error("no progress");
-    const done = producer.offer(6, 0, 1n, 1n, 0, next, 0, next.length);
+    const done = producer.offer(
+      out({ stream: 6, pts: 1n, dts: 1n, data: next, size: next.length }),
+    );
     const packet = consumer.peek();
 
     if (packet) {
@@ -324,15 +346,15 @@ test("an offer leaves the spare it is asked to, and one packet at a time goes in
   const consumer = createConsumer(ring);
   const big = pattern(5, 1000);
   // Its first piece of 64 bytes and header take 96; a spare of 192 leaves room for none.
-  expect(producer.offer(5, 0, 0n, 0n, 0, big, 0, big.length, 192)).toBe(false);
+  expect(producer.offer(out({ stream: 5, data: big, size: big.length }), 192)).toBe(false);
   expect(consumer.peek()).toBeUndefined();
   // A spare of 96 leaves room for one piece, not the two that would otherwise go.
-  expect(producer.offer(5, 0, 0n, 0n, 0, big, 0, big.length, 96)).toBe(false);
+  expect(producer.offer(out({ stream: 5, data: big, size: big.length }), 96)).toBe(false);
   expect([producer.hasRoom(big.length, 96), producer.hasRoom(big.length, 0)]).toEqual([
     false,
     true,
   ]);
-  expect(() => producer.offer(6, 0, 0n, 0n, 0, big, 0, big.length)).toThrow(RangeError);
-  expect(producer.offer(9, 0, 0n, 0n, 0, big, 0, 8)).toBe(true);
+  expect(() => producer.offer(out({ stream: 6, data: big, size: big.length }))).toThrow(RangeError);
+  expect(producer.offer(out({ stream: 9, data: big, size: 8 }))).toBe(true);
   consumer.close();
 });

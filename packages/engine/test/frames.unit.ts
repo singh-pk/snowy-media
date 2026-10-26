@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The frame queue (src/frames.ts) and the compositor's fit (src/compositor.ts), in Chromium: the
+// The frame queue (src/frames.ts) and the compositor's fit (src/view.ts), in Chromium: the
 // queue keeps frames in presentation order, hands out the latest one due and closes those it
 // skips, and counts bytes, not frames; a frame of another shape than the canvas is centred
 // with black bars, and Y′CbCr becomes the R′G′B′ FFmpeg makes of it; and a stream's frames are
@@ -10,8 +10,10 @@
 
 import { expect, test } from "../../../tooling/unit";
 import { colorSpace } from "../src/codec";
-import { createRoute, undoMatrix, verdict, viewMap, yuvMatrix } from "../src/compositor";
+import { undoMatrix, yuvMatrix } from "../src/colour";
 import { createFrameQueue } from "../src/frames";
+import { createRoute, verdict } from "../src/measure";
+import { viewMap } from "../src/view";
 
 function frames(...timestamps: number[]) {
   const closed: number[] = [];
@@ -55,7 +57,8 @@ test("the budget counts bytes, and taking frames frees them", () => {
 test("a frame wider than the canvas is centred between bars above and below", () => {
   const map = new Float32Array(8);
   // 200 × 100 into a square: the frame takes the middle half of the height.
-  viewMap(map, [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30], 200, 100, 100, 100);
+  const frame = { displayWidth: 200, displayHeight: 100 };
+  viewMap(map, [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30], frame, { width: 100, height: 100 });
   const at = (x: number, y: number) => [
     (map[0] ?? 0) * x + (map[2] ?? 0) * y + (map[4] ?? 0),
     (map[1] ?? 0) * x + (map[3] ?? 0) * y + (map[5] ?? 0),
@@ -122,7 +125,7 @@ test("next hands out the earliest frame, due or not", () => {
   expect(closed).toEqual([]);
 });
 
-// A grid read back as the compositor measures one (src/compositor.ts): 128 × 72 points of RGBA,
+// A grid read back as the compositor measures one (src/measure.ts): 128 × 72 points of RGBA,
 // Chromium's conversion of each, then the same points as converted from the planes, `truth`.
 function grid(truth: (k: number) => [number, number, number], imported: (c: number) => number) {
   const points = 128 * 72;
@@ -135,7 +138,11 @@ function grid(truth: (k: number) => [number, number, number], imported: (c: numb
     }
   }
 
-  return verdict(data, new Float32Array(points * 3), {}, 8, new Float32Array(16));
+  return verdict(data, new Float32Array(points * 3), {
+    stated: {},
+    depth: 8,
+    undo: new Float32Array(16),
+  });
 }
 
 const coloured = (k: number): [number, number, number] => [
@@ -196,7 +203,7 @@ function assumedGrid(
     }
   }
 
-  const via = verdict(data, new Float32Array(points * 3), streams, 8, undo);
+  const via = verdict(data, new Float32Array(points * 3), { stated: streams, depth: 8, undo });
   return { via, undo };
 }
 

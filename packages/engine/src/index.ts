@@ -3,12 +3,10 @@
 //
 // The public API of @snowy-media/engine.
 
-import { createAudioOutput } from "./audio";
 import type { VideoParams } from "./codec";
-import { createPcmControl, createPcmRing } from "./pcm";
 import { checkMainThread, UnsupportedPlatformError } from "./platform";
+import { type Playback, type PlaybackHost, startPlayback, type VideoReport } from "./playback";
 import type { FromMedia, FromRender, MediaInfo, ToMedia, ToRender } from "./protocol";
-import { closeRing, createRing, RING_CAPACITY } from "./ring";
 
 export { UnsupportedPlatformError } from "./platform";
 export type { MediaInfo, PlatformFeature, Track } from "./protocol";
@@ -60,23 +58,6 @@ export interface Engine {
   /** Stops the engine's workers. */
   close(): void;
 }
-
-// The PCM ring's length at `rate`: a power of two, a second and more, so the media worker
-// can demux a second of video ahead of the audio it decodes (docs/architecture.md#playback).
-const pcmFrames = (rate: number) => 2 ** Math.ceil(Math.log2(rate));
-// The packet ring of a file without video, which only ever carries the END record.
-const NO_VIDEO_RING = 64;
-// The audio buffered before it starts, in seconds, so a slow start does not underrun.
-const PREROLL = 0.25;
-// The output timestamp has settled once this many in a row, each newer than the last, map
-// context time to performance time within SETTLED_MS of the one before. The first ones
-// after output starts are estimates: Chromium moves them by up to 35 ms. Coarse
-// timers may never agree, so it settles anyway after SETTLED_LIMIT newer ones.
-const SETTLED_COUNT = 2;
-const SETTLED_MS = 2;
-const SETTLED_LIMIT = 10;
-// What the PCM ring mixes to; the context's destination takes stereo everywhere.
-const CHANNELS = 2;
 
 // A hidden page starts no audio: its animation frames, and so video, wait until it is shown.
 const visible = () => document.visibilityState === "visible";
@@ -175,21 +156,22 @@ export async function createEngine({ canvas }: EngineOptions): Promise<Engine> {
   return createPlayer(render, media);
 }
 
-// What plays: play `id`, its clock, publishing the output timestamp now, whether it may
-// start and is heard, and stopping it.
-interface Playback {
-  id: number;
-  clock: ReturnType<typeof createPcmControl>;
-  publish(stopping?: number): void;
-  primed(): boolean;
-  drawn(): boolean;
-  heard(): boolean;
-  stop(): void;
-}
+type Player = ReturnType<typeof createPlayerState>;
 
-// The engine on a render worker that is ready and a media worker.
-function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): Engine {
-  const state = {
+function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>) {
+  // Wakes the waits of `until`.
+  const waits = new Set<() => void>();
+
+  // Has each wait of `until` look again; on every event that may change what it waits for.
+  function changed() {
+    for (const wake of waits) wake();
+  }
+
+  return {
+    render,
+    media,
+    waits,
+    changed,
     opened: undefined as { info: MediaInfo; video: Record<number, VideoParams> } | undefined,
     // Made on the first play, and kept: a page may only start so many.
     context: undefined as AudioContext | undefined,
@@ -222,477 +204,335 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     // The target of the scrub under way, which it goes on to next, and the scrub.
     scrub: { to: undefined as number | undefined, running: undefined as Promise<void> | undefined },
     // How far the render worker has decoded, as it last reported, and for which play.
-    video: { id: -1, ahead: false, stuck: false, drawn: false, shown: false, reached: -1 },
+    video: {
+      id: -1,
+      ahead: false,
+      stuck: false,
+      drawn: false,
+      shown: false,
+      reached: -1,
+    } as VideoReport,
     closed: false,
   };
-  // Wakes the waits of `until`.
-  const waits = new Set<() => void>();
+}
 
-  // Has each wait of `until` look again; on every event that may change what it waits for.
-  function changed() {
-    for (const wake of waits) wake();
+// Resolves once `done` returns true, which it checks now and on each change.
+async function until(p: Player, done: () => boolean) {
+  while (!done()) {
+    const woken = Promise.withResolvers<void>();
+    p.waits.add(woken.resolve);
+
+    try {
+      await woken.promise;
+    } finally {
+      p.waits.delete(woken.resolve);
+    }
+  }
+}
+
+function failPlayer(p: Player, error: Error) {
+  p.failure ??= error;
+  p.playing = false;
+  p.from = 0;
+  p.moved = false;
+  p.played = false;
+  stop(p);
+}
+
+// What a play needs of the player.
+function playbackHost(p: Player): PlaybackHost {
+  return {
+    render: p.render,
+    demux: (message, buffered) => p.media.send(message, [], buffered),
+    changed: p.changed,
+    plays: (id) => p.current === id,
+    video: () => p.video,
+    fail: (error) => failPlayer(p, error),
+  };
+}
+
+// Starts the open file playing into `context` from `p.from`, as play `id`.
+async function startPlay(p: Player, context: AudioContext, id: number) {
+  const opened = p.opened;
+  if (!opened) throw new Error("play: no file is open");
+  return startPlayback({ host: playbackHost(p), context, id, opened, from: p.from });
+}
+
+async function stopStarted(playback: Promise<Playback>) {
+  try {
+    const started = await playback;
+    started.stop();
+  } catch {
+    // It never started; play already rejected with why.
+  }
+}
+
+function stop(p: Player) {
+  if (p.playback) void stopStarted(p.playback);
+  p.playback = undefined;
+  p.started = undefined;
+  p.current = -1;
+  p.changed();
+}
+
+async function open(p: Player, handle: FileSystemFileHandle) {
+  const id = ++p.opens;
+  const replaced = () => id !== p.opens;
+  const file = await handle.getFile();
+  if (replaced()) throw new DOMException("open: replaced", "AbortError");
+  stop(p);
+  p.render.postMessage({ type: "clear" } satisfies ToRender);
+  p.failure = undefined;
+  p.playing = false;
+  p.opened = undefined;
+  p.from = 0;
+  p.moved = false;
+  p.played = false;
+  const reply = await p.media.send({ type: "open", file });
+  if (reply.type !== "opened") throw new Error(`open: unexpected ${reply.type}`);
+  // The later open has stopped this one, and its file is the one the media worker has open.
+  if (replaced()) throw new DOMException("open: replaced", "AbortError");
+  p.opened = { info: reply.info, video: reply.video };
+  const video = reply.info.tracks.find((t) => t.kind === "video");
+  p.index = (video && reply.index[video.id]) ?? { keyframes: [], end: -Infinity };
+  return reply.info;
+}
+
+// What plays, started from `p.from` unless something does, and its context.
+async function begin(p: Player) {
+  const context = (p.context ??= new AudioContext({ latencyHint: "playback" }));
+
+  if (!p.playback) {
+    p.current = p.next++;
+    p.playback = startPlay(p, context, p.current);
   }
 
-  // Resolves once `done` returns true, which it checks now and on each change.
-  async function until(done: () => boolean) {
-    while (!done()) {
-      const woken = Promise.withResolvers<void>();
-      waits.add(woken.resolve);
+  const playback = p.playback;
+  const started = await startedOrCleared(p, playback);
+  // Unless an open stopped it while it started.
+  if (p.playback === playback) p.started = started;
+  return { context, started };
+}
 
-      try {
-        await woken.promise;
-      } finally {
-        waits.delete(woken.resolve);
+async function play(p: Player) {
+  if (p.failure) throw p.failure;
+  const pauses = p.pauses;
+  p.playing = true;
+  p.played = true;
+  p.scrub.to = undefined;
+
+  // Moved on by a scrub, its audio starts before where it is: it starts again from there.
+  if (p.moved) {
+    stop(p);
+    p.moved = false;
+    p.seeks++;
+  }
+
+  // A seek while it starts stops what it starts, and it goes on with the seek's.
+  for (;;) {
+    const seeks = p.seeks;
+
+    try {
+      await playOnce(p);
+      return;
+    } catch (e) {
+      if (p.seeks === seeks || p.failure) {
+        p.playing = false;
+        throw e;
       }
+
+      // A pause that came meanwhile wins; whatever else stopped it rejects this play too.
+      if (!p.playing && p.pauses !== pauses) return;
+      if (!p.playing) throw e;
+    }
+  }
+}
+
+async function playOnce(p: Player) {
+  const { context, started } = await begin(p);
+  const stopped = () => p.current !== started.id;
+
+  // Rejects if an open or a failure stopped it while it waited.
+  const check = () => {
+    if (stopped()) throw p.failure ?? new DOMException("play: stopped", "AbortError");
+  };
+
+  await until(p, () => stopped() || !p.playing || (started.primed() && visible()));
+  check();
+  // Unless a pause came while it started.
+  if (!p.playing) return;
+  // Not awaited alone: without a user gesture it stays pending until one, and a pause or a
+  // stop meanwhile settles this play.
+  const resumed = resume(p, context);
+  await until(p, () => stopped() || !p.playing || resumed.failed || started.heard());
+  if (resumed.failed) throw resumed.error;
+  check();
+}
+
+// Resumes `context`; whether it failed, and why, on the change that says so.
+function resume(p: Player, context: AudioContext) {
+  const resumed = { failed: false, error: undefined as unknown };
+
+  async function run() {
+    try {
+      await context.resume();
+    } catch (e) {
+      resumed.failed = true;
+      resumed.error = e;
+      p.changed();
     }
   }
 
-  document.addEventListener("visibilitychange", changed);
+  void run();
+  return resumed;
+}
+
+// `playback` once it has started; if it fails to, it is no longer what plays.
+async function startedOrCleared(p: Player, playback: Promise<Playback>) {
+  try {
+    return await playback;
+  } catch (e) {
+    if (p.playback === playback) p.playback = undefined;
+    throw e;
+  }
+}
+
+async function pause(p: Player) {
+  if (p.failure) throw p.failure;
+  p.playing = false;
+  p.pauses++;
+  p.changed();
+  await p.context?.suspend();
+  // Published now, not on the next animation frame, so the clock holds once pause resolves,
+  // in a hidden page too; at the time heard now, as far as the render worker has drawn.
+  p.started?.publish(performance.now());
+}
+
+// `time` in seconds as a start in microseconds, at most the duration; or what is wrong.
+function target(p: Player, time: number) {
+  if (p.failure) throw p.failure;
+  const duration = p.opened?.info.duration;
+  if (!p.opened) throw new Error("seek: no file is open");
+  if (!Number.isFinite(time) || time < 0) throw new RangeError(`seek: ${time} s`);
+  return Math.min(Math.round(Math.min(time, duration ?? time) * 1e6), Number.MAX_SAFE_INTEGER);
+}
+
+async function seek(p: Player, time: number) {
+  const to = target(p, time);
+  p.scrub.to = undefined;
+  return go(p, to);
+}
+
+async function fastSeek(p: Player, time: number) {
+  const to = target(p, time);
+  if (p.playing) return seek(p, time);
+  p.scrub.to = to;
+  p.scrub.running ??= scrub(p);
+  return p.scrub.running;
+}
+
+// Goes to each target a scrub is given in turn, the last one each time, until none is left.
+async function scrub(p: Player) {
+  try {
+    for (let to = p.scrub.to; to !== undefined; to = p.scrub.to) {
+      p.scrub.to = undefined;
+      await (movable(p, to) ? move(p, to) : go(p, to));
+    }
+  } finally {
+    p.scrub.running = undefined;
+  }
+}
+
+// Whether the paused play can go on to `to` by decoding on: it has not played, so the frame
+// up is the one due at `from`, `to` is ahead of it, and the index says no keyframe comes up to
+// it, which starting again would decode from instead.
+function movable(p: Player, to: number) {
+  const { started, from } = p;
+  if (p.played || !started?.drawn() || p.video.id !== started.id) return false;
+  const { keyframes, end } = p.index;
+  if (to < from || to > end) return false;
+  return !keyframes.some((k) => k > from && k <= to);
+}
+
+// Moves the paused play on to `to` (microseconds); resolves once its frame is up.
+async function move(p: Player, to: number) {
+  const id = p.current;
+  const seeks = p.seeks;
+  // Its audio is never heard, as a play starts again from the scrub: stopped, it no longer
+  // fills, so the media worker demuxes on for the video however far the scrub goes.
+  if (!p.moved) p.started?.clock.close();
+  p.from = to;
+  p.moved = true;
+  p.render.postMessage({ type: "scrub", id, to } satisfies ToRender);
+  await until(p, () => p.current !== id || (p.video.id === id && p.video.reached === to));
+  // Stopped: by a seek or a play, which take over, or else by an open or a failure.
+  if (p.current === id || (p.seeks !== seeks && !p.failure)) return;
+  throw p.failure ?? new DOMException("seek: stopped", "AbortError");
+}
+
+// Starts playing again from `from` (microseconds); paused, resolves once the frame due then is
+// drawn.
+async function go(p: Player, from: number) {
+  stop(p);
+  p.from = from;
+  p.moved = false;
+  p.played = false;
+  const seeks = ++p.seeks;
+
+  // Paused while it starts, it goes on as a paused seek: its frame up before it resolves.
+  if (p.playing) {
+    await play(p);
+    if (p.playing) return;
+  }
+
+  try {
+    const { started } = await begin(p);
+    await until(p, () => p.current !== started.id || started.drawn());
+    if (p.current === started.id) return;
+  } catch (e) {
+    if (p.seeks === seeks) throw e;
+  }
+
+  // Stopped: by a later seek, which takes over, or else by an open or a failure.
+  if (p.seeks === seeks || p.failure) {
+    throw p.failure ?? new DOMException("seek: stopped", "AbortError");
+  }
+}
+
+function closePlayer(p: Player) {
+  if (p.closed) return;
+  p.closed = true;
+  document.removeEventListener("visibilitychange", p.changed);
+  stop(p);
+  void p.context?.close();
+  p.render.terminate();
+  p.media.close();
+}
+
+// The engine on a render worker that is ready and a media worker.
+function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): Engine {
+  const p = createPlayerState(render, media);
+  document.addEventListener("visibilitychange", p.changed);
 
   render.addEventListener("message", ({ data }: MessageEvent<FromRender>) => {
-    if (data.type === "video") state.video = data;
-    if (data.type === "error" && data.id === state.current) fail(new Error(data.message));
-    changed();
+    if (data.type === "video") p.video = data;
+    if (data.type === "error" && data.id === p.current) failPlayer(p, new Error(data.message));
+    p.changed();
   });
   // An uncaught error in the render worker.
-  render.addEventListener("error", (e) => fail(loadError(e, "render")));
-
-  function fail(error: Error) {
-    state.failure ??= error;
-    state.playing = false;
-    state.from = 0;
-    state.moved = false;
-    state.played = false;
-    stop();
-  }
-
-  // Starts the open file playing into `context` from `state.from`, as play `id`.
-  async function startPlayback(context: AudioContext, id: number): Promise<Playback> {
-    const opened = state.opened;
-    if (!opened) throw new Error("play: no file is open");
-    const audio = opened.info.tracks.find((t) => t.kind === "audio");
-    // The clock is the audio's, so a file without audio has none.
-    if (!audio) throw new Error("play: a file without audio does not play yet");
-    const video = opened.info.tracks.find((t) => t.kind === "video");
-    const params = video && opened.video[video.id];
-    const frames = pcmFrames(context.sampleRate);
-    const from = state.from;
-    const pcm = createPcmRing(frames, CHANNELS, context.sampleRate, from / 1e6);
-    const clock = createPcmControl(pcm);
-    // Held while it prerolls: a context made in a user gesture starts running by itself, and
-    // one that played the last file still runs.
-    await context.suspend();
-    const node = await createAudioOutput(context, pcm);
-
-    // An open may have stopped this play while the worklet loaded, and the media worker may
-    // hold another file already.
-    if (state.current !== id) {
-      clock.close();
-      node.disconnect();
-      throw new DOMException("play: stopped while it started", "AbortError");
-    }
-
-    const ring = createRing(params ? RING_CAPACITY : NO_VIDEO_RING);
-
-    if (params) {
-      const message = { type: "play", id, ring, params, pcm, from } as const;
-      render.postMessage(message satisfies ToRender);
-    }
-
-    const streams = video && params ? [video.id] : [];
-    const preroll = PREROLL * context.sampleRate;
-    const demux = { buffered: false, done: false };
-
-    const demuxed = media.send(
-      {
-        type: "demux",
-        ring,
-        streams,
-        from,
-        audio: { stream: audio.id, pcm, preroll },
-      },
-      [],
-      () => {
-        demux.buffered = true;
-        changed();
-      },
-    );
-
-    const frame = { id: 0 };
-    // The last output timestamp, as context minus performance milliseconds, and when; and the
-    // media time heard when a pause stopped it, until a timestamp passes it.
-    const output = {
-      offset: Number.NaN,
-      at: 0,
-      agreed: 0,
-      newer: 0,
-      settled: false,
-      stopped: Number.NaN,
-    };
-
-    // The output timestamp, for the render worker (src/pcm.ts), on every animation frame and
-    // as the context stops. It runs once it has settled, and stays so until the context stops.
-    // Stopped by a pause at `stopping` (performance milliseconds), it holds the media time heard
-    // then until a timestamp passes it, so the clock never goes back: the last timestamp
-    // is up to an audio callback older, and the frame on screen went up by it carried forward.
-    function publish(stopping?: number) {
-      const { contextTime = 0, performanceTime = 0 } = context.getOutputTimestamp();
-      const offset = contextTime * 1000 - performanceTime;
-
-      if (performanceTime > output.at) {
-        const agrees = Math.abs(offset - output.offset) < SETTLED_MS;
-        output.agreed = agrees ? output.agreed + 1 : 0;
-        output.offset = offset;
-        output.at = performanceTime;
-        output.newer++;
-      }
-
-      const running = context.state === "running";
-
-      // Heard no further than the worklet rendered; paused again while held, never back.
-      if (stopping !== undefined && output.settled) {
-        const at = clock.mediaTime(Math.min((stopping + output.offset) / 1000, clock.read().time));
-        output.stopped = Number.isNaN(output.stopped) ? at : Math.max(output.stopped, at);
-      }
-
-      const agreed = output.agreed >= SETTLED_COUNT || output.newer >= SETTLED_LIMIT;
-      const settled = output.settled;
-      output.settled = running && (output.settled || agreed);
-      if (output.settled !== settled) changed();
-      if (clock.mediaTime(contextTime) >= output.stopped) output.stopped = Number.NaN;
-      const held = !Number.isNaN(output.stopped);
-
-      // A timestamp from before a pause says nothing of the one after it.
-      if (!running) {
-        output.agreed = 0;
-        output.newer = 0;
-      }
-
-      // Held as a media time, not a context time: a suspend moves context time on by a
-      // callback the worklet never renders.
-      const at = performance.timeOrigin + performanceTime;
-      clock.publishOutput(contextTime, at, output.settled, held ? output.stopped : undefined);
-    }
-
-    function everyFrame() {
-      publish();
-      frame.id = requestAnimationFrame(everyFrame);
-    }
-
-    async function watch() {
-      try {
-        await demuxed;
-        demux.done = true;
-        changed();
-      } catch (e) {
-        if (state.current === id) fail(e instanceof Error ? e : new Error(String(e)));
-      }
-    }
-
-    // Stops both rings' producer, so the media worker is free for the next request.
-    function stopPlayback() {
-      cancelAnimationFrame(frame.id);
-      render.postMessage({ type: "stop" } satisfies ToRender);
-      clock.close();
-      closeRing(ring);
-      node.disconnect();
-    }
-
-    // Whether it may start, once and for good: video is decoded and audio buffered ahead, or
-    // the render worker says video can get no further while the context is held, as for
-    // sparse video or a short audio track. A full PCM ring is audio ahead.
-    const prerolled = { done: false };
-
-    function primed() {
-      const reported = state.video.id === id ? state.video : undefined;
-      const videoAhead = !params || reported?.ahead === true;
-      const audioAhead = demux.buffered || demux.done;
-      prerolled.done ||= (videoAhead && audioAhead) || reported?.stuck === true;
-      return prerolled.done;
-    }
-
-    // Whether the frame due at the start is on screen; without video, once it may start.
-    function drawn() {
-      return params ? state.video.id === id && state.video.drawn : primed();
-    }
-
-    // Whether it is heard, by a settled timestamp past a pause's, and the frame on screen went
-    // up by it.
-    function heard() {
-      const shown = !params || (state.video.id === id && state.video.shown);
-      return output.settled && Number.isNaN(output.stopped) && shown;
-    }
-
-    everyFrame();
-    void watch();
-
-    return { id, clock, publish, primed, drawn, heard, stop: stopPlayback };
-  }
-
-  async function stopStarted(playback: Promise<Playback>) {
-    try {
-      const started = await playback;
-      started.stop();
-    } catch {
-      // It never started; play already rejected with why.
-    }
-  }
-
-  function stop() {
-    if (state.playback) void stopStarted(state.playback);
-    state.playback = undefined;
-    state.started = undefined;
-    state.current = -1;
-    changed();
-  }
-
-  async function open(handle: FileSystemFileHandle) {
-    const id = ++state.opens;
-    const replaced = () => id !== state.opens;
-    const file = await handle.getFile();
-    if (replaced()) throw new DOMException("open: replaced", "AbortError");
-    stop();
-    render.postMessage({ type: "clear" } satisfies ToRender);
-    state.failure = undefined;
-    state.playing = false;
-    state.opened = undefined;
-    state.from = 0;
-    state.moved = false;
-    state.played = false;
-    const reply = await media.send({ type: "open", file });
-    if (reply.type !== "opened") throw new Error(`open: unexpected ${reply.type}`);
-    // The later open has stopped this one, and its file is the one the media worker has open.
-    if (replaced()) throw new DOMException("open: replaced", "AbortError");
-    state.opened = { info: reply.info, video: reply.video };
-    const video = reply.info.tracks.find((t) => t.kind === "video");
-    state.index = (video && reply.index[video.id]) ?? { keyframes: [], end: -Infinity };
-    return reply.info;
-  }
-
-  // What plays, started from `state.from` unless something does, and its context.
-  async function begin() {
-    const context = (state.context ??= new AudioContext({ latencyHint: "playback" }));
-
-    if (!state.playback) {
-      state.current = state.next++;
-      state.playback = startPlayback(context, state.current);
-    }
-
-    const playback = state.playback;
-    const started = await startedOrCleared(playback);
-    // Unless an open stopped it while it started.
-    if (state.playback === playback) state.started = started;
-    return { context, started };
-  }
-
-  async function play() {
-    if (state.failure) throw state.failure;
-    const pauses = state.pauses;
-    state.playing = true;
-    state.played = true;
-    state.scrub.to = undefined;
-
-    // Moved on by a scrub, its audio starts before where it is: it starts again from there.
-    if (state.moved) {
-      stop();
-      state.moved = false;
-      state.seeks++;
-    }
-
-    // A seek while it starts stops what it starts, and it goes on with the seek's.
-    for (;;) {
-      const seeks = state.seeks;
-
-      try {
-        await playOnce();
-        return;
-      } catch (e) {
-        if (state.seeks === seeks || state.failure) {
-          state.playing = false;
-          throw e;
-        }
-
-        // A pause that came meanwhile wins; whatever else stopped it rejects this play too.
-        if (!state.playing && state.pauses !== pauses) return;
-        if (!state.playing) throw e;
-      }
-    }
-  }
-
-  async function playOnce() {
-    const { context, started } = await begin();
-    const stopped = () => state.current !== started.id;
-
-    // Rejects if an open or a failure stopped it while it waited.
-    const check = () => {
-      if (stopped()) throw state.failure ?? new DOMException("play: stopped", "AbortError");
-    };
-
-    await until(() => stopped() || !state.playing || (started.primed() && visible()));
-    check();
-    // Unless a pause came while it started.
-    if (!state.playing) return;
-    // Not awaited alone: without a user gesture it stays pending until one, and a pause or a
-    // stop meanwhile settles this play.
-    const resumed = resume(context);
-    await until(() => stopped() || !state.playing || resumed.failed || started.heard());
-    if (resumed.failed) throw resumed.error;
-    check();
-  }
-
-  // Resumes `context`; whether it failed, and why, on the change that says so.
-  function resume(context: AudioContext) {
-    const resumed = { failed: false, error: undefined as unknown };
-
-    async function run() {
-      try {
-        await context.resume();
-      } catch (e) {
-        resumed.failed = true;
-        resumed.error = e;
-        changed();
-      }
-    }
-
-    void run();
-    return resumed;
-  }
-
-  // `playback` once it has started; if it fails to, it is no longer what plays.
-  async function startedOrCleared(playback: Promise<Playback>) {
-    try {
-      return await playback;
-    } catch (e) {
-      if (state.playback === playback) state.playback = undefined;
-      throw e;
-    }
-  }
-
-  async function pause() {
-    if (state.failure) throw state.failure;
-    state.playing = false;
-    state.pauses++;
-    changed();
-    await state.context?.suspend();
-    // Published now, not on the next animation frame, so the clock holds once pause resolves,
-    // in a hidden page too; at the time heard now, as far as the render worker has drawn.
-    state.started?.publish(performance.now());
-  }
-
-  // `time` in seconds as a start in microseconds, at most the duration; or what is wrong.
-  function target(time: number) {
-    if (state.failure) throw state.failure;
-    const duration = state.opened?.info.duration;
-    if (!state.opened) throw new Error("seek: no file is open");
-    if (!Number.isFinite(time) || time < 0) throw new RangeError(`seek: ${time} s`);
-    return Math.min(Math.round(Math.min(time, duration ?? time) * 1e6), Number.MAX_SAFE_INTEGER);
-  }
-
-  async function seek(time: number) {
-    const to = target(time);
-    state.scrub.to = undefined;
-    return go(to);
-  }
-
-  async function fastSeek(time: number) {
-    const to = target(time);
-    if (state.playing) return seek(time);
-    state.scrub.to = to;
-    state.scrub.running ??= scrub();
-    return state.scrub.running;
-  }
-
-  // Goes to each target a scrub is given in turn, the last one each time, until none is left.
-  async function scrub() {
-    try {
-      for (let to = state.scrub.to; to !== undefined; to = state.scrub.to) {
-        state.scrub.to = undefined;
-        await (movable(to) ? move(to) : go(to));
-      }
-    } finally {
-      state.scrub.running = undefined;
-    }
-  }
-
-  // Whether the paused play can go on to `to` by decoding on: it has not played, so the frame
-  // up is the one due at `from`, `to` is ahead of it, and the index says no keyframe comes up to
-  // it, which starting again would decode from instead.
-  function movable(to: number) {
-    const { started, from } = state;
-    if (state.played || !started?.drawn() || state.video.id !== started.id) return false;
-    const { keyframes, end } = state.index;
-    if (to < from || to > end) return false;
-    return !keyframes.some((k) => k > from && k <= to);
-  }
-
-  // Moves the paused play on to `to` (microseconds); resolves once its frame is up.
-  async function move(to: number) {
-    const id = state.current;
-    const seeks = state.seeks;
-    // Its audio is never heard, as a play starts again from the scrub: stopped, it no longer
-    // fills, so the media worker demuxes on for the video however far the scrub goes.
-    if (!state.moved) state.started?.clock.close();
-    state.from = to;
-    state.moved = true;
-    render.postMessage({ type: "scrub", id, to } satisfies ToRender);
-    await until(
-      () => state.current !== id || (state.video.id === id && state.video.reached === to),
-    );
-    // Stopped: by a seek or a play, which take over, or else by an open or a failure.
-    if (state.current === id || (state.seeks !== seeks && !state.failure)) return;
-    throw state.failure ?? new DOMException("seek: stopped", "AbortError");
-  }
-
-  // Starts playing again from `from` (microseconds); paused, resolves once the frame due then is
-  // drawn.
-  async function go(from: number) {
-    stop();
-    state.from = from;
-    state.moved = false;
-    state.played = false;
-    const seeks = ++state.seeks;
-
-    // Paused while it starts, it goes on as a paused seek: its frame up before it resolves.
-    if (state.playing) {
-      await play();
-      if (state.playing) return;
-    }
-
-    try {
-      const { started } = await begin();
-      await until(() => state.current !== started.id || started.drawn());
-      if (state.current === started.id) return;
-    } catch (e) {
-      if (state.seeks === seeks) throw e;
-    }
-
-    // Stopped: by a later seek, which takes over, or else by an open or a failure.
-    if (state.seeks === seeks || state.failure) {
-      throw state.failure ?? new DOMException("seek: stopped", "AbortError");
-    }
-  }
-
-  function close() {
-    if (state.closed) return;
-    state.closed = true;
-    document.removeEventListener("visibilitychange", changed);
-    stop();
-    void state.context?.close();
-    render.terminate();
-    media.close();
-  }
+  render.addEventListener("error", (e) => failPlayer(p, loadError(e, "render")));
 
   return {
-    open,
-    play,
-    pause,
-    seek,
-    fastSeek,
+    open: (handle) => open(p, handle),
+    play: () => play(p),
+    pause: () => pause(p),
+    seek: (time) => seek(p, time),
+    fastSeek: (time) => fastSeek(p, time),
     get currentTime() {
       const now = performance.timeOrigin + performance.now();
-      if (state.moved || !state.started) return state.from / 1e6;
-      return state.started.clock.heard(now);
+      if (p.moved || !p.started) return p.from / 1e6;
+      return p.started.clock.heard(now);
     },
-    close,
+    close: () => closePlayer(p),
   };
 }

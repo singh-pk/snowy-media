@@ -10,7 +10,7 @@
 // Usage: bun run test.
 
 import { afterAll, expect, test } from "bun:test";
-import { decodable, launch } from "./support/browsers";
+import { decodable, inPage, launch } from "./support/browsers";
 import { MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
 import type * as PageSupport from "./support/page";
 
@@ -90,6 +90,30 @@ function plan(video: Video) {
   return { frames, times, drawn };
 }
 
+// Plays video stream `stream` of `file` into a canvas in a page of its own and reads it back
+// (render, in test/support/page.ts); with `small`, through a packet ring of 4 KiB and a ring of
+// 64 KiB to the video decode worker.
+function renderInPage(
+  file: string,
+  stream: number,
+  shown: { times: number[]; width: number; height: number; ahead?: boolean; small?: boolean },
+) {
+  return inPage(server.url.href, (tab) =>
+    tab.evaluate(
+      async ({ page, worker, n, at, size: { small, ...size } }) => {
+        const support: typeof PageSupport = await import(page);
+        const { media, params } = await support.openVideo(worker, n, at);
+        const decoders = small ? support.startDecoders(1 << 16) : undefined;
+        const options = decoders ? { ...size, rings: { packets: 1 << 12, decoders } } : size;
+        const result = await support.render(media, at, params, options);
+        media.stop();
+        return result;
+      },
+      { page: PAGE, worker: MEDIA_WORKER, n: file, at: stream, size: shown },
+    ),
+  );
+}
+
 test("a decoder the video decode worker fails reports why, closes cleanly, and the next decodes", async () => {
   const browser = await launch();
   const name = "mpeg2-aac.mov";
@@ -103,13 +127,7 @@ test("a decoder the video decode worker fails reports why, closes cleanly, and t
     const got = await tab.evaluate(
       async ({ page, worker, n }) => {
         const support: typeof PageSupport = await import(page);
-        const media = support.startMedia(worker);
-        const res = await fetch(`/test/fixtures/${n}`);
-        const blob = await res.blob();
-        const opened = await media.request({ type: "open", file: new File([blob], n) });
-        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-        const params = opened.video[0];
-        if (!params) throw new Error(`${n}: no video parameters`);
+        const { media, params } = await support.openVideo(worker, n, 0);
         const message = await support.failInWorker(params);
         const size = { times: [0], width: params.width, height: params.height };
         const { shown } = await support.render(media, 0, params, size);
@@ -127,36 +145,23 @@ test("a decoder the video decode worker fails reports why, closes cleanly, and t
 }, 60_000);
 
 test("a demux that fails stops decoding, leaving the media worker's error the only report", async () => {
-  const browser = await launch();
   const name = "h264-aac.mp4";
-
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    const got = await tab.evaluate(
+  const got = await inPage(server.url.href, (tab) =>
+    tab.evaluate(
       async ({ page, worker, n }) => {
         const support: typeof PageSupport = await import(page);
-        const media = support.startMedia(worker);
-        const res = await fetch(`/test/fixtures/${n}`);
-        const blob = await res.blob();
-        const opened = await media.request({ type: "open", file: new File([blob], n) });
-        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-        const params = opened.video[0];
-        if (!params) throw new Error(`${n}: no video parameters`);
+        const { media, params } = await support.openVideo(worker, n, 0);
         const result = await support.failDemux(media, 0, params);
         media.stop();
         return result;
       },
       { page: PAGE, worker: MEDIA_WORKER, n: name },
-    );
-    expect(got).toEqual({ message: "Error: demux: from -1", done: false });
-  } finally {
-    await browser.close();
-  }
+    ),
+  );
+  expect(got).toEqual({ message: "Error: demux: from -1", done: false });
 }, 60_000);
 
 test("a frame put up for a time goes up even if the time stops short of it", async () => {
-  const browser = await launch();
   const file = "h264-aac.mp4";
   const video = expected[file]?.video;
   if (!video) throw new Error(`no video in ${file}`);
@@ -165,67 +170,30 @@ test("a frame put up for a time goes up even if the time stops short of it", asy
   // Frame 5 is taken as due, its upload coming after; then the time stops between frames 4
   // and 5, as a pause stops the clock short of the refresh a frame was put up for.
   const times = [micros(5), Math.floor((micros(4) + micros(5)) / 2)];
+  const size = { times, width: video.width, height: video.height, ahead: true };
+  const { shown: got } = await renderInPage(file, video.id, size);
 
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    const got = await tab.evaluate(
-      async ({ page, worker, n, stream, size }) => {
-        const support: typeof PageSupport = await import(page);
-        const media = support.startMedia(worker);
-        const res = await fetch(`/test/fixtures/${n}`);
-        const blob = await res.blob();
-        const opened = await media.request({ type: "open", file: new File([blob], n) });
-        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-        const params = opened.video[stream];
-        if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
-        const result = await support.render(media, stream, params, size);
-        media.stop();
-        return result.shown;
-      },
-      {
-        page: PAGE,
-        worker: MEDIA_WORKER,
-        n: file,
-        stream: video.id,
-        size: { times, width: video.width, height: video.height, ahead: true },
-      },
-    );
-
-    // The setup holds: 5 was not up by the first time, only taken, with 3 and 4 closed.
-    expect(got[0]?.id).toBeLessThan(4);
-    // Frames 3 and 4 were closed when 5 was taken: 5 goes up, not an older frame left on screen.
-    expect(got.at(-1)).toEqual({ drawn: true, id: 5 });
-  } finally {
-    await browser.close();
-  }
+  // The setup holds: 5 was not up by the first time, only taken, with 3 and 4 closed.
+  expect(got[0]?.id).toBeLessThan(4);
+  // Frames 3 and 4 were closed when 5 was taken: 5 goes up, not an older frame left on screen.
+  expect(got.at(-1)).toEqual({ drawn: true, id: 5 });
 }, 60_000);
 
 test("a decoder closed partway through handing over a packet leaves the next decoder whole frames", async () => {
-  const browser = await launch();
   const name = "mpeg2-aac.mov";
   const { video } = expected[name] ?? { video: undefined };
   if (!video) throw new Error(`${name}: no expected results`);
   const { frames, times } = plan(video);
-
-  try {
-    const tab = await browser.newPage();
-    await tab.goto(server.url.href);
-    const got = await tab.evaluate(
+  const got = await inPage(server.url.href, (tab) =>
+    tab.evaluate(
       async ({ page, worker, n, size }) => {
         const support: typeof PageSupport = await import(page);
-        const media = support.startMedia(worker);
-        const res = await fetch(`/test/fixtures/${n}`);
-        const blob = await res.blob();
-        const opened = await media.request({ type: "open", file: new File([blob], n) });
-        if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-        const params = opened.video[0];
-        if (!params) throw new Error(`${n}: no video parameters`);
+        const { media, params } = await support.openVideo(worker, n, 0);
         const capacity = 1 << 16;
         const decoders = support.startDecoders(capacity);
         const partial = support.abandonPacket(decoders, params, capacity);
         const rings = { packets: 1 << 12, decoders };
-        const { shown } = await support.render(media, 0, params, size, rings);
+        const { shown } = await support.render(media, 0, params, { ...size, rings });
         media.stop();
         return { partial, ids: shown.filter((s) => s.drawn).map((s) => s.id) };
       },
@@ -235,126 +203,55 @@ test("a decoder closed partway through handing over a packet leaves the next dec
         n: name,
         size: { times, width: video.width, height: video.height },
       },
-    );
-    expect(got).toEqual({ partial: true, ids: frames });
-  } finally {
-    await browser.close();
-  }
+    ),
+  );
+  expect(got).toEqual({ partial: true, ids: frames });
 }, 60_000);
 
 for (const [file, { video }] of Object.entries(expected)) {
   test(`shows ${file} at its timestamps, as FFmpeg shows it`, async () => {
-    const browser = await launch();
     const { frames, times, drawn } = plan(video);
     // At the size it is shown at, as the grid is, over the size of its frame numbers.
     const scale = video.scale ?? 1;
     const [width, height] = [video.shown[0] / scale, video.shown[1] / scale];
     const turned = video.shown[0] !== video.width;
-
-    try {
-      const tab = await browser.newPage();
-      await tab.goto(server.url.href);
-      const got = await tab.evaluate(
-        async ({ page, worker, n, stream, size }) => {
-          const support: typeof PageSupport = await import(page);
-          const media = support.startMedia(worker);
-          const res = await fetch(`/test/fixtures/${n}`);
-          const blob = await res.blob();
-          const opened = await media.request({ type: "open", file: new File([blob], n) });
-          if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-          const params = opened.video[stream];
-          if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
-          const result = await support.render(media, stream, params, size);
-          media.stop();
-          return result;
-        },
-        {
-          page: PAGE,
-          worker: MEDIA_WORKER,
-          n: file,
-          stream: video.id,
-          size: { times, width, height },
-        },
-      );
-      expect(got.shown.map((s) => s.drawn)).toEqual(drawn);
-      const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
-      // A turned frame's number is not where the reader looks: it is counted, and its grid shows
-      // the turn.
-      if (turned) expect(ids.length).toBe(frames.length);
-      else expect(ids).toEqual(frames);
-      const r = correlation(got.grid, video.grid);
-      expect(r, `${file} grid ${JSON.stringify(got.grid)}`).toBeGreaterThan(MIN_CORRELATION);
-      const differences = got.grid.map((g, i) => Math.abs(g - (video.grid[i] ?? 0)));
-      const difference = differences.reduce((sum, d) => sum + d, 0) / differences.length;
-      expect(difference, `${file} grid ${JSON.stringify(got.grid)}`).toBeLessThan(
-        MAX_LEVEL_DIFFERENCE,
-      );
-    } finally {
-      await browser.close();
-    }
+    const got = await renderInPage(file, video.id, { times, width, height });
+    expect(got.shown.map((s) => s.drawn)).toEqual(drawn);
+    const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
+    // A turned frame's number is not where the reader looks: it is counted, and its grid shows
+    // the turn.
+    if (turned) expect(ids.length).toBe(frames.length);
+    else expect(ids).toEqual(frames);
+    const r = correlation(got.grid, video.grid);
+    expect(r, `${file} grid ${JSON.stringify(got.grid)}`).toBeGreaterThan(MIN_CORRELATION);
+    const differences = got.grid.map((g, i) => Math.abs(g - (video.grid[i] ?? 0)));
+    const difference = differences.reduce((sum, d) => sum + d, 0) / differences.length;
+    expect(difference, `${file} grid ${JSON.stringify(got.grid)}`).toBeLessThan(
+      MAX_LEVEL_DIFFERENCE,
+    );
   }, 60_000);
 
   // Through a packet ring of 4 KiB and a ring of 64 KiB to the video decode worker, its larger
   // packets go in pieces, a frame of FFmpeg's video handed over in parts as room frees.
   test(`shows ${file} through rings smaller than its packets`, async () => {
-    const browser = await launch();
     const { frames, times } = plan(video);
     const scale = video.scale ?? 1;
     const [width, height] = [video.shown[0] / scale, video.shown[1] / scale];
-
-    try {
-      const tab = await browser.newPage();
-      await tab.goto(server.url.href);
-      const got = await tab.evaluate(
-        async ({ page, worker, n, stream, size }) => {
-          const support: typeof PageSupport = await import(page);
-          const media = support.startMedia(worker);
-          const res = await fetch(`/test/fixtures/${n}`);
-          const blob = await res.blob();
-          const opened = await media.request({ type: "open", file: new File([blob], n) });
-          if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-          const params = opened.video[stream];
-          if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
-          const rings = { packets: 1 << 12, decoders: support.startDecoders(1 << 16) };
-          const result = await support.render(media, stream, params, size, rings);
-          media.stop();
-          return result;
-        },
-        {
-          page: PAGE,
-          worker: MEDIA_WORKER,
-          n: file,
-          stream: video.id,
-          size: { times, width, height },
-        },
-      );
-      const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
-      if (video.shown[0] === video.width) expect(ids).toEqual(frames);
-      else expect(ids.length).toBe(frames.length);
-    } finally {
-      await browser.close();
-    }
+    const got = await renderInPage(file, video.id, { times, width, height, small: true });
+    const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
+    if (video.shown[0] === video.width) expect(ids).toEqual(frames);
+    else expect(ids.length).toBe(frames.length);
   }, 60_000);
 
   // FFmpeg's frames are always read from its memory.
   if (!video.codecString) continue;
 
   test(`draws ${file} straight from the GPU as from its planes, where it measures so`, async () => {
-    const browser = await launch();
-
-    try {
-      const tab = await browser.newPage();
-      await tab.goto(server.url.href);
-      const got = await tab.evaluate(
+    const got = await inPage(server.url.href, (tab) =>
+      tab.evaluate(
         async ({ page, worker, n, stream }) => {
           const support: typeof PageSupport = await import(page);
-          const media = support.startMedia(worker);
-          const res = await fetch(`/test/fixtures/${n}`);
-          const blob = await res.blob();
-          const opened = await media.request({ type: "open", file: new File([blob], n) });
-          if (opened.type !== "opened") throw new Error(`${n}: ${opened.type}`);
-          const params = opened.video[stream];
-          if (!params) throw new Error(`${n}: no parameters for stream ${stream}`);
+          const { media, params } = await support.openVideo(worker, n, stream);
           if (params.decoder !== "webcodecs") throw new Error(`${n}: ${params.decoder}`);
 
           const result = await support.compareRoutes(media, stream, params);
@@ -362,18 +259,16 @@ for (const [file, { video }] of Object.entries(expected)) {
           return result;
         },
         { page: PAGE, worker: MEDIA_WORKER, n: file, stream: video.id },
-      );
+      ),
+    );
 
-      // Drawn from its planes, which the test above checks, when this machine's GPU measures the
-      // frame unlike them, or still unmeasured when the first frame is too grey to decide.
-      // oxlint-disable-next-line repo/no-conditional-expect -- the route depends on the machine's GPU and the frame
-      if (!got.off) return;
+    // Drawn from its planes, which the test above checks, when this machine's GPU measures the
+    // frame unlike them, or still unmeasured when the first frame is too grey to decide.
+    // oxlint-disable-next-line repo/no-conditional-expect -- the route depends on the machine's GPU and the frame
+    if (!got.off) return;
 
-      const [median = Infinity, p95 = Infinity] = got.off;
-      expect(median, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[0] ?? 0);
-      expect(p95, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[1] ?? 0);
-    } finally {
-      await browser.close();
-    }
+    const [median = Infinity, p95 = Infinity] = got.off;
+    expect(median, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[0] ?? 0);
+    expect(p95, `${file} via ${got.via}`).toBeLessThanOrEqual(MAX_IMPORTED_OFF[1] ?? 0);
   }, 60_000);
 }

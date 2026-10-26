@@ -10,12 +10,14 @@
 import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
 import { createAudioOutput } from "../../src/audio";
 import { type VideoParams, videoConfig } from "../../src/codec";
-import { createCompositor, createRoute, type Route } from "../../src/compositor";
+import { createCompositor } from "../../src/compositor";
+import { createRoute, type Route } from "../../src/measure";
 import { createPcmControl, createPcmRing } from "../../src/pcm";
 import type { FromMedia, ToMedia } from "../../src/protocol";
 import { createConsumer, createRing, END, FAILED, RING_CAPACITY } from "../../src/ring";
 import { createVideoOutput } from "../../src/video";
 import { createWasmVideo } from "../../src/wasm-video";
+import type * as EngineModule from "../../src/index";
 import { PCM_CHANNELS, PCM_RATE, probe, SAMPLE_FRAMES } from "./audio";
 import { brightnessGrid, CELL, readFrameId } from "./frame-id";
 
@@ -207,6 +209,21 @@ export function startMedia(url: string) {
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/**
+ * Starts the media worker at `worker`, opens test fixture `name` in it, and returns it with the
+ * parameters of its video stream `stream`.
+ */
+export async function openVideo(worker: string, name: string, stream: number) {
+  const media = startMedia(worker);
+  const res = await fetch(`/test/fixtures/${name}`);
+  const blob = await res.blob();
+  const opened = await media.request({ type: "open", file: new File([blob], name) });
+  if (opened.type !== "opened") throw new Error(`${name}: ${opened.type}`);
+  const params = opened.video[stream];
+  if (!params) throw new Error(`${name}: no parameters for stream ${stream}`);
+  return { media, params };
+}
 
 /** The first packet of `stream` in the file open in `media`, which stops demuxing after it. */
 export async function firstPacket(media: ReturnType<typeof startMedia>, stream: number) {
@@ -444,7 +461,7 @@ export async function failDemux(
   context.configure({ device, format, alphaMode: "opaque" });
   const ring = createRing(RING_CAPACITY);
   const compositor = createCompositor(device, context, format);
-  const output = createVideoOutput(ring, p, compositor, wasm, () => {});
+  const output = createVideoOutput(ring, p, { compositor, wasm });
   const results = await Promise.allSettled([
     media.request({ type: "demux", ring, streams: [stream], from: -1 }),
     output.done,
@@ -454,6 +471,58 @@ export async function failDemux(
   const [demuxed, done] = results;
   const message = demuxed.status === "rejected" ? String(demuxed.reason) : "replied";
   return { message, done: done.status === "rejected" ? String(done.reason) : output.ended() };
+}
+
+// The brightness of a pixel read back as RGBA or BGRA: green, the same byte in both.
+const GREEN = { channels: 4, offset: 1 };
+
+/** A `width` × `height` WebGPU canvas on a device of its own, whose drawing can be read back. */
+async function readableCanvas(width: number, height: number) {
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("no GPU adapter");
+  const device = await adapter.requestDevice();
+  const canvas = new OffscreenCanvas(width, height);
+  const context = canvas.getContext("webgpu");
+  if (!(context instanceof GPUCanvasContext)) throw new Error("no WebGPU context");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  // COPY_SRC, to read back what was drawn.
+  const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
+  context.configure({ device, format, usage, alphaMode: "opaque" });
+  return { device, context, format };
+}
+
+/**
+ * Reads back what was just drawn into a `width` × `height` canvas on `device`, as its pixels
+ * with rows packed.
+ */
+function createReadBack(device: GPUDevice, width: number, height: number) {
+  // Rows of a texture copy are a multiple of 256 bytes apart.
+  const stride = Math.ceil((width * 4) / 256) * 256;
+  const buffer = device.createBuffer({
+    size: stride * height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+
+  return async function read(context: GPUCanvasContext) {
+    // The canvas's texture is the one just drawn until the task ends.
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: context.getCurrentTexture() },
+      { buffer, bytesPerRow: stride },
+      [width, height],
+    );
+    device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const mapped = new Uint8Array(buffer.getMappedRange());
+    const pixels = new Uint8Array(width * height * 4);
+
+    for (let y = 0; y < height; y++) {
+      pixels.set(mapped.subarray(y * stride, y * stride + width * 4), y * width * 4);
+    }
+
+    buffer.unmap();
+    return pixels;
+  };
 }
 
 /**
@@ -474,32 +543,26 @@ export async function render(
     width,
     height,
     ahead = false,
-  }: { times: number[]; width: number; height: number; ahead?: boolean },
-  rings?: { packets: number; decoders: ReturnType<typeof startDecoders> },
+    rings,
+  }: {
+    times: number[];
+    width: number;
+    height: number;
+    ahead?: boolean;
+    rings?: { packets: number; decoders: ReturnType<typeof startDecoders> };
+  },
 ) {
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error("no GPU adapter");
-  const device = await adapter.requestDevice();
-  const canvas = new OffscreenCanvas(width, height);
-  const context = canvas.getContext("webgpu");
-  if (!(context instanceof GPUCanvasContext)) throw new Error("no WebGPU context");
-  const format = navigator.gpu.getPreferredCanvasFormat();
-  // COPY_SRC, to read back what was drawn.
-  const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
-  context.configure({ device, format, usage, alphaMode: "opaque" });
+  const { device, context, format } = await readableCanvas(width, height);
+  const read = createReadBack(device, width, height);
   const ring = createRing(rings?.packets ?? RING_CAPACITY);
   const demuxed = media.request({ type: "demux", ring, streams: [stream], from: 0 });
   // Wakes the wait for frames below on every change in how far decoding is.
   const decoding = { changed: () => {} };
   const compositor = createCompositor(device, context, format);
-  const output = createVideoOutput(ring, p, compositor, rings?.decoders ?? wasm, () =>
-    decoding.changed(),
-  );
-  // Rows of a texture copy are a multiple of 256 bytes apart.
-  const stride = Math.ceil((width * 4) / 256) * 256;
-  const buffer = device.createBuffer({
-    size: stride * height,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  const output = createVideoOutput(ring, p, {
+    compositor,
+    wasm: rings?.decoders ?? wasm,
+    changed: () => decoding.changed(),
   });
   const shown: { drawn: boolean; id: number }[] = [];
   let grid: number[] = [];
@@ -543,25 +606,8 @@ export async function render(
         continue;
       }
 
-      // The canvas's texture is the one just drawn until the task ends.
-      const encoder = device.createCommandEncoder();
-      encoder.copyTextureToBuffer(
-        { texture: context.getCurrentTexture() },
-        { buffer, bytesPerRow: stride },
-        [width, height],
-      );
-      device.queue.submit([encoder.finish()]);
-      await buffer.mapAsync(GPUMapMode.READ);
-      const mapped = new Uint8Array(buffer.getMappedRange());
-      const pixels = new Uint8Array(width * height * 4);
-
-      for (let y = 0; y < height; y++) {
-        pixels.set(mapped.subarray(y * stride, y * stride + width * 4), y * width * 4);
-      }
-
-      buffer.unmap();
-      // Green, the same byte in RGBA and BGRA.
-      if (shown.length === 0) grid = brightnessGrid(pixels, width, height, 4, 1);
+      const pixels = await read(context);
+      if (shown.length === 0) grid = brightnessGrid(pixels, width, height, GREEN);
       shown.push({ drawn, id: readFrameId(pixels.subarray(1), width * 4, 4) });
     }
   } finally {
@@ -584,6 +630,45 @@ export async function fileHandle(name: string, blob: Blob) {
   await writable.write(blob);
   await writable.close();
   return handle;
+}
+
+/** A handle to test fixture `name` (fileHandle). */
+export async function fixtureHandle(name: string) {
+  const res = await fetch(`/test/fixtures/${name}`);
+  const blob = await res.blob();
+  return fileHandle(name, blob);
+}
+
+function pageCanvas() {
+  const canvas = document.querySelector("canvas");
+  if (!canvas) throw new Error("no canvas");
+  return canvas;
+}
+
+/**
+ * An engine from the module at `entry`, drawing into `canvas`, the page's own unless given.
+ * The module is the bundle the page loads, not this file's import, as an app loads it.
+ */
+export async function startEngine(entry: string, canvas = pageCanvas()) {
+  const engine: typeof EngineModule = await import(entry);
+  const player = await engine.createEngine({ canvas });
+  return { player, canvas };
+}
+
+/** An engine as startEngine gives, with test fixture `name` open in it. */
+export async function openEngine(entry: string, name: string, canvas = pageCanvas()) {
+  const { player } = await startEngine(entry, canvas);
+  const handle = await fixtureHandle(name);
+  await player.open(handle);
+  return { player, canvas, handle };
+}
+
+/** A `width` × `height` canvas added to the page, for a page without its own. */
+export function addCanvas(width: number, height: number) {
+  const canvas = document.createElement("canvas");
+  [canvas.width, canvas.height] = [width, height];
+  document.body.append(canvas);
+  return canvas;
 }
 
 /**
@@ -618,5 +703,28 @@ export async function watchScreen(
     seen.push([player.currentTime, frameOnScreen(canvas, reader)]);
   }
 
+  return seen;
+}
+
+/**
+ * A drag of engine `player` from `from` to `until` seconds over `frames` animation frames, a
+ * fastSeek on each, with the screen read on each (watchScreen), along with the scrub's target,
+ * which currentTime reads.
+ */
+export async function drag(
+  player: { readonly currentTime: number; fastSeek(time: number): Promise<void> },
+  canvas: HTMLCanvasElement,
+  { from, until, frames }: { from: number; until: number; frames: number },
+) {
+  const watching = watchScreen(player, canvas, (frames * 1000) / 60 + 200);
+  const scrubs: Promise<void>[] = [];
+
+  for (let i = 1; i <= frames; i++) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    scrubs.push(player.fastSeek(from + ((until - from) * i) / frames));
+  }
+
+  const seen = await watching;
+  await Promise.all(scrubs);
   return seen;
 }
