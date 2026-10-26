@@ -42,7 +42,7 @@ const MIN_CORRELATION = 0.9;
 const MAX_LEVEL_DIFFERENCE = 2;
 // How far a frame drawn straight from the GPU may be from the same frame drawn from its planes,
 // in 8-bit levels, at the median and the 95th percentile of its channels: as far as the
-// measurement lets a route import (src/compositor.ts), plus rounding.
+// measurement lets a route import (src/measure.ts), plus rounding.
 const MAX_IMPORTED_OFF = [2, 7];
 const server = await serveEngine("<!doctype html><title>test</title>");
 

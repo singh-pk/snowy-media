@@ -12,7 +12,7 @@
 - [ ] `bun run check` and `bun test` pass, and the `code-reviewer` agent's findings are fixed
 - [ ] Behaviour changes have a test whose expectation comes from an independent source, such as native `ffprobe`
 - [ ] No assertion, tolerance or minimum is loosened to make a test pass; any changed expectation says here why the old one was wrong
-- [ ] No coverage floor (`coverage-floor.json`) is lowered and no limit in `.oxlintrc.json` or `.jscpd.json` is loosened, or this description says why
+- [ ] No coverage floor (`coverage-floor.json`) is lowered and no limit in `.oxlintrc.json` or `.jscpd.json` is loosened, or this description says why (a lowered floor also needs the `lowers-coverage` label)
 - [ ] `CHANGELOG.md` is updated for user-visible changes
 - [ ] ffmpeg only: `dist.sha256` is updated if the build output changed
 - [ ] Parts written by an AI agent are noted, and I have reviewed every line

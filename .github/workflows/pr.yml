@@ -48,3 +48,27 @@ jobs:
             echo "::error::Add a line under Unreleased in the changed package's CHANGELOG.md, or label the pull request no-changelog."
             exit 1
           fi
+
+  # A coverage floor goes down only when the pull request says why, with the lowers-coverage
+  # label (AGENTS.md rule 11).
+  floors:
+    if: "!contains(github.event.pull_request.labels.*.name, 'lowers-coverage')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+          no-cache: true
+      - name: Fetch the base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --depth=1 origin "$BASE"
+      - name: Check no floor is lowered
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: bun tooling/check-floors.ts "$BASE"

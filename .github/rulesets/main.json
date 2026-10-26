@@ -59,6 +59,10 @@
           {
             "context": "cla",
             "integration_id": 15368
+          },
+          {
+            "context": "floors",
+            "integration_id": 15368
           }
         ]
       }
