@@ -121,6 +121,109 @@ function checkLength(length: number) {
   }
 }
 
+// Where the node of `id` at `position` starts, in flicks from the sequence's start.
+function startIn(root: Node | undefined, position: PositionKey, id: ItemId) {
+  let before = 0;
+  let cursor = root;
+
+  while (cursor !== undefined) {
+    const order = compare(position, id, cursor);
+    if (order === 0) return before + total(cursor.left);
+
+    if (order > 0) {
+      before += total(cursor.left) + cursor.duration;
+      cursor = cursor.right;
+    } else cursor = cursor.left;
+  }
+
+  throw new RangeError(`not in the storyline: ${id}`);
+}
+
+// The item after the one at `position` and `id` in order, if there is one.
+function nextIn(root: Node | undefined, position: PositionKey, id: ItemId) {
+  let found: ItemId | undefined;
+  let cursor = root;
+
+  while (cursor !== undefined) {
+    if (compare(position, id, cursor) < 0) {
+      found = cursor.id;
+      cursor = cursor.left;
+    } else cursor = cursor.right;
+  }
+
+  return found;
+}
+
+// The item before the one at `position` and `id` in order, if there is one.
+function previousIn(root: Node | undefined, position: PositionKey, id: ItemId) {
+  let found: ItemId | undefined;
+  let cursor = root;
+
+  while (cursor !== undefined) {
+    if (compare(position, id, cursor) > 0) {
+      found = cursor.id;
+      cursor = cursor.right;
+    } else cursor = cursor.left;
+  }
+
+  return found;
+}
+
+// The smallest position key in the tree after `position`, if there is one.
+function keyAfterIn(root: Node | undefined, position: PositionKey) {
+  let found: PositionKey | undefined;
+  let cursor = root;
+
+  while (cursor !== undefined) {
+    if (cursor.position > position) {
+      found = cursor.position;
+      cursor = cursor.left;
+    } else cursor = cursor.right;
+  }
+
+  return found;
+}
+
+// The item playing at `t` flicks: the one with `start <= t < start + duration`.
+function atIn(root: Node | undefined, t: number): Placed | undefined {
+  let before = 0;
+  let cursor = root;
+
+  while (cursor !== undefined) {
+    const left = total(cursor.left);
+
+    if (t < before + left) cursor = cursor.left;
+    else if (t < before + left + cursor.duration) {
+      return { id: cursor.id, start: before + left, duration: cursor.duration };
+    } else {
+      before += left + cursor.duration;
+      cursor = cursor.right;
+    }
+  }
+
+  return undefined;
+}
+
+// Every item of the tree in order, with its start.
+function* itemsIn(root: Node | undefined): Generator<Placed> {
+  const stack: Node[] = [];
+  let cursor = root;
+  let before = 0;
+
+  while (cursor !== undefined || stack.length > 0) {
+    while (cursor !== undefined) {
+      stack.push(cursor);
+      cursor = cursor.left;
+    }
+
+    const visited = stack.pop();
+    if (visited === undefined) return;
+    yield { id: visited.id, start: before, duration: visited.duration };
+    before += visited.duration;
+    cursor = visited.right;
+  }
+}
+
 /** An empty storyline. Items are identified by id; each id is in it at most once. */
 export function createStoryline() {
   let root: Node | undefined;
@@ -173,123 +276,25 @@ export function createStoryline() {
     insert(id, position, duration);
   }
 
-  /** Where an item starts, in flicks from the sequence's start. */
-  function start(id: ItemId) {
-    const { position } = node(id);
-    let before = 0;
-    let cursor = root;
-
-    while (cursor !== undefined) {
-      const order = compare(position, id, cursor);
-      if (order === 0) return before + total(cursor.left);
-
-      if (order > 0) {
-        before += total(cursor.left) + cursor.duration;
-        cursor = cursor.right;
-      } else cursor = cursor.left;
-    }
-
-    throw new RangeError(`not in the storyline: ${id}`);
-  }
-
-  /** The item after `id` in order, if there is one. */
-  function next(id: ItemId) {
-    const { position } = node(id);
-    let found: ItemId | undefined;
-    let cursor = root;
-
-    while (cursor !== undefined) {
-      if (compare(position, id, cursor) < 0) {
-        found = cursor.id;
-        cursor = cursor.left;
-      } else cursor = cursor.right;
-    }
-
-    return found;
-  }
-
-  /** The item before `id` in order, if there is one. */
-  function previous(id: ItemId) {
-    const { position } = node(id);
-    let found: ItemId | undefined;
-    let cursor = root;
-
-    while (cursor !== undefined) {
-      if (compare(position, id, cursor) > 0) {
-        found = cursor.id;
-        cursor = cursor.right;
-      } else cursor = cursor.left;
-    }
-
-    return found;
-  }
-
-  /** The smallest position key in the storyline after `position`, if there is one. */
-  function keyAfter(position: PositionKey) {
-    let found: PositionKey | undefined;
-    let cursor = root;
-
-    while (cursor !== undefined) {
-      if (cursor.position > position) {
-        found = cursor.position;
-        cursor = cursor.left;
-      } else cursor = cursor.right;
-    }
-
-    return found;
-  }
-
-  /** The item playing at `t` flicks: the one with `start <= t < start + duration`. */
-  function at(t: number): Placed | undefined {
-    let before = 0;
-    let cursor = root;
-
-    while (cursor !== undefined) {
-      const left = total(cursor.left);
-
-      if (t < before + left) cursor = cursor.left;
-      else if (t < before + left + cursor.duration) {
-        return { id: cursor.id, start: before + left, duration: cursor.duration };
-      } else {
-        before += left + cursor.duration;
-        cursor = cursor.right;
-      }
-    }
-
-    return undefined;
-  }
-
-  /** Every item in order, with its start. */
-  function* items(): Generator<Placed> {
-    const stack: Node[] = [];
-    let cursor = root;
-    let before = 0;
-
-    while (cursor !== undefined || stack.length > 0) {
-      while (cursor !== undefined) {
-        stack.push(cursor);
-        cursor = cursor.left;
-      }
-
-      const visited = stack.pop();
-      if (visited === undefined) return;
-      yield { id: visited.id, start: before, duration: visited.duration };
-      before += visited.duration;
-      cursor = visited.right;
-    }
-  }
-
   return {
     insert,
     remove,
     move,
     setDuration,
-    start,
-    at,
-    keyAfter,
-    next,
-    previous,
-    items,
+    /** Where an item starts, in flicks from the sequence's start. */
+    start: (id: ItemId) => startIn(root, node(id).position, id),
+    /** The item playing at `t` flicks: the one with `start <= t < start + duration`. */
+    at: (t: number) => atIn(root, t),
+    /** The smallest position key in the storyline after `position`, if there is one. */
+    keyAfter: (position: PositionKey) => keyAfterIn(root, position),
+    /** The item after `id` in order, if there is one. */
+    next: (id: ItemId) => nextIn(root, node(id).position, id),
+    /** The item before `id` in order, if there is one. */
+    previous: (id: ItemId) => previousIn(root, node(id).position, id),
+    /** Every item in order, with its start. */
+    *items() {
+      yield* itemsIn(root);
+    },
     has: (id: ItemId) => nodes.has(id),
     /** The storyline's length: the sum of every item's duration. */
     duration: () => total(root),

@@ -29,3 +29,15 @@ export function createSerial() {
     return run;
   };
 }
+
+/**
+ * `call` on `state`, made to run through `serial`: once every call to `serial` before has
+ * finished. A history and the branches each make their calls this way.
+ */
+export function queued<S, A extends unknown[], T>(
+  serial: ReturnType<typeof createSerial>,
+  state: S,
+  call: (state: S, ...args: A) => Promise<T>,
+) {
+  return (...args: A) => serial(() => call(state, ...args));
+}

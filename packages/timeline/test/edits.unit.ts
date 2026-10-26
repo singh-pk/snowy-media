@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Splitting, joining, effects and keyframes (src/project.ts), in Chromium: a split hands what is
-// past it to the second piece without moving anything, a join takes it back, and effects and
-// keyframes are checked against what they change.
+// Splitting, joining, effects and keyframes (src/cuts.ts, src/edits.ts), in Chromium: a split
+// hands what is past it to the second piece without moving anything, a join takes it back, and
+// effects and keyframes are checked against what they change.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";

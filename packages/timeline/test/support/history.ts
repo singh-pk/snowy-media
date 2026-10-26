@@ -8,6 +8,18 @@ import { batchHash, keyIdOf, signBatch } from "../../src/batch";
 import { createHistory } from "../../src/history";
 import type { Op } from "./project";
 
+type EntryRef = { n: number; hash: string };
+type BatchRef = { author: string; seq: number };
+
+// What a peer signs a batch with; the rest follows from its batches before.
+type Commit = {
+  branch: string;
+  ops: Op[];
+  hlc: string;
+  base?: EntryRef | undefined;
+  undoes?: BatchRef | undefined;
+};
+
 export const generate = () => crypto.subtle.generateKey("Ed25519", false, ["sign", "verify"]);
 
 /** A peer that signs its batches in order, by default on `main`. */
@@ -18,13 +30,7 @@ export async function author() {
   // The seq of the peer's last batch on each branch.
   const lastOn = new Map<string, number>();
 
-  async function commitTo(
-    branch: string,
-    ops: Op[],
-    hlc: string,
-    base = { n: 0, hash: "" },
-    undoes?: { author: string; seq: number },
-  ) {
+  async function sign({ branch, ops, hlc, base = { n: 0, hash: "" }, undoes }: Commit) {
     const seq = hashes.length + 1;
     const batch = await signBatch(peer, {
       author: key,
@@ -44,12 +50,11 @@ export async function author() {
     return { batch, hash };
   }
 
-  const commit = (
-    ops: Op[],
-    hlc: string,
-    base?: { n: number; hash: string },
-    undoes?: { author: string; seq: number },
-  ) => commitTo("main", ops, hlc, base, undoes);
+  const commitTo = (branch: string, ops: Op[], hlc: string, base?: EntryRef) =>
+    sign({ branch, ops, hlc, base });
+
+  const commit = (ops: Op[], hlc: string, base?: EntryRef, undoes?: BatchRef) =>
+    sign({ branch: "main", ops, hlc, base, undoes });
 
   return { peer, key, commit, commitTo };
 }

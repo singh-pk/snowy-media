@@ -116,6 +116,12 @@ type Placed = {
 // A transition as placed, its times in flicks.
 type Crossing = PlannedTransition;
 
+// The sequence a plan is of, with its record, in the document it is in.
+type Scope = { document: Document; sequence: ItemId; record: SequenceRecord };
+
+// What animates a placed clip's parameters: the keyframes on the clip or one of its effects.
+type Animating = { document: Document; each: Placed; keyframes: readonly KeyframeRecord[] };
+
 const byOrder = (a: Placed, b: Placed) => {
   for (const [i, value] of a.order.entries()) {
     const other = b.order[i] ?? 0;
@@ -134,7 +140,7 @@ export function plan(document: Document, sequence: ItemId, from: number, to: num
   if (to < from) throw new RangeError(`a range from ${from} to ${to}`);
   const record = document.sequence(sequence);
   if (record === undefined) return undefined;
-  const { placed, crossings } = placedClips(document, sequence, record, from, to);
+  const { placed, crossings } = placedClips({ document, sequence, record }, from, to);
   // In compositing order, so a segment's layers keep that order as they come and go.
   const layers = new Map(placed.map((each) => [each, layerOf(document, each)]));
   const cuts = new Set([from, to]);
@@ -213,13 +219,8 @@ function media(document: Document, clip: Clip, side: "after" | "before") {
 
 // Every enabled clip of a sequence that plays between `from` and `to`, or starts at `to`, with
 // its place, in compositing order, and the transitions playing there.
-function placedClips(
-  document: Document,
-  sequence: ItemId,
-  record: SequenceRecord,
-  from: number,
-  to: number,
-) {
+function placedClips(scope: Scope, from: number, to: number) {
+  const { document, sequence } = scope;
   const roles = document.roles(sequence);
   const kinds = new Map(roles.map((role) => [role.id, role.kind]));
   const candidates: Placed[] = [];
@@ -241,7 +242,7 @@ function placedClips(
   while (prior?.duration === 0) prior = document.itemBefore(prior.id);
   const items = prior === undefined ? line : [prior, ...line];
   const stories = items.map((item) => ({ item, placed: take(item.id, item.start, [0]) }));
-  const crossings = crossingsOf(document, sequence, record, stories, take);
+  const crossings = crossingsOf(scope, stories, take);
 
   for (const [index, role] of roles.entries()) {
     for (const { id, start, lane } of document.connected(role.id)) {
@@ -261,9 +262,7 @@ type Story = { item: { id: ItemId; start: number; duration: number }; placed: Pl
 // meet. A transition with no clip on either side plays nothing, and of two on one cut, made at
 // once, the first by id plays.
 function crossingsOf(
-  document: Document,
-  sequence: ItemId,
-  record: SequenceRecord,
+  { document, sequence, record }: Scope,
   stories: Story[],
   take: (id: ItemId, start: number, order: number[]) => Placed | undefined,
 ) {
@@ -320,9 +319,7 @@ function crossingsOf(
 // A parameter at `param`: its keyframes among `keyframes`, on the timeline in time order, if it
 // has any, else `value`. At a negative speed, source order is the reverse of time order.
 function animated(
-  document: Document,
-  { clip, start }: Placed,
-  keyframes: readonly KeyframeRecord[],
+  { document, each: { clip, start }, keyframes }: Animating,
   param: string,
   value: Value,
 ): Animated {
@@ -337,18 +334,11 @@ function animated(
   return { keyframes: planned.toSorted((a, b) => a.at - b.at) };
 }
 
-function paramsOf(
-  document: Document,
-  each: Placed,
-  target: ItemId,
-  values: Record<string, Value>,
-  prefix = "",
-) {
-  const keyframes = document.keyframes(target);
+function paramsOf(animating: Animating, values: Record<string, Value>, prefix = "") {
   const found: Record<string, Animated> = {};
 
   for (const [name, value] of Object.entries(values)) {
-    found[name] = animated(document, each, keyframes, `${prefix}${name}`, value);
+    found[name] = animated(animating, `${prefix}${name}`, value);
   }
 
   return found;
@@ -357,19 +347,20 @@ function paramsOf(
 function layerOf(document: Document, each: Placed): VideoLayer | AudioLayer {
   const { clip } = each;
   const { source } = clip;
+  const animate = (target: ItemId) => ({ document, each, keyframes: document.keyframes(target) });
   const effects = document
     .effects(clip.id)
     .filter((effect) => effect.enabled)
     .map((effect) => ({
       id: effect.id,
       kind: effect.kind,
-      params: paramsOf(document, each, effect.id, effect.params),
+      params: paramsOf(animate(effect.id), effect.params),
     }));
   const planned: Layer["source"] =
     "generator" in source
       ? {
           generator: source.generator,
-          params: paramsOf(document, each, clip.id, source.params, "source.params."),
+          params: paramsOf(animate(clip.id), source.params, "source.params."),
         }
       : source;
   const layer: Layer = {
@@ -382,9 +373,8 @@ function layerOf(document: Document, each: Placed): VideoLayer | AudioLayer {
     speed: clip.speed,
     effects,
   };
-  const keyframes = document.keyframes(clip.id);
-  const field = (path: string) =>
-    animated(document, each, keyframes, path, leafOf(clip, path) ?? 0);
+  const own = animate(clip.id);
+  const field = (path: string) => animated(own, path, leafOf(clip, path) ?? 0);
 
   if (each.video) {
     return Object.assign(layer, {

@@ -11,6 +11,7 @@ import { itemId, type ItemId } from "./ids";
 import { createProject, leafOf, type Document } from "./project";
 
 type Operation = Batch["ops"][number];
+type OperationOf<K extends Operation["op"]> = Extract<Operation, { op: K }>;
 
 /** An operation of the batch that the undo leaves alone, by its index, and why. */
 type Left = { index: number; reason: string };
@@ -40,6 +41,67 @@ function stands(docs: Documents, id: string, removed: boolean) {
   return now !== undefined && now.removed === removed && same(now, docs.after.record(id));
 }
 
+// What takes back setting a leaf, or why it is left alone.
+function undoSet(
+  op: OperationOf<"sequence.set" | "role.set" | "item.set" | "effect.set">,
+  { before, after, now }: Documents,
+): Operation[] | string {
+  const was = before.record(op.id);
+  // A record the batch added itself goes when its adding is undone.
+  if (was === undefined) return [];
+  const current = now.record(op.id);
+  if (current === undefined || current.removed) return "removed since";
+  const given = after.record(op.id);
+  const value = leafOf(current.record, op.path);
+  if (given === undefined || !same(value, leafOf(given.record, op.path))) return "changed since";
+  const old = leafOf(was.record, op.path);
+  if (old === undefined) return "had no value before";
+  return [{ op: op.op, id: op.id, path: op.path, value: old }];
+}
+
+function undoMove(
+  op: OperationOf<"item.move">,
+  { before, after, now }: Documents,
+): Operation[] | string {
+  const was = before.item(op.id);
+  if (was === undefined) return [];
+  const given = after.item(op.id);
+  const current = now.item(op.id);
+  if (was.kind === "transition" || given?.kind === "transition" || current?.kind === "transition")
+    return "not placed by an anchor";
+  if (current === undefined || current.removed) return "removed since";
+  if (!same(current.anchor, given?.anchor)) return "changed since";
+  return [{ op: "item.move", id: op.id, anchor: was.anchor }];
+}
+
+function undoKeyframeSet(
+  op: OperationOf<"keyframe.set">,
+  { before, after, now }: Documents,
+): Operation[] | string {
+  const { target, param, at } = op.keyframe;
+  const current = keyframeAt(now, target, param, at);
+  if (!same(current, keyframeAt(after, target, param, at))) return "changed since";
+  const old = keyframeAt(before, target, param, at);
+  // A keyframe the same batch went on to remove: nothing to take back.
+  if (old === undefined && current === undefined) return [];
+  return [
+    old === undefined
+      ? { op: "keyframe.remove", target, param, at }
+      : { op: "keyframe.set", keyframe: old },
+  ];
+}
+
+function undoKeyframeRemove(
+  op: OperationOf<"keyframe.remove">,
+  { before, now }: Documents,
+): Operation[] | string {
+  const old = keyframeAt(before, op.target, op.param, op.at);
+  // A keyframe the same batch set first: undoing that setting takes it back.
+  if (old === undefined) return [];
+  if (keyframeAt(now, op.target, op.param, op.at) !== undefined) return "set since";
+  return [{ op: "keyframe.set", keyframe: old }];
+}
+
 // What takes back one operation, whose own id is `id`, or why it is left alone.
 function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | string {
   const { before, after, now } = docs;
@@ -67,20 +129,8 @@ function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | stri
     case "sequence.set":
     case "role.set":
     case "item.set":
-    case "effect.set": {
-      const was = before.record(op.id);
-      // A record the batch added itself goes when its adding is undone.
-      if (was === undefined) return [];
-      const current = now.record(op.id);
-      if (current === undefined || current.removed) return "removed since";
-      const given = after.record(op.id);
-      const value = leafOf(current.record, op.path);
-      if (given === undefined || !same(value, leafOf(given.record, op.path)))
-        return "changed since";
-      const old = leafOf(was.record, op.path);
-      if (old === undefined) return "had no value before";
-      return [{ op: op.op, id: op.id, path: op.path, value: old }];
-    }
+    case "effect.set":
+      return undoSet(op, docs);
     case "item.remove":
       return stands(docs, op.id, true) ? [{ op: "item.restore", id: op.id }] : "changed since";
     case "item.restore":
@@ -89,21 +139,8 @@ function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | stri
     case "role.remove":
     case "effect.remove":
       return "can't be restored";
-    case "item.move": {
-      const was = before.item(op.id);
-      if (was === undefined) return [];
-      const given = after.item(op.id);
-      const current = now.item(op.id);
-      if (
-        was.kind === "transition" ||
-        given?.kind === "transition" ||
-        current?.kind === "transition"
-      )
-        return "not placed by an anchor";
-      if (current === undefined || current.removed) return "removed since";
-      if (!same(current.anchor, given?.anchor)) return "changed since";
-      return [{ op: "item.move", id: op.id, anchor: was.anchor }];
-    }
+    case "item.move":
+      return undoMove(op, docs);
     case "clip.split":
       if (!stands(docs, op.id, false) || !stands(docs, id, false)) return "changed since";
       return [{ op: "clip.join", id: op.id, next: id }];
@@ -115,26 +152,10 @@ function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | stri
         return "changed since";
       return [{ op: "clip.split", id: op.id, at: start + first.duration }];
     }
-    case "keyframe.set": {
-      const { target, param, at } = op.keyframe;
-      const current = keyframeAt(now, target, param, at);
-      if (!same(current, keyframeAt(after, target, param, at))) return "changed since";
-      const old = keyframeAt(before, target, param, at);
-      // A keyframe the same batch went on to remove: nothing to take back.
-      if (old === undefined && current === undefined) return [];
-      return [
-        old === undefined
-          ? { op: "keyframe.remove", target, param, at }
-          : { op: "keyframe.set", keyframe: old },
-      ];
-    }
-    case "keyframe.remove": {
-      const old = keyframeAt(before, op.target, op.param, op.at);
-      // A keyframe the same batch set first: undoing that setting takes it back.
-      if (old === undefined) return [];
-      if (keyframeAt(now, op.target, op.param, op.at) !== undefined) return "set since";
-      return [{ op: "keyframe.set", keyframe: old }];
-    }
+    case "keyframe.set":
+      return undoKeyframeSet(op, docs);
+    case "keyframe.remove":
+      return undoKeyframeRemove(op, docs);
     case "revert":
       return "taken back by reverting to a later entry";
     case "branch.create":

@@ -8,8 +8,7 @@
     "packages/engine/test/seek.test.ts": 2
   },
   "max-lines": {
-    "packages/engine/src/compositor.ts": 1,
-    "packages/timeline/src/project.ts": 1
+    "packages/engine/src/compositor.ts": 1
   },
   "max-lines-per-function": {
     "packages/engine/src/compositor.ts": 1,
@@ -21,12 +20,7 @@
     "packages/engine/src/video.worker.ts": 1,
     "packages/engine/src/wasm-video.ts": 2,
     "packages/engine/test/seek.test.ts": 1,
-    "packages/engine/test/support/page.ts": 1,
-    "packages/timeline/src/branches.ts": 1,
-    "packages/timeline/src/history.ts": 1,
-    "packages/timeline/src/project.ts": 1,
-    "packages/timeline/src/storyline.ts": 1,
-    "packages/timeline/src/undo.ts": 1
+    "packages/engine/test/support/page.ts": 1
   },
   "max-params": {
     "packages/engine/src/compositor.ts": 3,
@@ -36,9 +30,6 @@
     "packages/engine/src/video.worker.ts": 1,
     "packages/engine/src/wasm-video.ts": 1,
     "packages/engine/test/support/frame-id.ts": 1,
-    "packages/engine/test/support/page.ts": 1,
-    "packages/timeline/src/plan.ts": 4,
-    "packages/timeline/src/project.ts": 1,
-    "packages/timeline/test/support/history.ts": 1
+    "packages/engine/test/support/page.ts": 1
   }
 }
