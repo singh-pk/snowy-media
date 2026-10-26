@@ -123,6 +123,10 @@ jobs:
           bun-version-file: package.json
           no-cache: true
       - run: bun install --frozen-lockfile
+      # The modules run no code built from a string (AGENTS.md rule 7); the Dockerfile builds
+      # them with -sDYNAMIC_EXECUTION=0, and this holds the output to it.
+      - name: No code from strings
+        run: bunx oxlint -c ../../tooling/oxlint-dist.json --no-ignore dist/*/*.js
       - run: bun scripts/gen-dts.ts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

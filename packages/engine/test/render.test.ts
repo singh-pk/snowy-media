@@ -278,9 +278,10 @@ for (const [file, { video }] of Object.entries(expected)) {
       );
       expect(got.shown.map((s) => s.drawn)).toEqual(drawn);
       const ids = got.shown.filter((s) => s.drawn).map((s) => s.id);
-      // A turned frame's number is not where the reader looks; its grid shows the turn.
-      // oxlint-disable-next-line repo/no-conditional-expect -- the grid below checks a turned frame
-      if (!turned) expect(ids).toEqual(frames);
+      // A turned frame's number is not where the reader looks: it is counted, and its grid shows
+      // the turn.
+      if (turned) expect(ids.length).toBe(frames.length);
+      else expect(ids).toEqual(frames);
       const r = correlation(got.grid, video.grid);
       expect(r, `${file} grid ${JSON.stringify(got.grid)}`).toBeGreaterThan(MIN_CORRELATION);
       const differences = got.grid.map((g, i) => Math.abs(g - (video.grid[i] ?? 0)));
@@ -364,8 +365,8 @@ for (const [file, { video }] of Object.entries(expected)) {
       );
 
       // Drawn from its planes, which the test above checks, when this machine's GPU measures the
-      // frame unlike them or the frame is too grey to measure.
-      // oxlint-disable-next-line repo/no-conditional-expect -- the route depends on the machine's GPU
+      // frame unlike them, or still unmeasured when the first frame is too grey to decide.
+      // oxlint-disable-next-line repo/no-conditional-expect -- the route depends on the machine's GPU and the frame
       if (!got.off) return;
 
       const [median = Infinity, p95 = Infinity] = got.off;

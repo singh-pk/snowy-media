@@ -160,6 +160,7 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
           async function drain() {
             while (state.decoding) {
               consumer.read(output, 0);
+              // oxlint-disable-next-line repo/no-timers -- stands in for the AudioWorklet clock
               await new Promise((resolve) => setTimeout(resolve, 0));
             }
           }

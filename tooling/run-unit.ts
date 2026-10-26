@@ -91,6 +91,7 @@ async function load(tab: Page, url: string, ready: Promise<void>): Promise<Loade
 
   // The deadline covers waiting for `ready` too, which may never come.
   const hung = Promise.withResolvers<Loaded>();
+  // oxlint-disable-next-line repo/no-timers -- a hang has no event; only a deadline can end it
   const deadline = setTimeout(
     () => hung.resolve({ type: "loaded", names: [], error: `did not load in ${LOAD_MS} ms` }),
     LOAD_MS,

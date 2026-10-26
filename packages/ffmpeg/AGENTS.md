@@ -40,7 +40,7 @@ A full FFmpeg build takes 20+ minutes; changing only `src/` relinks in under a m
 2. **Expected results come from native FFmpeg.** Never hand-write a test expectation. Add the case to `scripts/gen-fixtures.ts` and regenerate, so `ffprobe` 9.0.2 decides what is correct.
 3. **Performance is measured.** A change that can affect speed or size includes `bun run bench` numbers before and after, from the same machine.
 4. **Everything is pinned.** Versions and sha256 checksums live in the `Dockerfile` only; never fetch anything unpinned. When the build output changes, update `dist.sha256` in the same commit and say why in the pull request. See the `ffmpeg-update-dependency` skill.
-5. **One configuration.** Every module is built with SIMD, threads and LTO. Do not add non-SIMD or single-threaded builds.
+5. **One configuration.** Every module is built with SIMD, threads and LTO, and with `-sDYNAMIC_EXECUTION=0`, so Emscripten's glue never evaluates a string (root rule 7). Do not add non-SIMD or single-threaded builds.
 
 Before a pull request that touches the `Dockerfile`, `build/` or `src/`, rebuild and check `shasum -a 256 -c dist.sha256`.
 
