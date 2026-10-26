@@ -40,24 +40,6 @@ export function createChatHoldings() {
     return held;
   }
 
-  // Whether the message held at `seq` chains to the one held below it.
-  const linked = ({ messages, hashes }: Author, seq: number) =>
-    hashes.has(seq - 1) && messages.get(seq)?.prev === hashes.get(seq - 1);
-
-  // The first seq of the run of chained held seqs that contains `seq`.
-  function firstOf(held: Author, seq: number) {
-    let first = seq;
-    while (linked(held, first)) first--;
-    return first;
-  }
-
-  // The run of chained held seqs that contains `seq`.
-  function runOf(held: Author, seq: number): Run {
-    let last = seq;
-    while (linked(held, last + 1)) last++;
-    return { first: firstOf(held, seq), last };
-  }
-
   /**
    * Adds a batch the peer has decoded. The first message held for each seq stays, and a
    * checkpoint is kept only if it names the message held at its seq. Then only the checkpoint
@@ -91,13 +73,7 @@ export function createChatHoldings() {
   ) {
     await before;
     const held = holding(author);
-    const fresh = messages.filter((m) => !held.messages.has(m.seq));
-    const hashes = await Promise.all(fresh.map(messageHash));
-
-    for (const [i, m] of fresh.entries()) {
-      held.messages.set(m.seq, m);
-      held.hashes.set(m.seq, hashes[i]!);
-    }
+    await holdMessages(held, messages);
 
     for (const checkpoint of checkpoints) {
       held.newest = Math.max(held.newest, checkpoint.seq);
@@ -105,40 +81,7 @@ export function createChatHoldings() {
       if (proves) held.checkpoints.set(checkpoint.seq, checkpoint);
     }
 
-    // Highest first: a checkpoint below the start of the last kept one's run is in another run.
-    // Each run is walked once, so a restore with a checkpoint per batch stays linear.
-    const kept = new Map<number, Checkpoint>();
-    let floor = Infinity;
-
-    // copy: a Map can't be sorted, so its checkpoints go into an array, highest first.
-    const highestFirst = [...held.checkpoints];
-    highestFirst.sort(([a], [b]) => b - a);
-
-    for (const [seq, cp] of highestFirst) {
-      if (seq >= floor) continue;
-
-      kept.set(seq, cp);
-      floor = firstOf(held, seq);
-    }
-
-    held.checkpoints = kept;
-  }
-
-  // The batch proving `from` and every later message in its run up to the run's checkpoint, or
-  // undefined. Only a forked chain leaves messages past a run's checkpoint; they can't be proven.
-  function batchFrom(held: Author, from: number): ChatBatch | undefined {
-    if (!held.messages.has(from)) return undefined;
-
-    const { first } = runOf(held, from);
-    const checkpoint = held.checkpoints
-      .values()
-      .find((cp) => cp.seq >= from && runOf(held, cp.seq).first === first);
-    if (checkpoint === undefined) return undefined;
-
-    const messages = Array.from({ length: checkpoint.seq - from + 1 }, (_, i) =>
-      held.messages.get(from + i)!,
-    );
-    return { messages, checkpoint };
+    held.checkpoints = highestPerRun(held);
   }
 
   /**
@@ -189,4 +132,71 @@ export function createChatHoldings() {
   const newest = (author: KeyId) => authors.get(author)?.newest ?? 0;
 
   return { add, restore, repair, after, checkpoints, newest };
+}
+
+// Whether the message held at `seq` chains to the one held below it.
+const linked = ({ messages, hashes }: Author, seq: number) =>
+  hashes.has(seq - 1) && messages.get(seq)?.prev === hashes.get(seq - 1);
+
+// The first seq of the run of chained held seqs that contains `seq`.
+function firstOf(held: Author, seq: number) {
+  let first = seq;
+  while (linked(held, first)) first--;
+  return first;
+}
+
+// The run of chained held seqs that contains `seq`.
+function runOf(held: Author, seq: number): Run {
+  let last = seq;
+  while (linked(held, last + 1)) last++;
+  return { first: firstOf(held, seq), last };
+}
+
+// Holds each message whose seq isn't held yet, with its hash.
+async function holdMessages(held: Author, messages: ChatMessage[]) {
+  const fresh = messages.filter((m) => !held.messages.has(m.seq));
+  const hashes = await Promise.all(fresh.map(messageHash));
+
+  for (const [i, m] of fresh.entries()) {
+    held.messages.set(m.seq, m);
+    held.hashes.set(m.seq, hashes[i]!);
+  }
+}
+
+// The held checkpoints with only the highest in each run kept.
+function highestPerRun(held: Author) {
+  // Highest first: a checkpoint below the start of the last kept one's run is in another run.
+  // Each run is walked once, so a restore with a checkpoint per batch stays linear.
+  const kept = new Map<number, Checkpoint>();
+  let floor = Infinity;
+
+  // copy: a Map can't be sorted, so its checkpoints go into an array, highest first.
+  const highestFirst = [...held.checkpoints];
+  highestFirst.sort(([a], [b]) => b - a);
+
+  for (const [seq, cp] of highestFirst) {
+    if (seq >= floor) continue;
+
+    kept.set(seq, cp);
+    floor = firstOf(held, seq);
+  }
+
+  return kept;
+}
+
+// The batch proving `from` and every later message in its run up to the run's checkpoint, or
+// undefined. Only a forked chain leaves messages past a run's checkpoint; they can't be proven.
+function batchFrom(held: Author, from: number): ChatBatch | undefined {
+  if (!held.messages.has(from)) return undefined;
+
+  const { first } = runOf(held, from);
+  const checkpoint = held.checkpoints
+    .values()
+    .find((cp) => cp.seq >= from && runOf(held, cp.seq).first === first);
+  if (checkpoint === undefined) return undefined;
+
+  const messages = Array.from({ length: checkpoint.seq - from + 1 }, (_, i) =>
+    held.messages.get(from + i)!,
+  );
+  return { messages, checkpoint };
 }

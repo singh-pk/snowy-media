@@ -8,14 +8,13 @@
 
 import { expect, test } from "../../../tooling/unit";
 import { decodeControl, encodeControl, type Control } from "../src/control";
-import { generateKeyPair, keyId, sign, type Bytes } from "../src/crypto";
+import { generateKeyPair } from "../src/crypto";
 import { InvalidRecordError } from "../src/signed-record";
 import { rejection } from "./support/rejection";
+import { createRecordSigner, json } from "./support/signed-record";
 
-const pair = await generateKeyPair();
-const session = await keyId(pair.publicKey);
+const { pair, resigned } = await createRecordSigner();
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 const control: Control = {
   epoch: 7,
@@ -24,8 +23,6 @@ const control: Control = {
   atUs: 1_793_000_000_500_000,
   ended: false,
 };
-
-const json = (bytes: Bytes): Record<string, unknown> => JSON.parse(decoder.decode(bytes));
 
 // A control record as a caller without types might pass one, whatever its fields.
 const untyped = (value: object): Control => JSON.parse(JSON.stringify(value));
@@ -94,14 +91,7 @@ test("a control record signed by another session, altered, with an unsigned fiel
 
 test("a control record under another epoch's key, or signed as another record, is rejected", async () => {
   const { key, bytes } = await encodeControl(pair, control);
-  const { sig: _, ...fields } = json(bytes);
-  const sig = await sign(
-    pair.privateKey,
-    encoder.encode(`snowy catalog v1\n${JSON.stringify({ session, ...fields })}`),
-  );
-  const asCatalog = encoder.encode(
-    JSON.stringify({ ...fields, sig: sig.toBase64({ alphabet: "base64url", omitPadding: true }) }),
-  );
+  const asCatalog = await resigned(bytes, "snowy catalog v1", () => undefined);
   const errors = await Promise.all([
     rejection(decodeControl(pair.publicKey, "control@8", bytes)),
     rejection(decodeControl(pair.publicKey, key, asCatalog)),

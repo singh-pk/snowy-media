@@ -71,36 +71,35 @@ test("a seq already written isn't written again, whichever copy comes later", as
   await reopened.close();
 });
 
-test("a torn last record is cut off, and the log carries on after it", async () => {
+// Alice's log holding a1 with `tail` after it, as a crash can leave it: what reopening reads of
+// it, and what a further reopening reads after a2 is appended.
+async function afterCrash(tail: string) {
   const dir = await session();
   const store = await openChatStore(dir);
   await store.append(alice.id, { messages: [a1] });
   await store.close();
-  await scribble(dir, alice.id, `{"message":{"author":"${alice.id}"`);
+  await scribble(dir, alice.id, tail);
 
   const reopened = await openChatStore(dir);
-  expect(reopened.records.get(alice.id)).toEqual({ messages: [a1], checkpoints: [] });
+  const read = reopened.records.get(alice.id);
   await reopened.append(alice.id, { messages: [a2] });
   await reopened.close();
   const again = await openChatStore(dir);
-  expect(again.records.get(alice.id)?.messages).toEqual([a1, a2]);
+  const carriedOn = again.records.get(alice.id)?.messages;
   await again.close();
+  return { read, carriedOn };
+}
+
+test("a torn last record is cut off, and the log carries on after it", async () => {
+  const { read, carriedOn } = await afterCrash(`{"message":{"author":"${alice.id}"`);
+  expect(read).toEqual({ messages: [a1], checkpoints: [] });
+  expect(carriedOn).toEqual([a1, a2]);
 });
 
 test("bad lines at the end, as a crash can leave, are cut off", async () => {
-  const dir = await session();
-  const store = await openChatStore(dir);
-  await store.append(alice.id, { messages: [a1] });
-  await store.close();
-  await scribble(dir, alice.id, `\0\0\0\n${JSON.stringify({ message: b1 })}\n`);
-
-  const reopened = await openChatStore(dir);
-  expect(reopened.records.get(alice.id)?.messages).toEqual([a1]);
-  await reopened.append(alice.id, { messages: [a2] });
-  await reopened.close();
-  const again = await openChatStore(dir);
-  expect(again.records.get(alice.id)?.messages).toEqual([a1, a2]);
-  await again.close();
+  const { read, carriedOn } = await afterCrash(`\0\0\0\n${JSON.stringify({ message: b1 })}\n`);
+  expect(read?.messages).toEqual([a1]);
+  expect(carriedOn).toEqual([a1, a2]);
 });
 
 test("a record after a bad line makes the store refuse to open, holding no file", async () => {
