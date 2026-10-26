@@ -16,6 +16,7 @@ function hold(event: MessageEvent) {
 }
 
 self.addEventListener("message", hold);
+self.addEventListener("messageerror", hold);
 
 function terminate(end: Worker["terminate"], worker: Worker, args: []) {
   // oxlint-disable-next-line no-debugger -- the pause that has coverage taken before a worker ends
@@ -33,11 +34,16 @@ if (!("__snowyCovered" in globalThis)) await go.promise;
 // With the query, which some bundles read their arguments from.
 const bundle = new URL(import.meta.url);
 bundle.pathname = bundle.pathname.replace(/\.js$/, ".covered.js");
-await import(bundle.href);
-self.removeEventListener("message", hold);
+
+try {
+  await import(bundle.href);
+} finally {
+  self.removeEventListener("message", hold);
+  self.removeEventListener("messageerror", hold);
+}
 
 for (const event of held) {
   // copy: a message event's ports are read-only, and a new event takes an array of its own
   const ports = [...event.ports];
-  self.dispatchEvent(new MessageEvent("message", { data: event.data, ports }));
+  self.dispatchEvent(new MessageEvent(event.type, { data: event.data, ports }));
 }

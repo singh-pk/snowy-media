@@ -59,9 +59,13 @@ function* positions(mappings: string) {
       const [gc = 0, source, sourceLine, sourceColumn = 0] = vlqs(segment);
       column += gc;
       if (source === undefined || sourceLine === undefined) continue;
+      // Bun starts most generated lines with a segment that repeats the position before it,
+      // which would count the last line of a block that never ran as run by the code after it.
+      const repeats = source === 0 && sourceLine === 0 && sourceColumn === 0;
       at.source += source;
       at.line += sourceLine;
       at.column += sourceColumn;
+      if (repeats) continue;
       yield { generatedLine, column, source: at.source, line: at.line + 1 };
     }
   }
@@ -78,7 +82,7 @@ interface SourceMap {
 function outdirOf(dir: string, js: string, sources: string[]) {
   const root = resolve(dir);
 
-  for (let out = dirname(js); out.startsWith(root); out = dirname(out)) {
+  for (let out = dirname(js); !relative(root, out).startsWith(".."); out = dirname(out)) {
     if (sources.every((source) => existsSync(resolve(out, source)))) return out;
   }
 

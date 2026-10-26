@@ -41,14 +41,9 @@ interface Session {
   on: (method: string, listener: (params: Params) => void) => void;
 }
 
-interface Untyped {
-  send: (method: string, params?: object) => Promise<Reply>;
-  on: (method: string, listener: (params: Params) => void) => void;
-}
-
 function pageSession(cdp: CDPSession): Session {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Playwright types every DevTools method; this file sends and hears only the few it names
-  const untyped = cdp as unknown as Untyped;
+  const untyped = cdp as unknown as Session;
 
   return {
     send: async (method, params) => await untyped.send(method, params),
@@ -142,7 +137,6 @@ async function save(dir: string, scripts: ScriptCoverage[]) {
   await Bun.write(join(dir, "coverage/ran", name), JSON.stringify(result));
 }
 
-// Coverage in the page behind `root` and every thread under it, for the package at `dir`.
 async function resume(session: Session) {
   try {
     await session.send("Debugger.resume");
@@ -155,9 +149,8 @@ async function resume(session: Session) {
 function createStarts() {
   const worklets = { started: 0, waiting: [] as Array<{ count: number; go: () => void }> };
 
-  // Dedicated workers are "worker"; an AudioWorklet is any other kind of thread.
   function started(type: string) {
-    if (type === "worker") return;
+    if (type !== "worklet") return;
     worklets.started += 1;
     const ready = worklets.waiting.filter((w) => w.count <= worklets.started);
     worklets.waiting = worklets.waiting.filter((w) => w.count > worklets.started);
@@ -175,6 +168,7 @@ function createStarts() {
   return { started, workletsStarted };
 }
 
+// Coverage in the page behind `root` and every thread under it, for the package at `dir`.
 function createWatch(dir: string, root: Session) {
   const live = new Set<Session>();
   const starts = createStarts();
@@ -213,9 +207,11 @@ function createWatch(dir: string, root: Session) {
       // A worklet starts no threads of its own, and has no Target domain to say so.
       await cover(thread, attached.targetInfo?.type === "worker");
       await thread.send("Runtime.evaluate", { expression: GO });
-      starts.started(attached.targetInfo?.type ?? "");
     } catch {
-      // A thread that ended before its coverage started ran nothing it could report.
+      // A thread that ended or failed before its coverage started reports nothing, which
+      // only lowers coverage; a worklet waiting on it is let go all the same.
+    } finally {
+      starts.started(attached.targetInfo?.type ?? "");
     }
   }
 
@@ -330,15 +326,23 @@ export async function coverPage(dir: string, tab: Page) {
  */
 export function coverBrowser(dir: string, browser: Browser) {
   if (!COVERAGE) return browser;
-  const pages = new Set<{ tab: Page; take: () => Promise<void> }>();
+  const pages = new Map<Page, () => Promise<void>>();
   const newContext = browser.newContext.bind(browser);
+  const newBrowserPage = browser.newPage.bind(browser);
   const closeBrowser = browser.close.bind(browser);
 
   async function takeAll(context?: BrowserContext) {
     const open = [...pages].filter(
-      (p) => !p.tab.isClosed() && (!context || p.tab.context() === context),
+      ([tab]) => !tab.isClosed() && (!context || tab.context() === context),
     );
-    await Promise.all(open.map((p) => p.take()));
+    await Promise.all(open.map(([, take]) => take()));
+  }
+
+  // Once per page, whichever way it was opened.
+  async function watch(tab: Page) {
+    if (pages.has(tab)) return;
+    const watched = await coverPage(dir, tab);
+    pages.set(tab, watched.take);
   }
 
   function wrap(context: BrowserContext) {
@@ -347,8 +351,7 @@ export function coverBrowser(dir: string, browser: Browser) {
 
     context.newPage = async () => {
       const tab = await newPage();
-      const watched = await coverPage(dir, tab);
-      pages.add({ tab, take: watched.take });
+      await watch(tab);
       return tab;
     };
 
@@ -362,6 +365,13 @@ export function coverBrowser(dir: string, browser: Browser) {
     const context = await newContext(...args);
     wrap(context);
     return context;
+  };
+
+  // Playwright opens it through newContext, but that is its own business.
+  browser.newPage = async (...args) => {
+    const tab = await newBrowserPage(...args);
+    await watch(tab);
+    return tab;
   };
 
   browser.close = async (...args) => {

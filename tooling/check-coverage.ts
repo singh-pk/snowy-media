@@ -6,7 +6,8 @@
 // what `coverage-floor.json` lists for it, in whole percent. A file without a floor fails, as
 // does a floor for a file that is gone. Coverage above a floor is only pointed out: `--update`
 // raises the floors to it, never lowering one, adds new files at their coverage and drops the
-// floors of files that are gone.
+// floors of files that are gone. The coverage is read once: a check, or an update, deletes it,
+// so the next one needs a test run of its own and never counts an old run's.
 // Usage: bun tooling/check-coverage.ts <package> [--update]
 
 import { existsSync } from "node:fs";
@@ -34,8 +35,8 @@ if (takes.length === 0) {
   process.exit(1);
 }
 
-// The takes of the last test run, the process that wrote the newest file; an older run's are
-// deleted, so they never count.
+// The takes of the last test run, the process that wrote the newest file, should runs
+// have followed one another without a check between them.
 async function writtenAt(take: string) {
   const info = await stat(join(ranDir, take));
   return info.mtimeMs;
@@ -46,17 +47,12 @@ const newest = takes[times.indexOf(Math.max(...times))] ?? "";
 const run = `${newest.split("-")[0]}-`;
 const ran: Ran = {};
 
-for (const take of takes) {
-  const path = join(ranDir, take);
-
-  if (!take.startsWith(run)) {
-    await rm(path);
-    continue;
-  }
-
-  const lines: Ran = await Bun.file(path).json();
+for (const take of takes.filter((t) => t.startsWith(run))) {
+  const lines: Ran = await Bun.file(join(ranDir, take)).json();
   for (const [file, of] of Object.entries(lines)) ran[file] = [...(ran[file] ?? []), ...of];
 }
+
+await rm(ranDir, { recursive: true, force: true });
 
 const report = await reportOf(dir, ran);
 const written = existsSync(floorPath) ? Bun.file(floorPath).text() : "{}";
