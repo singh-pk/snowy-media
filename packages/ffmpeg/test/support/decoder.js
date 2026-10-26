@@ -8,6 +8,7 @@
 // loaded on first use, with the same loop.
 
 import { AVERROR_EAGAIN, AVERROR_EOF, AVMEDIA_TYPE_AUDIO } from "/dist/core/index.js";
+import { check } from "/test/support/input.js";
 
 // How each media type is converted, with the state the conversion keeps between frames.
 const AUDIO = {
@@ -27,11 +28,6 @@ async function loadModule(dist, name) {
   const m = await create();
   m._sny_set_log_level(16); // errors only
   return m;
-}
-
-function check(m, ret, what) {
-  if (ret < 0) throw new Error(`${what}: ${m.UTF8ToString(m._sny_strerror(ret))}`);
-  return ret;
 }
 
 // Calls open(out) and returns the decoder it stores, or the negative AVERROR it returns.
@@ -65,14 +61,14 @@ export function createDecoders(core, { transferAll = false, dist = "/dist" } = {
     const name = core.UTF8ToString(at);
 
     if (name === "core") {
-      if (transferAll) return transfer(core, core, kind, ctx, stream, 1);
+      if (transferAll) return transfer(core, core, kind, { ctx, stream, threads: 1 });
       const dec = openWith(core, (out) => core._sny_decoder_open(ctx, stream, out));
       return loop(core, kind, check(core, dec, "decoder_open"));
     }
 
     if (!modules.has(name)) modules.set(name, loadModule(dist, name));
     const m = await modules.get(name);
-    return transfer(core, m, kind, ctx, stream, threads);
+    return transfer(core, m, kind, { ctx, stream, threads });
   }
 
   return open;
@@ -80,7 +76,7 @@ export function createDecoders(core, { transferAll = false, dist = "/dist" } = {
 
 // Opens a decoder for `stream` in module `m` on `threads` threads, copying the stream's
 // codec parameters and then each packet from core.
-function transfer(core, m, kind, ctx, stream, threads) {
+function transfer(core, m, kind, { ctx, stream, threads }) {
   const out = core._malloc(4);
   const size = core._sny_params_export(ctx, stream, out);
   const params = core.HEAP32[out >> 2];
@@ -133,12 +129,12 @@ function transfer(core, m, kind, ctx, stream, threads) {
     return pkt;
   }
 
-  return loop(m, kind, dec, copy, () => m._sny_packet_free(pkt));
+  return loop(m, kind, dec, { toPacket: copy, release: () => m._sny_packet_free(pkt) });
 }
 
 // The send/receive loop over decoder `dec` of module `m`, converting frames as `kind` says.
 // `toPacket` turns core's packet into one of `m`'s.
-function loop(m, kind, dec, toPacket = (pkt) => pkt, release = () => {}) {
+function loop(m, kind, dec, { toPacket = (pkt) => pkt, release = () => {} } = {}) {
   const state = kind.alloc(m);
   const frame = m._sny_frame_alloc();
   const out = m._sny_frame_alloc();

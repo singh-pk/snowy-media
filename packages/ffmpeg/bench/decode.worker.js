@@ -5,95 +5,31 @@
 // file: open, then demux and decode its first audio stream to float planar, copying every
 // frame out of the WASM heap as a hand-off to an AudioWorklet would.
 
-import { AVERROR_EOF, AVMEDIA_TYPE_AUDIO, createCore } from "/dist/core/index.js";
-import { createDecoders } from "/test/support/decoder.js";
-import { attachFileSource } from "/test/support/file-source.js";
+import { AVMEDIA_TYPE_AUDIO } from "/dist/core/index.js";
+import { answerRuns, decodeFirst } from "/bench/decoding.js";
 
-const ready = createCore();
+async function measure(env, file) {
+  const result = { samples: 0, channels: 0, sampleRate: 0 };
+  let scratch = new Float32Array(0);
 
-async function measure(core, source, openAudioDecoder, file) {
-  const check = (ret, what) => {
-    if (ret < 0) throw new Error(`${what}: ${core.UTF8ToString(core._sny_strerror(ret))}`);
-    return ret;
+  const onFrame = (m, fltp) => {
+    const n = m._sny_frame_samples(fltp);
+    result.samples += n;
+    result.channels = m._sny_frame_channels(fltp);
+    result.sampleRate = m._sny_frame_sample_rate(fltp);
+    if (scratch.length < n) scratch = new Float32Array(n);
+
+    for (let c = 0; c < result.channels; c++) {
+      const plane = m._sny_frame_plane(fltp, c) >> 2;
+      scratch.set(m.HEAPF32.subarray(plane, plane + n));
+    }
   };
 
   const t = performance.now();
-  source.open(file);
-  const out = core._malloc(4);
-  const name = core.stringToNewUTF8(file.name);
-  const opened = core._sny_open(1, 1 << 22, name, out);
-  const ctx = core.HEAP32[out >> 2];
-  core._free(name);
-  core._free(out);
-  check(opened, "open");
-  const pkt = core._sny_packet_alloc();
-  let decoder = null;
-
-  try {
-    check(core._sny_find_stream_info(ctx), "find_stream_info");
-    const count = core._sny_nb_streams(ctx);
-    let stream = 0;
-    while (
-      stream < count &&
-      core._sny_codec_type(core._sny_stream(ctx, stream)) !== AVMEDIA_TYPE_AUDIO
-    )
-      stream++;
-    if (stream === count) throw new Error("no audio stream");
-    decoder = await openAudioDecoder(ctx, stream);
-    const result = { samples: 0, channels: 0, sampleRate: 0 };
-    let scratch = new Float32Array(0);
-
-    const onFrame = (m, fltp) => {
-      const n = m._sny_frame_samples(fltp);
-      result.samples += n;
-      result.channels = m._sny_frame_channels(fltp);
-      result.sampleRate = m._sny_frame_sample_rate(fltp);
-      if (scratch.length < n) scratch = new Float32Array(n);
-
-      for (let c = 0; c < result.channels; c++) {
-        const plane = m._sny_frame_plane(fltp, c) >> 2;
-        scratch.set(m.HEAPF32.subarray(plane, plane + n));
-      }
-    };
-
-    for (;;) {
-      const ret = core._sny_read(ctx, pkt);
-      if (ret === AVERROR_EOF) break;
-      check(ret, "read");
-      if (core._sny_packet_stream(pkt) === stream) decoder.decode(pkt, onFrame);
-    }
-
-    decoder.decode(0, onFrame);
-    const ms = performance.now() - t;
-    const seconds = result.samples / result.sampleRate;
-    return { ...result, ms, realtime: seconds / (ms / 1000) };
-  } finally {
-    decoder?.close();
-    core._sny_packet_free(pkt);
-    core._sny_close(ctx);
-  }
+  const end = await decodeFirst(env, file, { type: AVMEDIA_TYPE_AUDIO, onFrame });
+  const ms = end - t;
+  const seconds = result.samples / result.sampleRate;
+  return { ...result, ms, realtime: seconds / (ms / 1000) };
 }
 
-async function run({ files }) {
-  try {
-    const core = await ready;
-    core._sny_set_log_level(16);
-    const source = attachFileSource(core);
-    const openAudioDecoder = createDecoders(core);
-    const results = {};
-
-    for (const file of files) {
-      try {
-        results[file.name] = await measure(core, source, openAudioDecoder, file);
-      } catch (e) {
-        results[file.name] = { error: String(e) };
-      }
-    }
-
-    self.postMessage(results);
-  } catch (e) {
-    self.postMessage({ error: String(e?.stack ?? e) });
-  }
-}
-
-self.addEventListener("message", ({ data }) => void run(data));
+answerRuns(measure);
