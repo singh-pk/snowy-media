@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Applying item operations (src/project.ts), in Chromium: operations that fit change the
-// document, the rest are skipped with their reason, and applying reports what changed.
+// Applying item operations (src/apply.ts, src/edits.ts), in Chromium: operations that fit change
+// the document, the rest are skipped with their reason, and applying reports what changed.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";

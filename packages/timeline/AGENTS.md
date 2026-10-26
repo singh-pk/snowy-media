@@ -25,9 +25,19 @@ This package is the edit document of the Snowy editor: a magnetic timeline of se
 | `src/signed.ts` | signed objects: canonical bytes, signing under a domain, checking and hashing |
 | `src/batch.ts` | batches, as signed objects |
 | `src/entry.ts` | entries and refusals, as signed objects |
-| `src/project.ts` | a project's document, changed by applying batches, which checks each operation and skips any that doesn't fit: items, splits and joins, effects and keyframes; and its snapshot, which another project starts from |
+| `src/project.ts` | a project's document: what a peer reads of it, and applying batches to it |
+| `src/records.ts` | the document's records by id, removed ones included, the indexes kept in step, and looking up a live record |
+| `src/skip.ts` | skipping an operation that doesn't fit, with the kind of reason the design names |
+| `src/leaf.ts` | a record's leaves: which paths `*.set` may change, defaults for a clip's absent video and audio, and a record with one leaf set |
+| `src/placement.ts` | where an item goes: the sequence its anchor puts it in, what a clip needs besides, where it starts and what its change redraws |
+| `src/edits.ts` | the operations that add, set, move, remove and restore one record: items, assets, sequences, roles, effects and keyframes |
+| `src/cuts.ts` | splitting a clip and joining two pieces back, handing over what sits on them |
+| `src/apply.ts` | applying a batch: each operation checked and applied or skipped, what merges bring, and the ranges to redraw |
+| `src/queries.ts` | what a peer reads of a document: items, storylines, transitions, lanes, effect chains and keyframes |
+| `src/snapshot.ts` | a project's snapshot, which another project starts from, and reverting to one |
 | `src/serial.ts` | calls that run one at a time, in the order they are made |
 | `src/history.ts` | one branch's history: entries applied in order, then the pending batches, the sequencer appending them, going back, reverting and what to undo |
+| `src/concurrent.ts` | what each operation touches, and whether an entry clashes with one its author hadn't seen |
 | `src/undo.ts` | the operations that undo a batch, from the documents before and after it and now |
 | `src/branches.ts` | a project's branches: each one's history, created and closed by entries, and what waits for a branch or for merged entries |
 | `src/folder.ts` | the project folder: logs and histories in segments, what to write, and opening a project from its files |
