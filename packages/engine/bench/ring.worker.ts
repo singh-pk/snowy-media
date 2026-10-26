@@ -34,6 +34,7 @@ function produce({ ring, size, count, interval }: Extract<RingJob, { role: "prod
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
   for (let i = 0; i < count; i++) {
+    // oxlint-disable-next-line repo/no-timers -- a producer at a set rate is what the bench measures
     if (interval) Atomics.wait(sleeper, 0, 0, interval);
     producer.write(0, 0, BigInt(now()), 0n, 0, src, 0, size);
   }

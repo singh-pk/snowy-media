@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: MIT
 
-// Package code waits on events, never on time: no timer, and no wait with a time limit.
+// Code waits on events, never on time: no timer, and no wait with a time limit.
 // requestIdleCallback is allowed, since it runs when the browser is idle rather than after a
 // time, but not its `timeout` option, which turns it back into a delay; nor
 // `scheduler.postTask` with a `delay`.
@@ -54,11 +54,10 @@ export default {
     type: "problem",
     schema: [],
     messages: {
-      timer: "Do not use {{name}} in package code. Wait on the event that ends the wait.",
+      timer: "Do not use {{name}}. Wait on the event that ends the wait.",
       idleTimeout:
-        "Do not give requestIdleCallback a `timeout` in package code: it forces the work after a delay. Wait on the event that makes it urgent.",
-      timedWait:
-        "Do not give Atomics.{{name}} a time limit in package code. Wait until the value changes.",
+        "Do not give requestIdleCallback a `timeout`: it forces the work after a delay. Wait on the event that makes it urgent.",
+      timedWait: "Do not give Atomics.{{name}} a time limit. Wait until the value changes.",
     },
   },
   create(context) {
