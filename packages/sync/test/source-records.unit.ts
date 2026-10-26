@@ -10,14 +10,9 @@
 import { expect, test } from "../../../tooling/unit";
 import type { Catalog, CodecSetup } from "../src/catalog";
 import type { Control } from "../src/control";
-import { contentKey, generateKeyPair, keyId, seal } from "../src/crypto";
+import { contentKey, generateKeyPair, keyId, seal, type SealedObject } from "../src/crypto";
 import { InvalidRecordError } from "../src/signed-record";
-import {
-  createSourceRecords,
-  sealSourceRecord,
-  type SealedObject,
-  type SourceRecord,
-} from "../src/source-records";
+import { createSourceRecords, sealSourceRecord, type SourceRecord } from "../src/source-records";
 import { rejection } from "./support/rejection";
 
 const session = await generateKeyPair();

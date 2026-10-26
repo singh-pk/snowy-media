@@ -16,6 +16,9 @@ const encoder = new TextEncoder();
 /** Bytes WebCrypto accepts: never a view of a SharedArrayBuffer. */
 export type Bytes = Uint8Array<ArrayBuffer>;
 
+/** An object as it travels: its key, and its bytes sealed under that key. */
+export type SealedObject = { key: string; sealed: Bytes };
+
 /** An Ed25519 public key, as unpadded base64url: a `PeerId` or a `SessionId`. */
 export type KeyId = string;
 

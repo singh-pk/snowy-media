@@ -8,8 +8,22 @@
 //
 // A signed header can never be taken back (the source stores it and never signs that chunk
 // again), so encoding refuses any field that would not read back as itself.
+//
+// On the wire a chunk is sealed with the content key under its object key,
+// `media/<track>/<index>`, which travels with it, so a peer can open it before reading the
+// header that names its slot.
 
-import { keyBytes, keyId, sign, verify, type Bytes, type KeyId } from "./crypto";
+import {
+  keyBytes,
+  keyId,
+  seal,
+  sign,
+  unseal,
+  verify,
+  type Bytes,
+  type KeyId,
+  type SealedObject,
+} from "./crypto";
 
 const VERSION = 1;
 // version u8, session [32], track u16, index u32, startUs i64, endUs i64, count u32, bodyHash [32]
@@ -204,4 +218,56 @@ export async function decodeChunk(
     endUs: readTime(view, 47),
     packets: decodeBody(body, view.getUint32(55, true)),
   };
+}
+
+/** A chunk's object key: `media/<track>/<index>`. */
+export const chunkKey = ({ track, index }: ChunkSlot) => `media/${track}/${index}`;
+
+const CHUNK_KEY = /^media\/(0|[1-9]\d{0,4})\/(0|[1-9]\d{0,9})$/;
+
+/** The slot an object key names, or undefined for a key that isn't a chunk's, spelled as `chunkKey` spells it. */
+export function chunkSlot(key: string): ChunkSlot | undefined {
+  const [, track, index] = CHUNK_KEY.exec(key) ?? [];
+  if (track === undefined || index === undefined) return undefined;
+  const slot = { track: Number(track), index: Number(index) };
+  return slot.track <= U16 && slot.index <= U32 ? slot : undefined;
+}
+
+/**
+ * Cuts a chunk as `encodeChunk` does and seals it under its object key, for the source to send.
+ * Throws a `RangeError` as `encodeChunk` does.
+ */
+export async function sealChunk(
+  session: CryptoKeyPair,
+  content: CryptoKey,
+  chunk: Omit<Chunk, "session">,
+): Promise<SealedObject> {
+  const bytes = await encodeChunk(session, chunk);
+  const key = chunkKey(chunk);
+  const sealed = await seal(content, key, bytes);
+  return { key, sealed };
+}
+
+/**
+ * Opens a sealed chunk and checks it as `decodeChunk` does, for the slot its object key names.
+ * Rejects with an `InvalidChunkError` for a key that isn't a chunk's, bytes that don't open, or a
+ * chunk that doesn't check out. A peer stores the sealed bytes, not what this reads.
+ */
+export async function openChunk(
+  sessionPublicKey: CryptoKey,
+  content: CryptoKey,
+  { key, sealed }: SealedObject,
+) {
+  const slot = chunkSlot(key);
+  if (slot === undefined) throw new InvalidChunkError(`not a chunk key: ${key}`);
+  const bytes = await opened(content, key, sealed);
+  return decodeChunk(sessionPublicKey, slot, bytes);
+}
+
+async function opened(content: CryptoKey, key: string, sealed: Bytes) {
+  try {
+    return await unseal(content, key, sealed);
+  } catch {
+    throw new InvalidChunkError("doesn't open");
+  }
 }

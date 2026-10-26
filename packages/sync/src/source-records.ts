@@ -10,7 +10,7 @@
 import { decodeCatalog, decodeSetup, encodeCatalog, encodeSetup } from "./catalog";
 import type { Catalog, CodecSetup } from "./catalog";
 import { decodeControl, encodeControl, type Control } from "./control";
-import { seal, unseal, type Bytes } from "./crypto";
+import { seal, unseal, type Bytes, type SealedObject } from "./crypto";
 import { InvalidRecordError } from "./signed-record";
 
 /** A record of the source's, read. */
@@ -18,9 +18,6 @@ export type SourceRecord =
   | { kind: "catalog"; catalog: Catalog }
   | { kind: "control"; control: Control }
   | { kind: "setup"; setup: CodecSetup };
-
-/** An object as it travels: its key, and its bytes sealed with the content key. */
-export type SealedObject = { key: string; sealed: Bytes };
 
 export type SourceRecordsOptions = {
   /** The session's public key, which signs every record. */

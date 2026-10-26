@@ -4,19 +4,25 @@
 // The media chunk (src/chunk.ts), in Chromium: a chunk round-trips with its packets; a field that
 // wouldn't read back as itself is refused before signing; and a chunk that is truncated,
 // altered, signed by or naming another session, or sent for another slot is rejected, as is a
-// correctly signed header whose packet records don't match its body.
+// correctly signed header whose packet records don't match its body. Sealed, a chunk opens under
+// the object key its slot names, and one under another key, another content key, or a key that
+// isn't a chunk's is rejected.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import {
+  chunkKey,
+  chunkSlot,
   decodeChunk,
   encodeChunk,
   HEADER,
   InvalidChunkError,
+  openChunk,
   RECORD,
+  sealChunk,
   type Chunk,
 } from "../src/chunk";
-import { generateKeyPair, keyId, sign, type Bytes } from "../src/crypto";
+import { contentKey, generateKeyPair, keyId, seal, sign, type Bytes } from "../src/crypto";
 import { rejection } from "./support/rejection";
 
 const pair = await generateKeyPair();
@@ -191,5 +197,48 @@ test("a signed header whose packet records don't match its body is rejected", as
     "InvalidChunkError: Invalid chunk: truncated packet",
     "InvalidChunkError: Invalid chunk: bytes after the last packet",
     "InvalidChunkError: Invalid chunk: timestamp out of range",
+  ]);
+});
+
+test("a chunk's object key names its slot, in one spelling", () => {
+  expect(chunkKey(slot)).toBe("media/3/41");
+  expect(chunkSlot("media/3/41")).toEqual(slot);
+  expect(chunkSlot("media/65535/4294967295")).toEqual({ track: 65_535, index: 4_294_967_295 });
+  const bad = [
+    "media/3/041",
+    "media/03/41",
+    "media/3",
+    "media/3/41/",
+    "media/-1/41",
+    "media/65536/0",
+    "media/0/4294967296",
+    "media/3/4.5",
+    "init/3",
+  ];
+  expect(bad.map(chunkSlot)).toEqual(bad.map(() => undefined));
+});
+
+test("a sealed chunk opens under the key its slot names, and nowhere else", async () => {
+  const content = await contentKey(crypto.getRandomValues(new Uint8Array(32)), session);
+  const other = await contentKey(crypto.getRandomValues(new Uint8Array(32)), session);
+  const object = await sealChunk(pair, content, chunk);
+  expect(object.key).toBe("media/3/41");
+  const read = await openChunk(pair.publicKey, content, object);
+  expect(read).toEqual(chunk);
+
+  // Someone with the content key seals the chunk again under the next slot's key.
+  const bytes = await encodeChunk(pair, chunk);
+  const resealed = await seal(content, "media/3/42", bytes);
+  const errors = await Promise.all([
+    rejection(openChunk(pair.publicKey, content, { key: "media/3/42", sealed: object.sealed })),
+    rejection(openChunk(pair.publicKey, other, object)),
+    rejection(openChunk(pair.publicKey, content, { key: "init/3", sealed: object.sealed })),
+    rejection(openChunk(pair.publicKey, content, { key: "media/3/42", sealed: resealed })),
+  ]);
+  expect(errors).toEqual([
+    new InvalidChunkError("doesn't open"),
+    new InvalidChunkError("doesn't open"),
+    new InvalidChunkError("not a chunk key: init/3"),
+    new InvalidChunkError("another slot"),
   ]);
 });
