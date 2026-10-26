@@ -35,6 +35,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/chat-requests.ts` | the chat repair messages between peers, checked, and the side that answers them |
 | `src/chat-session.ts` | a peer's chat in one session: the store, log, sending, receiving and repair, wired to its links |
 | `src/chat-store.ts` | chat in the local store: an append-only OPFS log per author, read back after a reload |
+| `src/chunk-store.ts` | media chunks in the local store: one OPFS file per chunk, sealed as it came, with each one stored or evicted reported |
 | `src/link.ts` | the link to one peer that both transports give, so nothing else refers to either |
 | `src/relay-auth.ts` | relay authorization: the join grant, peers' and the source's tokens, and the auth server moq-relay asks, with the app's admission |
 | `src/relay.ts` | the connection to the relay over MoQ, through `@moq/net`: presence, this peer's tracks, subscriptions, and a `Link` to each peer |
