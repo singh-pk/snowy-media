@@ -20,7 +20,7 @@
   "src/push-queue.ts": 100,
   "src/rank.ts": 100,
   "src/relay-auth.ts": 98,
-  "src/relay.ts": 5,
+  "src/relay.ts": 97,
   "src/signed-record.ts": 100,
   "src/source-records.ts": 98,
   "src/state-requests.ts": 100
