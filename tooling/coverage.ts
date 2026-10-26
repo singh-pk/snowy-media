@@ -144,6 +144,31 @@ async function resume(session: Session) {
   }
 }
 
+// The coverage of every thread in `live` since the last take.
+async function collect(live: Set<Session>) {
+  const taken = await Promise.all(
+    [...live].map(async (session) => {
+      try {
+        const reply = await session.send("Profiler.takePreciseCoverage");
+        return reply.result ?? [];
+      } catch {
+        // A thread that ended meanwhile took what it ran with it.
+        return [];
+      }
+    }),
+  );
+  return taken.flat();
+}
+
+// The coverage of every thread in `live`, taken while `session` is paused, which is then let go.
+async function collectPaused(live: Set<Session>, session: Session) {
+  try {
+    return await collect(live);
+  } finally {
+    await resume(session);
+  }
+}
+
 // The AudioWorklets whose coverage has started, for the page waiting on them.
 function createStarts() {
   const worklets = { started: 0, waiting: [] as Array<{ count: number; go: () => void }> };
@@ -172,28 +197,27 @@ function createWatch(dir: string, root: Session) {
   const live = new Set<Session>();
   const starts = createStarts();
 
-  // Coverage of every live thread since the last take, saved.
+  // Saves still being written, of takes that let their thread go first.
+  const saving = new Set<Promise<void>>();
+
+  // Coverage of every live thread since the last take, saved, with every save before it.
   async function take() {
-    const taken = await Promise.all(
-      [...live].map(async (session) => {
-        try {
-          const reply = await session.send("Profiler.takePreciseCoverage");
-          return reply.result ?? [];
-        } catch {
-          // A thread that ended meanwhile took what it ran with it.
-          return [];
-        }
-      }),
-    );
-    await save(dir, taken.flat());
+    const scripts = await collect(live);
+    await save(dir, scripts);
+    await Promise.all(saving);
   }
 
-  // Code paused in `session` to end a worker: taken first, then let go.
+  // Code paused in `session` to end a worker: taken, then let go before it is saved, since
+  // mapping a take to source lines would hold the thread, and the playback it drives, still.
   async function paused(session: Session) {
+    const scripts = await collectPaused(live, session);
+    const saved = save(dir, scripts);
+    saving.add(saved);
+
     try {
-      await take();
+      await saved;
     } finally {
-      await resume(session);
+      saving.delete(saved);
     }
   }
 
