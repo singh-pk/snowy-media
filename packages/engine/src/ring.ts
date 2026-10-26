@@ -91,82 +91,177 @@ function views(ring: SharedArrayBuffer) {
   };
 }
 
+type Views = ReturnType<typeof views>;
+
+/**
+ * A packet as a producer writes it: `size` bytes of `data` from `offset`. A producer fills one
+ * it keeps for every packet, so writing a packet allocates nothing.
+ */
+export interface OutgoingPacket {
+  /** The stream index, or END. */
+  stream: number;
+  flags: number;
+  pts: bigint;
+  dts: bigint;
+  /** A 32-bit integer. */
+  duration: number;
+  data: Uint8Array;
+  offset: number;
+  size: number;
+}
+
+/** A packet of stream 0 with no bytes, to fill. */
+export function createOutgoingPacket(data: Uint8Array = new Uint8Array(0)): OutgoingPacket {
+  return { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data, offset: 0, size: 0 };
+}
+
+// Where a record's payload comes from in its packet's data, and its size word's marks.
+interface Piece {
+  offset: number;
+  size: number;
+  mark: number;
+}
+
+/**
+ * Tells a watching consumer that the producer's thread is about to block, on this ring or
+ * another, after raising that ring's waiting flag. Taken, so a watch is told once.
+ */
+function blocking(control: Int32Array) {
+  const watching = Atomics.load(control, WATCHING) === 1;
+
+  if (watching && Atomics.compareExchange(control, WATCHING, 1, 0) === 1) {
+    Atomics.add(control, BLOCKS, 1);
+    Atomics.notify(control, BLOCKS);
+  }
+}
+
+// Waits until `need` bytes are free; false once the consumer has closed the ring.
+function reserve({ capacity, control }: Views, need: number) {
+  const written = control[WRITE] ?? 0;
+
+  for (;;) {
+    const read = Atomics.load(control, READ);
+    if (Atomics.load(control, CLOSED)) return false;
+    if (capacity - ((written - read) | 0) >= need) return true;
+    // Raised before waiting, so a release after the check above notifies this wait or
+    // changes READ before it starts.
+    Atomics.store(control, PRODUCER_WAITING, 1);
+    blocking(control);
+    Atomics.wait(control, READ, read);
+    Atomics.store(control, PRODUCER_WAITING, 0);
+  }
+}
+
+// Whether `need` bytes are free.
+function fits({ capacity, control }: Views, need: number) {
+  return capacity - (((control[WRITE] ?? 0) - Atomics.load(control, READ)) | 0) >= need;
+}
+
+// Taken, so a busy ring makes no notify calls.
+function wakeConsumer(control: Int32Array) {
+  const waiting = Atomics.load(control, CONSUMER_WAITING) === 1;
+
+  if (waiting && Atomics.compareExchange(control, CONSUMER_WAITING, 1, 0) === 1) {
+    Atomics.notify(control, CONSUMER_WAITING);
+  }
+}
+
+// Copies the header of `packet` and the payload `piece` says into a record at the producer's
+// position, and publishes it. The caller has made room for it.
+function store(v: Views, packet: OutgoingPacket, { offset, size, mark }: Piece) {
+  const { capacity, control, bytes, words, longs } = v;
+  const written = control[WRITE] ?? 0;
+  const at = written & (capacity - 1);
+  words[at >> 2] = size | mark;
+  words[(at >> 2) + 1] = packet.stream;
+  words[(at >> 2) + 2] = packet.flags;
+  words[(at >> 2) + 3] = packet.duration;
+  longs[(at >> 3) + 2] = packet.pts;
+  longs[(at >> 3) + 3] = packet.dts;
+  // A header in the last 32 bytes has its payload at the start.
+  const start = (at + HEADER) & (capacity - 1);
+  const first = Math.min(size, capacity - start);
+  const src = packet.data;
+  bytes.set(src.subarray(offset, offset + first), start);
+  if (first < size) bytes.set(src.subarray(offset + first, offset + size), 0);
+  Atomics.store(control, WRITE, (written + padded(size)) | 0);
+  wakeConsumer(control);
+}
+
+// The producer's side of `control` apart from writing: failing, and what a producer that waits
+// on more than one ring waits with.
+function producerSignals(control: Int32Array) {
+  return {
+    /** Tells a watching consumer that this thread is about to block, on this ring or another. */
+    blocking: () => blocking(control),
+    /**
+     * Ends the packets with FAILED in place of the rest, at once: it takes no room, so a full
+     * ring whose consumer reads no more never holds it back.
+     */
+    fail() {
+      Atomics.store(control, FAILURE, 1);
+      wakeConsumer(control);
+    },
+    /** Whether the consumer has closed the ring. */
+    closed: () => Atomics.load(control, CLOSED) === 1,
+    /**
+     * Raises or lowers the flag that has the consumer wake the producer as it frees room.
+     * Raised before the producer reads where it waits from and checks the ring, so a release
+     * after the check wakes it.
+     */
+    waitingForRoom(on: boolean) {
+      Atomics.store(control, PRODUCER_WAITING, on ? 1 : 0);
+    },
+    /**
+     * A count to `sleep` on, for a producer that waits on this ring alone: the consumer's
+     * position, which every release and a close move.
+     */
+    bell: () => Atomics.load(control, READ),
+    /** Waits until the count moves from `seen`, at once if it already has. */
+    sleep(seen: number) {
+      Atomics.wait(control, READ, seen);
+    },
+    /** Resolves once the count moves from `seen`, for a producer that never blocks. */
+    async moved(seen: number) {
+      const { async, value } = Atomics.waitAsync(control, READ, seen);
+      if (async) await value;
+    },
+  };
+}
+
 /** The producer's side of `ring`, for a thread that may block. */
 export function createProducer(ring: SharedArrayBuffer) {
-  const { capacity, control, bytes, words, longs } = views(ring);
+  const v = views(ring);
+  const { capacity, control, bytes } = v;
   // The packet in pieces, by its stream, timestamp and size, and its bytes written so far,
   // while its other pieces wait for room. One packet at a time is in pieces.
   const split = { sent: 0, stream: 0, pts: 0n, size: 0 };
+  // How the packet being put goes: waiting for room, or only with `spare` bytes left over.
+  const mode = { wait: true, spare: 0 };
+  const piece: Piece = { offset: 0, size: 0, mark: 0 };
+  const ending = createOutgoingPacket(bytes);
+  ending.stream = END;
+  const nothing = createOutgoingPacket(bytes);
 
   /**
-   * Tells a watching consumer that this thread is about to block, on this ring or another,
-   * after raising that ring's waiting flag. Taken, so a watch is told once.
+   * Copies `packet` into a record, waiting for room. False once the consumer has closed the
+   * ring, so the producer stops.
    */
-  function blocking() {
-    const watching = Atomics.load(control, WATCHING) === 1;
-
-    if (watching && Atomics.compareExchange(control, WATCHING, 1, 0) === 1) {
-      Atomics.add(control, BLOCKS, 1);
-      Atomics.notify(control, BLOCKS);
-    }
-  }
-
-  // Waits until `need` bytes are free; false once the consumer has closed the ring.
-  function reserve(need: number) {
-    const written = control[WRITE] ?? 0;
-
-    for (;;) {
-      const read = Atomics.load(control, READ);
-      if (Atomics.load(control, CLOSED)) return false;
-      if (capacity - ((written - read) | 0) >= need) return true;
-      // Raised before waiting, so a release after the check above notifies this wait or
-      // changes READ before it starts.
-      Atomics.store(control, PRODUCER_WAITING, 1);
-      blocking();
-      Atomics.wait(control, READ, read);
-      Atomics.store(control, PRODUCER_WAITING, 0);
-    }
-  }
-
-  // Whether `need` bytes are free.
-  function fits(need: number) {
-    return capacity - (((control[WRITE] ?? 0) - Atomics.load(control, READ)) | 0) >= need;
+  function write(packet: OutgoingPacket) {
+    mode.wait = true;
+    mode.spare = 0;
+    return put(packet);
   }
 
   /**
-   * Copies `size` bytes of `src` from `offset` into a record, waiting for room. False once the
-   * consumer has closed the ring, so the producer stops.
+   * Copies `packet` into a record if the ring has room for it with `spare` bytes left over,
+   * for a producer that waits on more than this ring. False if it has not, or once the
+   * consumer has closed the ring (`closed`).
    */
-  function write(
-    stream: number,
-    flags: number,
-    pts: bigint,
-    dts: bigint,
-    duration: number,
-    src: Uint8Array,
-    offset: number,
-    size: number,
-  ) {
-    return put(stream, flags, pts, dts, duration, src, offset, size, true, 0);
-  }
-
-  /**
-   * Copies `size` bytes of `src` from `offset` into a record if the ring has room for it with
-   * `spare` bytes left over, for a producer that waits on more than this ring. False if it has
-   * not, or once the consumer has closed the ring (`closed`).
-   */
-  function offer(
-    stream: number,
-    flags: number,
-    pts: bigint,
-    dts: bigint,
-    duration: number,
-    src: Uint8Array,
-    offset: number,
-    size: number,
-    spare = 0,
-  ) {
-    return put(stream, flags, pts, dts, duration, src, offset, size, false, spare);
+  function offer(packet: OutgoingPacket, spare = 0) {
+    mode.wait = false;
+    mode.spare = spare;
+    return put(packet);
   }
 
   // The payload bytes of the next record of a packet of `size` bytes.
@@ -174,39 +269,26 @@ export function createProducer(ring: SharedArrayBuffer) {
     return padded(size) <= capacity / 2 ? size : Math.min(capacity / 4, size - split.sent);
   }
 
-  // Writes a packet, waiting for room if `wait`, or else only as far as it fits with `spare`
-  // bytes left over: a large one as pieces, each written once, so a caller that finds no room
-  // offers the same packet again.
-  function put(
-    stream: number,
-    flags: number,
-    pts: bigint,
-    dts: bigint,
-    duration: number,
-    src: Uint8Array,
-    offset: number,
-    size: number,
-    wait: boolean,
-    spare: number,
-  ) {
+  // Writes a packet as `mode` says: a large one as pieces, each written once, so a caller that
+  // finds no room offers the same packet again.
+  function put(packet: OutgoingPacket) {
+    const { stream, pts, duration, offset, size } = packet;
     if ((duration | 0) !== duration) throw new RangeError(`packet duration ${duration}`);
-
-    if (padded(size) <= capacity / 2) {
-      return record(stream, flags, pts, dts, duration, src, offset, size, 0, wait, spare);
-    }
+    if (padded(size) <= capacity / 2) return record(packet, offset, size, 0);
 
     if (split.sent > 0 && (stream !== split.stream || pts !== split.pts || size !== split.size)) {
       throw new RangeError(`packet of stream ${stream} offered while another is in pieces`);
     }
 
-    Object.assign(split, { stream, pts, size });
+    split.stream = stream;
+    split.pts = pts;
+    split.size = size;
 
     while (split.sent < size) {
       const n = nextRecord(size);
       const mark = PIECE | (split.sent + n === size ? LAST : 0);
-      const at = offset + split.sent;
 
-      if (!record(stream, flags, pts, dts, duration, src, at, n, mark, wait, spare)) {
+      if (!record(packet, offset + split.sent, n, mark)) {
         if (Atomics.load(control, CLOSED)) split.sent = 0;
         return false;
       }
@@ -218,48 +300,19 @@ export function createProducer(ring: SharedArrayBuffer) {
     return true;
   }
 
-  // Writes a record of `size` bytes, its size word marked by `mark`, waiting for room if
-  // `wait`, or else only if it fits with `spare` bytes left over.
-  function record(
-    stream: number,
-    flags: number,
-    pts: bigint,
-    dts: bigint,
-    duration: number,
-    src: Uint8Array,
-    offset: number,
-    size: number,
-    mark: number,
-    wait: boolean,
-    spare: number,
-  ) {
+  // Writes a record of `size` bytes of `packet` from `offset`, its size word marked by `mark`,
+  // if `mode` lets it.
+  function record(packet: OutgoingPacket, offset: number, size: number, mark: number) {
     const need = padded(size);
-    if (wait ? !reserve(need) : Atomics.load(control, CLOSED) || !fits(need + spare)) return false;
-    const written = control[WRITE] ?? 0;
-    const at = written & (capacity - 1);
-    words[at >> 2] = size | mark;
-    words[(at >> 2) + 1] = stream;
-    words[(at >> 2) + 2] = flags;
-    words[(at >> 2) + 3] = duration;
-    longs[(at >> 3) + 2] = pts;
-    longs[(at >> 3) + 3] = dts;
-    // A header in the last 32 bytes has its payload at the start.
-    const start = (at + HEADER) & (capacity - 1);
-    const first = Math.min(size, capacity - start);
-    bytes.set(src.subarray(offset, offset + first), start);
-    if (first < size) bytes.set(src.subarray(offset + first, offset + size), 0);
-    Atomics.store(control, WRITE, (written + need) | 0);
-    wakeConsumer();
+    const room = mode.wait
+      ? reserve(v, need)
+      : !Atomics.load(control, CLOSED) && fits(v, need + mode.spare);
+    if (!room) return false;
+    piece.offset = offset;
+    piece.size = size;
+    piece.mark = mark;
+    store(v, packet, piece);
     return true;
-  }
-
-  // Taken, so a busy ring makes no notify calls.
-  function wakeConsumer() {
-    const waiting = Atomics.load(control, CONSUMER_WAITING) === 1;
-
-    if (waiting && Atomics.compareExchange(control, CONSUMER_WAITING, 1, 0) === 1) {
-      Atomics.notify(control, CONSUMER_WAITING);
-    }
   }
 
   /**
@@ -269,84 +322,27 @@ export function createProducer(ring: SharedArrayBuffer) {
   function abandon() {
     if (split.sent === 0) return true;
     split.sent = 0;
-    return record(0, 0, 0n, 0n, 0, bytes, 0, 0, PIECE | ABANDONED, false, 0);
+    mode.wait = false;
+    mode.spare = 0;
+    return record(nothing, 0, 0, PIECE | ABANDONED);
   }
 
-  /**
-   * Whether the next record of a packet of `size` bytes fits with `spare` bytes left over, for
-   * a producer that keeps room for records it must always be able to offer.
-   */
-  function hasRoom(size: number, spare: number) {
-    return fits(padded(nextRecord(size)) + spare);
-  }
-
-  /** Writes the END record after the last packet, waiting for room, as the tests' producer does. */
-  function end() {
-    return write(END, 0, 0n, 0n, 0, bytes, 0, 0);
-  }
-
-  /** Writes the END record if the ring has room for it, as `offer`. */
-  function offerEnd() {
-    return offer(END, 0, 0n, 0n, 0, bytes, 0, 0);
-  }
-
-  /**
-   * Ends the packets with FAILED in place of the rest, at once: it takes no room, so a full
-   * ring whose consumer reads no more never holds it back.
-   */
-  function fail() {
-    Atomics.store(control, FAILURE, 1);
-    wakeConsumer();
-  }
-
-  /** Whether the consumer has closed the ring. */
-  function closed() {
-    return Atomics.load(control, CLOSED) === 1;
-  }
-
-  /**
-   * Raises or lowers the flag that has the consumer wake the producer as it frees room. Raised
-   * before the producer reads where it waits from and checks the ring, so a release after the
-   * check wakes it.
-   */
-  function waitingForRoom(on: boolean) {
-    Atomics.store(control, PRODUCER_WAITING, on ? 1 : 0);
-  }
-
-  /**
-   * A count to `sleep` on, for a producer that waits on this ring alone: the consumer's
-   * position, which every release and a close move.
-   */
-  function bell() {
-    return Atomics.load(control, READ);
-  }
-
-  /** Waits until the count moves from `seen`, at once if it already has. */
-  function sleep(seen: number) {
-    Atomics.wait(control, READ, seen);
-  }
-
-  /** Resolves once the count moves from `seen`, for a producer that never blocks. */
-  async function moved(seen: number) {
-    const { async, value } = Atomics.waitAsync(control, READ, seen);
-    if (async) await value;
-  }
-
-  return {
+  return Object.assign(producerSignals(control), {
+    /** A packet to fill and hand to `write` or `offer`, for a caller that keeps none of its own. */
+    packet: createOutgoingPacket(),
     write,
     offer,
     abandon,
-    hasRoom,
-    end,
-    offerEnd,
-    fail,
-    blocking,
-    closed,
-    waitingForRoom,
-    bell,
-    sleep,
-    moved,
-  };
+    /**
+     * Whether the next record of a packet of `size` bytes fits with `spare` bytes left over,
+     * for a producer that keeps room for records it must always be able to offer.
+     */
+    hasRoom: (size: number, spare: number) => fits(v, padded(nextRecord(size)) + spare),
+    /** Writes the END record after the last packet, waiting for room, as the tests' producer does. */
+    end: () => write(ending),
+    /** Writes the END record if the ring has room for it, as `offer`. */
+    offerEnd: () => offer(ending),
+  });
 }
 
 /**
@@ -362,128 +358,19 @@ export function closeRing(ring: SharedArrayBuffer) {
   Atomics.notify(control, READ);
 }
 
-/**
- * The consumer's side of `ring`, for a thread that never blocks. `blocked` runs once for each
- * `watch` when the producer's thread then blocks, in a later task. `freed` runs as it frees room
- * while the producer waits, and as it closes the ring, for a producer that waits on more than
- * this ring (src/pcm.ts).
- */
-export function createConsumer(
-  ring: SharedArrayBuffer,
-  blocked: () => void = () => {},
-  freed: () => void = () => {},
-) {
-  const { capacity, control, bytes, words, longs } = views(ring);
+// Where the consumer's handlers go: `blocked` for each watch the producer's thread answers by
+// blocking, `freed` as it frees room the producer waits for and as it closes the ring.
+interface ConsumerEvents {
+  blocked: () => void;
+  freed: () => void;
+}
+
+// The consumer's side of `ring` apart from reading: waiting, closing, and watching the
+// producer's thread.
+function consumerSignals(ring: SharedArrayBuffer, control: Int32Array, events: ConsumerEvents) {
+  const { blocked, freed } = events;
   // The blocks heard.
   const blocks = { heard: Atomics.load(control, BLOCKS) };
-  const packet: Packet = { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data: bytes };
-  // Where a record that wraps is put back together; it grows to the largest such packet.
-  let joined = new Uint8Array(0);
-  // Where a packet's pieces are put back together, apart from `joined`, as other records may
-  // come between them; `done` once its last piece is in, until it is released.
-  const pieces = { data: new Uint8Array(0), length: 0, done: false };
-
-  // Copies `size` bytes from `start` in the ring, which may wrap, into `into` at `at`.
-  function copy(start: number, size: number, into: Uint8Array, at: number) {
-    const first = Math.min(size, capacity - start);
-    into.set(bytes.subarray(start, start + first), at);
-    if (first < size) into.set(bytes.subarray(0, size - first), at + first);
-  }
-
-  // Frees the record of `size` bytes at `read`.
-  function advance(read: number, size: number) {
-    Atomics.store(control, READ, (read + padded(size)) | 0);
-
-    if (Atomics.load(control, PRODUCER_WAITING)) {
-      Atomics.notify(control, READ);
-      freed();
-    }
-  }
-
-  /**
-   * The next packet, valid until `release`; undefined while the ring is empty or closed. Once
-   * the producer has failed and every record is read, a FAILED packet, which `release` leaves.
-   */
-  function peek(): Packet | undefined {
-    for (;;) {
-      const read = control[READ] ?? 0;
-      // Read before WRITE, so a failure seen comes after every record it sees.
-      const failed = Atomics.load(control, FAILURE) === 1;
-      if (Atomics.load(control, CLOSED)) return undefined;
-
-      if (Atomics.load(control, WRITE) === read) {
-        if (!failed) return undefined;
-        packet.stream = FAILED;
-        packet.data = bytes.subarray(0, 0);
-        return packet;
-      }
-
-      const at = read & (capacity - 1);
-      const word = words[at >> 2] ?? 0;
-      const size = word & SIZE;
-      packet.stream = words[(at >> 2) + 1] ?? 0;
-      packet.flags = words[(at >> 2) + 2] ?? 0;
-      packet.duration = words[(at >> 2) + 3] ?? 0;
-      packet.pts = longs[(at >> 3) + 2] ?? 0n;
-      packet.dts = longs[(at >> 3) + 3] ?? 0n;
-      const start = (at + HEADER) & (capacity - 1);
-
-      if (!(word & PIECE)) {
-        if (size <= capacity - start) {
-          packet.data = bytes.subarray(start, start + size);
-        } else {
-          if (joined.length < size) joined = new Uint8Array(Math.max(size, 2 * joined.length));
-          copy(start, size, joined, 0);
-          packet.data = joined.subarray(0, size);
-        }
-
-        return packet;
-      }
-
-      if (word & ABANDONED) {
-        pieces.length = 0;
-        advance(read, 0);
-        continue;
-      }
-
-      // Its last piece, read already and not released.
-      if (!pieces.done) {
-        const length = pieces.length + size;
-
-        if (pieces.data.length < length) {
-          const grown = new Uint8Array(Math.max(length, 2 * pieces.data.length));
-          grown.set(pieces.data.subarray(0, pieces.length));
-          pieces.data = grown;
-        }
-
-        copy(start, size, pieces.data, pieces.length);
-        pieces.length = length;
-        pieces.done = (word & LAST) !== 0;
-      }
-
-      if (pieces.done) {
-        packet.data = pieces.data.subarray(0, pieces.length);
-        return packet;
-      }
-
-      // Copied, a piece before the last makes room for the next at once.
-      advance(read, size);
-    }
-  }
-
-  /** Frees the packet `peek` returned; nothing once the ring is closed, or for FAILED. */
-  function release() {
-    const read = control[READ] ?? 0;
-    if (Atomics.load(control, CLOSED) || Atomics.load(control, WRITE) === read) return;
-    const word = words[(read & (capacity - 1)) >> 2] ?? 0;
-
-    if (word & LAST) {
-      pieces.length = 0;
-      pieces.done = false;
-    }
-
-    advance(read, word & SIZE);
-  }
 
   /**
    * Resolves once the ring holds a packet or the producer fails, or at once when it is closed;
@@ -515,23 +402,8 @@ export function createConsumer(
     Atomics.notify(control, BLOCKS);
   }
 
-  /** Whether the producer waits for room. */
-  function producerWaiting() {
-    return Atomics.load(control, PRODUCER_WAITING) === 1;
-  }
-
   /** Whether either side has closed the ring. */
-  function closed() {
-    return Atomics.load(control, CLOSED) === 1;
-  }
-
-  /**
-   * Has `blocked` run when the producer's thread next blocks. Before reading whether it
-   * waits, so a block after the read runs it.
-   */
-  function watch() {
-    Atomics.store(control, WATCHING, 1);
-  }
+  const closed = () => Atomics.load(control, CLOSED) === 1;
 
   // Runs `blocked` as the count of blocks moves, until the ring closes. Started with the count
   // unmoved, so it first waits, and `blocked` always runs in a later task.
@@ -551,5 +423,165 @@ export function createConsumer(
   }
 
   void listen();
-  return { peek, release, wait, close, closed, producerWaiting, watch };
+  return {
+    wait,
+    close,
+    closed,
+    /** Whether the producer waits for room. */
+    producerWaiting: () => Atomics.load(control, PRODUCER_WAITING) === 1,
+    /**
+     * Has `blocked` run when the producer's thread next blocks. Before reading whether it
+     * waits, so a block after the read runs it.
+     */
+    watch() {
+      Atomics.store(control, WATCHING, 1);
+    },
+  };
+}
+
+// Puts back together what a consumer cannot read in place in the ring: a record that wraps, and
+// a packet in pieces.
+function createJoiner({ capacity, bytes }: Views) {
+  // Where a record that wraps is put back together; it grows to the largest such packet.
+  const joined = { data: new Uint8Array(0) };
+  // Where a packet's pieces are put back together, apart from `joined`, as other records may
+  // come between them; `done` once its last piece is in, until it is released.
+  const pieces = { data: new Uint8Array(0), length: 0, done: false };
+
+  // Copies `size` bytes from `start` in the ring, which may wrap, into `into` at `at`.
+  function copy(start: number, size: number, into: Uint8Array, at: number) {
+    const first = Math.min(size, capacity - start);
+    into.set(bytes.subarray(start, start + first), at);
+    if (first < size) into.set(bytes.subarray(0, size - first), at + first);
+  }
+
+  // The `size` bytes of a whole record from `start`, put back together in `joined` if they wrap.
+  function whole(start: number, size: number) {
+    if (size <= capacity - start) return bytes.subarray(start, start + size);
+
+    if (joined.data.length < size) {
+      joined.data = new Uint8Array(Math.max(size, 2 * joined.data.length));
+    }
+
+    copy(start, size, joined.data, 0);
+    return joined.data.subarray(0, size);
+  }
+
+  // Adds the piece of `size` bytes from `start`, its size word `word`, to `pieces`, unless it
+  // is the last, read already and not released.
+  function join(start: number, size: number, word: number) {
+    if (pieces.done) return;
+    const length = pieces.length + size;
+
+    if (pieces.data.length < length) {
+      const grown = new Uint8Array(Math.max(length, 2 * pieces.data.length));
+      grown.set(pieces.data.subarray(0, pieces.length));
+      pieces.data = grown;
+    }
+
+    copy(start, size, pieces.data, pieces.length);
+    pieces.length = length;
+    pieces.done = (word & LAST) !== 0;
+  }
+
+  return { pieces, whole, join };
+}
+
+/**
+ * The consumer's side of `ring`, for a thread that never blocks. `blocked` runs once for each
+ * `watch` when the producer's thread then blocks, in a later task. `freed` runs as it frees room
+ * while the producer waits, and as it closes the ring, for a producer that waits on more than
+ * this ring (src/pcm.ts).
+ */
+export function createConsumer(
+  ring: SharedArrayBuffer,
+  blocked: () => void = () => {},
+  freed: () => void = () => {},
+) {
+  const v = views(ring);
+  const { capacity, control, bytes, words, longs } = v;
+  const packet: Packet = { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data: bytes };
+  const { pieces, whole, join } = createJoiner(v);
+
+  // Frees the record of `size` bytes at `read`.
+  function advance(read: number, size: number) {
+    Atomics.store(control, READ, (read + padded(size)) | 0);
+
+    if (Atomics.load(control, PRODUCER_WAITING)) {
+      Atomics.notify(control, READ);
+      freed();
+    }
+  }
+
+  // Reads the header of the record at `at` into `packet`.
+  function header(at: number) {
+    packet.stream = words[(at >> 2) + 1] ?? 0;
+    packet.flags = words[(at >> 2) + 2] ?? 0;
+    packet.duration = words[(at >> 2) + 3] ?? 0;
+    packet.pts = longs[(at >> 3) + 2] ?? 0n;
+    packet.dts = longs[(at >> 3) + 3] ?? 0n;
+  }
+
+  /**
+   * The next packet, valid until `release`; undefined while the ring is empty or closed. Once
+   * the producer has failed and every record is read, a FAILED packet, which `release` leaves.
+   */
+  function peek(): Packet | undefined {
+    for (;;) {
+      const read = control[READ] ?? 0;
+      // Read before WRITE, so a failure seen comes after every record it sees.
+      const failed = Atomics.load(control, FAILURE) === 1;
+      if (Atomics.load(control, CLOSED)) return undefined;
+
+      if (Atomics.load(control, WRITE) === read) {
+        if (!failed) return undefined;
+        packet.stream = FAILED;
+        packet.data = bytes.subarray(0, 0);
+        return packet;
+      }
+
+      const at = read & (capacity - 1);
+      const word = words[at >> 2] ?? 0;
+      const size = word & SIZE;
+      header(at);
+      const start = (at + HEADER) & (capacity - 1);
+
+      if (!(word & PIECE)) {
+        packet.data = whole(start, size);
+        return packet;
+      }
+
+      if (word & ABANDONED) {
+        pieces.length = 0;
+        advance(read, 0);
+        continue;
+      }
+
+      join(start, size, word);
+
+      if (pieces.done) {
+        packet.data = pieces.data.subarray(0, pieces.length);
+        return packet;
+      }
+
+      // Copied, a piece before the last makes room for the next at once.
+      advance(read, size);
+    }
+  }
+
+  /** Frees the packet `peek` returned; nothing once the ring is closed, or for FAILED. */
+  function release() {
+    const read = control[READ] ?? 0;
+    if (Atomics.load(control, CLOSED) || Atomics.load(control, WRITE) === read) return;
+    const word = words[(read & (capacity - 1)) >> 2] ?? 0;
+
+    if (word & LAST) {
+      pieces.length = 0;
+      pieces.done = false;
+    }
+
+    advance(read, word & SIZE);
+  }
+
+  return Object.assign(consumerSignals(ring, control, { blocked, freed }), { peek, release });
 }

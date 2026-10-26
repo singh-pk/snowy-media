@@ -21,9 +21,11 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 
 | Path | What it holds |
 | --- | --- |
-| `src/index.ts` | the public API, and playback on the main thread |
+| `src/index.ts` | the public API, and the player on the main thread: open, play, pause, seek and scrub |
+| `src/playback.ts` | one play on the main thread: its rings and audio output, the output timestamp it publishes, and whether it may start and is heard |
 | `src/platform.ts` | the platform check on the main thread, and `UnsupportedPlatformError` |
 | `src/media.worker.ts` | the media worker: reads and demuxes the file, and decodes and resamples its audio, with the FFmpeg core |
+| `src/audio-decoder.ts` | the media worker's audio decoder: a queue of an audio stream's packets, decoded and resampled into the PCM ring |
 | `src/io.ts` | the media worker's synchronous reads from a `File` |
 | `src/ring.ts` | the packet ring between two threads |
 | `src/codec.ts` | WebCodecs decoder configs, with the codec string from a stream's configuration record or parameter sets |
@@ -33,6 +35,11 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | `src/frames.ts` | the frame queue, in presentation order and bounded by bytes |
 | `src/decoding.ts` | how far a video decoder has decoded, whatever order it emits frames in |
 | `src/compositor.ts` | the WebGPU compositor: a frame uploaded and converted from Y′CbCr as FFmpeg converts it, turned by its display matrix, fitted into the canvas |
+| `src/shaders.ts` | the compositor's WGSL shaders and the render pipelines made of them |
+| `src/pictures.ts` | the compositor's pictures: a frame's textures laid out by pixel format, pooled by size and format |
+| `src/colour.ts` | the colour matrices: plane values to R′G′B′ as FFmpeg converts them, and undoing the matrix Chromium took |
+| `src/measure.ts` | how a stream's frames go up: Chromium's conversion measured against the compositor's on a grid of points |
+| `src/view.ts` | where a picture is drawn: the map from the canvas to it by its display matrix, fitted and centred |
 | `src/webgpu.d.ts` | the WebGPU flag constants TypeScript's libraries leave out |
 | `src/pcm.ts` | the PCM ring from the media worker to the AudioWorklet, and the clock |
 | `src/audio.ts` | the audio output on the main thread |

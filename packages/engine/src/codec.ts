@@ -96,7 +96,7 @@ export interface VideoParams {
   timeBase: [number, number];
   /** When its first frame is due, in the time base; 0 when unknown. */
   start: number;
-  /** FFmpeg's display matrix (src/compositor.ts), the identity when the stream has none. */
+  /** FFmpeg's display matrix (src/view.ts), the identity when the stream has none. */
   matrix: number[];
 }
 

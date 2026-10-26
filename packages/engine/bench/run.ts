@@ -191,16 +191,9 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   scrub: (tab) =>
     tab.evaluate(
       async ({ entry, page, file, times, speed, to }) => {
-        const engine: typeof EngineModule = await import(entry);
         const support: typeof PageSupport = await import(page);
-        const canvas = document.createElement("canvas");
-        [canvas.width, canvas.height] = [320, 180];
-        document.body.append(canvas);
-        const player = await engine.createEngine({ canvas });
-        const res = await fetch(`/test/fixtures/${file}`);
-        const blob = await res.blob();
-        const handle = await support.fileHandle(file, blob);
-        await player.open(handle);
+        const canvas = support.addCanvas(320, 180);
+        const { player } = await support.openEngine(entry, file, canvas);
         await player.seek(0);
         const reader = new OffscreenCanvas(canvas.width, canvas.height).getContext("2d");
         if (!reader) throw new Error("no 2D context");
@@ -238,16 +231,9 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
   play: (tab) =>
     tab.evaluate(
       async ({ entry, page, file, times, seconds }) => {
-        const engine: typeof EngineModule = await import(entry);
         const support: typeof PageSupport = await import(page);
-        const canvas = document.createElement("canvas");
-        [canvas.width, canvas.height] = [320, 180];
-        document.body.append(canvas);
-        const player = await engine.createEngine({ canvas });
-        const res = await fetch(`/test/fixtures/${file}`);
-        const blob = await res.blob();
-        const handle = await support.fileHandle(file, blob);
-        await player.open(handle);
+        const canvas = support.addCanvas(320, 180);
+        const { player } = await support.openEngine(entry, file, canvas);
         await player.play();
         // Exposed by the runner.
         const used: unknown = Reflect.get(window, "cpuTime");

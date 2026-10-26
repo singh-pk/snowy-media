@@ -6,7 +6,13 @@
 // laptop (docs/architecture.md#low-end).
 
 import { $ } from "bun";
-import { type Browser, type BrowserContext, chromium, type LaunchOptions } from "playwright";
+import {
+  type Browser,
+  type BrowserContext,
+  chromium,
+  type LaunchOptions,
+  type Page,
+} from "playwright";
 
 // On a machine without a GPU, as CI's Windows and Linux runners, WebGPU renders in software
 // with SNOWY_GPU: `swiftshader` on Linux, Chromium's software Vulkan, with ANGLE and the
@@ -173,4 +179,26 @@ export async function launch(options: LaunchOptions = {}) {
   };
 
   return browser;
+}
+
+/**
+ * Runs `use` on a new page at `url` in a browser of its own (launch), which is closed after.
+ * With `gesture`, the page is clicked first: a user gesture, so audio may start.
+ */
+export async function inPage<T>(
+  url: string,
+  use: (page: Page) => Promise<T>,
+  { gesture = false }: { gesture?: boolean } = {},
+) {
+  const browser = await launch();
+
+  try {
+    const page = await browser.newPage();
+    await page.goto(url);
+    if (gesture) await page.mouse.click(1, 1);
+    const result = await use(page);
+    return result;
+  } finally {
+    await browser.close();
+  }
 }

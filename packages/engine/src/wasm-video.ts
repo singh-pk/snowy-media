@@ -18,7 +18,14 @@ import {
   type FromVideo,
   type ToVideo,
 } from "./protocol";
-import { RING_CAPACITY, createConsumer, createProducer, createRing, type Packet } from "./ring";
+import {
+  RING_CAPACITY,
+  createConsumer,
+  createProducer,
+  createRing,
+  type OutgoingPacket,
+  type Packet,
+} from "./ring";
 
 // The ring to the worker: room for the packets of a decoder, which waits while the next does not
 // fit (`fits`), and as much again for another's, with a sixteenth (SPARE) kept for the records
@@ -37,7 +44,7 @@ const isFormat = (v: string | undefined): v is VideoPixelFormat => FORMATS.has(v
  * A frame FFmpeg decoded, its planes still in `memory`, the decoding module's, where `layout`
  * says: uploaded from there, it is never copied on the CPU. Closing it hands it back.
  */
-export interface SharedFrame {
+interface SharedFrame {
   readonly format: VideoPixelFormat;
   readonly codedWidth: number;
   readonly codedHeight: number;
@@ -92,22 +99,76 @@ interface Open {
   waiting: boolean;
 }
 
-/**
- * The decoders, in the worker `start` starts: the bundled src/video.worker.ts next to this
- * file, written out as is so that a bundler finds the worker. Packets go to it through a ring of
- * `capacity` bytes.
- */
-export function createWasmVideo(
-  start = () => new Worker(new URL("./video.worker.js", import.meta.url), { type: "module" }),
-  capacity = TO_CAPACITY,
-) {
-  const state = {
-    // The ring to the worker, once it is started.
-    records: undefined as ReturnType<typeof createProducer> | undefined,
-    next: 0,
-    failed: undefined as Error | undefined,
+type Producer = ReturnType<typeof createProducer>;
+
+// Hands frame `frame` back to the `module`th module, which decoded it; `packed` if the worker
+// packed it into a buffer of its own.
+type GiveBack = (frame: number, packed: bigint, module: number) => void;
+
+// What the decoders share: the open ones by id, the next id, the worker's failure, the ring to
+// the worker of `capacity` bytes, and how records go into it.
+interface Wasm {
+  state: { next: number; failed: Error | undefined };
+  open: Map<number, Open>;
+  capacity: number;
+  worker: () => Producer;
+  /** The record to fill, of `stream`, its other fields cleared, for `put`. */
+  record: (stream: number) => OutgoingPacket;
+  /** Writes a record that must go: one that does not fit means the spare room is spent. */
+  put: (packet: OutgoingPacket) => void;
+}
+
+// The frame in the payload that `words` and `doubles` view, from the module whose memory is
+// `memory`, as a frame that goes back to it with `giveBack` once closed. Pointers are unsigned,
+// past 2 GiB too.
+function sharedFrame(
+  words: Int32Array,
+  doubles: Float64Array,
+  memory: WebAssembly.Memory,
+  giveBack: GiveBack,
+): SharedFrame {
+  const frame = (words[FRAME.frame] ?? 0) >>> 0;
+  const packed = PACKED[words[FRAME.packed] ?? 0] ?? 0n;
+  const module = words[FRAME.module] ?? 0;
+  const size = words[FRAME.size] ?? 0;
+  const height = words[FRAME.codedHeight] ?? 0;
+  const layout: PlaneLayout[] = [];
+
+  for (let i = 0; i < (words[FRAME.planes] ?? 0); i++) {
+    const offset = (words[FRAME.layout + 2 * i] ?? 0) >>> 0;
+    layout.push({ offset, stride: words[FRAME.layout + 2 * i + 1] ?? 0 });
+  }
+
+  const format = PIXEL_FORMATS[words[FRAME.format] ?? 0];
+
+  if (!isFormat(format)) {
+    giveBack(frame, packed, module);
+    throw new Error(`no pixel format ${words[FRAME.format]}`);
+  }
+
+  const own = { closed: false };
+  return {
+    format,
+    codedWidth: words[FRAME.codedWidth] ?? 0,
+    codedHeight: height,
+    displayWidth: words[FRAME.displayWidth] ?? 0,
+    displayHeight: height,
+    timestamp: doubles[FRAME.timestamp] ?? 0,
+    layout,
+    memory,
+    allocationSize: () => size,
+    close() {
+      if (own.closed) return;
+      // Closed once it has gone: a ring that has no room for it throws, and leaves it open.
+      giveBack(frame, packed, module);
+      own.closed = true;
+    },
   };
-  const open = new Map<number, Open>();
+}
+
+// The side that takes the worker's records, for the decoders in `open`; frames go back with
+// `giveBack`.
+function createReplies(open: Map<number, Open>, giveBack: GiveBack) {
   // Each module's memory, which its frames are read from, once the worker has loaded it.
   const memories = VIDEO_MODULES.map(() => Promise.withResolvers<WebAssembly.Memory>());
   const loaded: (WebAssembly.Memory | undefined)[] = [];
@@ -119,67 +180,10 @@ export function createWasmVideo(
   // Where a failure's message is copied to be decoded: TextDecoder takes no shared memory.
   const reason = new Uint8Array(1024);
 
-  // Writes a record that must go: one that does not fit means the spare room is spent.
-  function put(
-    stream: number,
-    flags = 0,
-    pts = 0n,
-    dts = 0n,
-    duration = 0,
-    data: Uint8Array = payload,
-    size = 0,
-  ) {
-    if (!worker().offer(stream, flags, pts, dts, duration, data, 0, size)) {
-      throw new Error("video decode worker: its ring is full");
-    }
-  }
-
   // Hands the frame in the payload back to the module that decoded it.
   function release() {
     const frame = (words[FRAME.frame] ?? 0) >>> 0;
-    put(TO_VIDEO.release, frame, PACKED[words[FRAME.packed] ?? 0], 0n, words[FRAME.module]);
-  }
-
-  // The frame in the payload, from the module whose memory is `memory`, as a frame that goes
-  // back to it once closed. Pointers are unsigned, past 2 GiB too.
-  function shared(memory: WebAssembly.Memory): SharedFrame {
-    const frame = (words[FRAME.frame] ?? 0) >>> 0;
-    const packed = PACKED[words[FRAME.packed] ?? 0];
-    const module = words[FRAME.module] ?? 0;
-    const size = words[FRAME.size] ?? 0;
-    const height = words[FRAME.codedHeight] ?? 0;
-    const layout: PlaneLayout[] = [];
-
-    for (let i = 0; i < (words[FRAME.planes] ?? 0); i++) {
-      const offset = (words[FRAME.layout + 2 * i] ?? 0) >>> 0;
-      layout.push({ offset, stride: words[FRAME.layout + 2 * i + 1] ?? 0 });
-    }
-
-    const format = PIXEL_FORMATS[words[FRAME.format] ?? 0];
-
-    if (!isFormat(format)) {
-      release();
-      throw new Error(`no pixel format ${words[FRAME.format]}`);
-    }
-
-    const own = { closed: false };
-    return {
-      format,
-      codedWidth: words[FRAME.codedWidth] ?? 0,
-      codedHeight: height,
-      displayWidth: words[FRAME.displayWidth] ?? 0,
-      displayHeight: height,
-      timestamp: doubles[FRAME.timestamp] ?? 0,
-      layout,
-      memory,
-      allocationSize: () => size,
-      close() {
-        if (own.closed) return;
-        // Closed once it has gone: a ring that has no room for it throws, and leaves it open.
-        put(TO_VIDEO.release, frame, packed, 0n, module);
-        own.closed = true;
-      },
-    };
+    giveBack(frame, PACKED[words[FRAME.packed] ?? 0] ?? 0n, words[FRAME.module] ?? 0);
   }
 
   // Hands record `record` of decoder `id` from the worker to it; a frame's payload is in
@@ -190,7 +194,7 @@ export function createWasmVideo(
     if (kind === FROM_VIDEO.frame) {
       const memory = loaded[words[FRAME.module] ?? 0];
       // A decoder closed since: nothing takes it, so it goes back at once.
-      if (memory && decoder) decoder.events.output(shared(memory));
+      if (memory && decoder) decoder.events.output(sharedFrame(words, doubles, memory, giveBack));
       else release();
     } else if (kind === FROM_VIDEO.decoded) {
       if (decoder) decoder.queued--;
@@ -240,6 +244,146 @@ export function createWasmVideo(
     memories[data.module]?.resolve(data.memory);
   }
 
+  return { listen, message };
+}
+
+// A decoder that fails with `failure` at its first packet.
+function failing(failure: Error): Decoder {
+  return {
+    decode() {
+      throw failure;
+    },
+    flush: async () => {},
+    queued: () => 0,
+    fits: () => true,
+    close() {},
+  };
+}
+
+/** A decoder of the stream with parameters `p`, which an FFmpeg module decodes. */
+function createDecoder(w: Wasm, p: VideoParams, events: DecoderEvents): Decoder {
+  const { state, open, capacity, worker, record, put } = w;
+  const module = p.decoder === "video" || p.decoder === "video-ext" ? p.decoder : undefined;
+  // No module decodes it, or the worker has failed: it fails at its first packet.
+  if (!module) return failing(new Error(`${p.codec}: no decoder for this codec`));
+  if (state.failed) return failing(state.failed);
+  const id = state.next++;
+  const decoder: Open = { events, queued: 0, handing: false, waiting: false };
+  open.set(id, decoder);
+  const [num, den] = p.timeBase;
+  const opening = record((id << KIND_BITS) | TO_VIDEO.open);
+  opening.pts = BigInt(num);
+  opening.dts = BigInt(den);
+  opening.duration = VIDEO_MODULES.indexOf(module);
+  opening.data = p.params;
+  opening.size = p.params.length;
+  put(opening);
+
+  // Wakes the decode loop once the next part of a packet of `size` bytes fits: the worker frees
+  // each piece as it copies it, with no packet decoded to say so. The flag goes up before the
+  // count is read, so a piece freed after the check moves the count.
+  async function roomFor(size: number) {
+    const records = worker();
+    decoder.waiting = true;
+    records.waitingForRoom(true);
+
+    for (;;) {
+      const seen = records.bell();
+      if (!open.has(id) || records.hasRoom(size, capacity * SPARE)) break;
+      await records.moved(seen);
+    }
+
+    records.waitingForRoom(false);
+    decoder.waiting = false;
+    if (open.has(id)) events.dequeue();
+  }
+
+  return {
+    // Copied from the packet ring into the worker's, which `fits` has made room in.
+    decode({ data, dts, duration, flags }, pts) {
+      const packet = record((id << KIND_BITS) | TO_VIDEO.packet);
+      packet.flags = flags;
+      packet.pts = pts;
+      packet.dts = dts;
+      packet.duration = duration;
+      packet.data = data;
+      packet.size = data.length;
+      decoder.handing = !worker().offer(packet, capacity * SPARE);
+
+      if (decoder.handing) {
+        if (!decoder.waiting) void roomFor(data.length);
+        return false;
+      }
+
+      decoder.queued++;
+      return true;
+    },
+    flush() {
+      decoder.flushed = Promise.withResolvers<void>();
+      put(record((id << KIND_BITS) | TO_VIDEO.flush));
+      return decoder.flushed.promise;
+    },
+    queued: () => decoder.queued,
+    fits: (size) => worker().hasRoom(size, capacity * SPARE),
+    // A flush under way ends, as VideoDecoder.close() ends one.
+    close() {
+      if (!open.delete(id)) return;
+      decoder.flushed?.reject(new DOMException("closed", "AbortError"));
+
+      if (decoder.handing && !worker().abandon()) {
+        throw new Error("video decode worker: its ring is full");
+      }
+
+      put(record((id << KIND_BITS) | TO_VIDEO.close));
+    },
+  };
+}
+
+/**
+ * The decoders, in the worker `start` starts: the bundled src/video.worker.ts next to this
+ * file, written out as is so that a bundler finds the worker. Packets go to it through a ring of
+ * `capacity` bytes.
+ */
+export function createWasmVideo(
+  start = () => new Worker(new URL("./video.worker.js", import.meta.url), { type: "module" }),
+  capacity = TO_CAPACITY,
+) {
+  const state = {
+    // The ring to the worker, once it is started.
+    records: undefined as Producer | undefined,
+    next: 0,
+    failed: undefined as Error | undefined,
+  };
+  const open = new Map<number, Open>();
+  const none = new Uint8Array(0);
+
+  function record(stream: number) {
+    const { packet } = worker();
+    packet.stream = stream;
+    packet.flags = 0;
+    packet.pts = 0n;
+    packet.dts = 0n;
+    packet.duration = 0;
+    packet.data = none;
+    packet.offset = 0;
+    packet.size = 0;
+    return packet;
+  }
+
+  function put(packet: OutgoingPacket) {
+    if (!worker().offer(packet)) throw new Error("video decode worker: its ring is full");
+  }
+
+  function giveBack(frame: number, packed: bigint, module: number) {
+    const packet = record(TO_VIDEO.release);
+    packet.flags = frame;
+    packet.pts = packed;
+    packet.duration = module;
+    put(packet);
+  }
+
+  const replies = createReplies(open, giveBack);
+
   // The ring to the worker, which is started on first use with its rings, so a page that plays
   // only what WebCodecs decodes never makes them. Its failure fails every decoder, and every one
   // after.
@@ -249,7 +393,7 @@ export function createWasmVideo(
     const from = createRing(FROM_CAPACITY);
     const records = createProducer(to);
     const started = start();
-    started.addEventListener("message", message);
+    started.addEventListener("message", replies.message);
 
     started.addEventListener("error", (e) => {
       state.failed = new Error(`video decode worker: ${e.message}`);
@@ -258,110 +402,13 @@ export function createWasmVideo(
 
     const begin: ToVideo = { type: "start", to, from };
     started.postMessage(begin);
-    void listen(createConsumer(from));
+    void replies.listen(createConsumer(from));
     state.records = records;
     return records;
   }
 
-  /** A decoder of the stream with parameters `p`, which an FFmpeg module decodes. */
-  function createDecoder(p: VideoParams, events: DecoderEvents): Decoder {
-    const module = p.decoder === "video" || p.decoder === "video-ext" ? p.decoder : undefined;
-
-    // No module decodes it, or the worker has failed: it fails at its first packet.
-    const failure = module ? state.failed : new Error(`${p.codec}: no decoder for this codec`);
-
-    if (!module || failure) {
-      return {
-        decode() {
-          throw failure;
-        },
-        flush: async () => {},
-        queued: () => 0,
-        fits: () => true,
-        close() {},
-      };
-    }
-
-    const id = state.next++;
-    const decoder: Open = { events, queued: 0, handing: false, waiting: false };
-    open.set(id, decoder);
-    const [num, den] = p.timeBase;
-    const index = VIDEO_MODULES.indexOf(module);
-    put(
-      (id << KIND_BITS) | TO_VIDEO.open,
-      0,
-      BigInt(num),
-      BigInt(den),
-      index,
-      p.params,
-      p.params.length,
-    );
-
-    // Wakes the decode loop once the next part of a packet of `size` bytes fits: the worker frees
-    // each piece as it copies it, with no packet decoded to say so. The flag goes up before the
-    // count is read, so a piece freed after the check moves the count.
-    async function roomFor(size: number) {
-      const records = worker();
-      decoder.waiting = true;
-      records.waitingForRoom(true);
-
-      for (;;) {
-        const seen = records.bell();
-        if (!open.has(id) || records.hasRoom(size, capacity * SPARE)) break;
-        await records.moved(seen);
-      }
-
-      records.waitingForRoom(false);
-      decoder.waiting = false;
-      if (open.has(id)) events.dequeue();
-    }
-
-    return {
-      // Copied from the packet ring into the worker's, which `fits` has made room in.
-      decode(packet, pts) {
-        const { data, dts, duration, flags } = packet;
-        const kind = (id << KIND_BITS) | TO_VIDEO.packet;
-        const spare = capacity * SPARE;
-        decoder.handing = !worker().offer(
-          kind,
-          flags,
-          pts,
-          dts,
-          duration,
-          data,
-          0,
-          data.length,
-          spare,
-        );
-
-        if (decoder.handing) {
-          if (!decoder.waiting) void roomFor(data.length);
-          return false;
-        }
-
-        decoder.queued++;
-        return true;
-      },
-      flush() {
-        decoder.flushed = Promise.withResolvers<void>();
-        put((id << KIND_BITS) | TO_VIDEO.flush);
-        return decoder.flushed.promise;
-      },
-      queued: () => decoder.queued,
-      fits: (size) => worker().hasRoom(size, capacity * SPARE),
-      // A flush under way ends, as VideoDecoder.close() ends one.
-      close() {
-        if (!open.delete(id)) return;
-        decoder.flushed?.reject(new DOMException("closed", "AbortError"));
-
-        if (decoder.handing && !worker().abandon()) {
-          throw new Error("video decode worker: its ring is full");
-        }
-
-        put((id << KIND_BITS) | TO_VIDEO.close);
-      },
-    };
-  }
-
-  return { createDecoder };
+  const wasm: Wasm = { state, open, capacity, worker, record, put };
+  return {
+    createDecoder: (p: VideoParams, events: DecoderEvents) => createDecoder(wasm, p, events),
+  };
 }

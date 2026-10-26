@@ -37,8 +37,7 @@ export function brightnessGrid(
   pixels: Uint8Array | Uint8ClampedArray,
   width: number,
   height: number,
-  channels: number,
-  offset: number,
+  { channels, offset }: { channels: number; offset: number },
 ) {
   const sums = new Float64Array(GRID * GRID);
   const counts = new Float64Array(GRID * GRID);

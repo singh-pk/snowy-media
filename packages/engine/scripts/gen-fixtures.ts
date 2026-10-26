@@ -253,7 +253,10 @@ async function referenceGrid(file: string, index: number, width: number, height:
   const rgb =
     await $`ffmpeg -v error -i ${file} -map 0:${index} -frames:v 1 -pix_fmt rgb24 -f rawvideo -`.arrayBuffer();
   if (rgb.byteLength !== w * h * 3) throw new Error(`${file}: the shown frame is not ${w}x${h}`);
-  return { shown: [w, h], grid: brightnessGrid(new Uint8Array(rgb), w, h, 3, 1) };
+  return {
+    shown: [w, h],
+    grid: brightnessGrid(new Uint8Array(rgb), w, h, { channels: 3, offset: 1 }),
+  };
 }
 
 // A stream's packets as the engine's tests hash them: one line `pts,dts,key,size,crc32` per

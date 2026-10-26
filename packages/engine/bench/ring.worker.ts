@@ -6,7 +6,7 @@
 // the time it wrote them; the consumer reads them as the render worker will, woken by the
 // producer's notify, and reports how long they took and how late each wake-up was.
 
-import { createConsumer, createProducer, END } from "../src/ring";
+import { createConsumer, createOutgoingPacket, createProducer, END } from "../src/ring";
 
 export type RingJob =
   | {
@@ -30,13 +30,15 @@ const now = () => Math.round((performance.timeOrigin + performance.now()) * 1000
 
 function produce({ ring, size, count, interval }: Extract<RingJob, { role: "produce" }>) {
   const producer = createProducer(ring);
-  const src = new Uint8Array(size);
+  const packet = createOutgoingPacket(new Uint8Array(size));
+  packet.size = size;
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
   for (let i = 0; i < count; i++) {
     // oxlint-disable-next-line repo/no-timers -- a producer at a set rate is what the bench measures
     if (interval) Atomics.wait(sleeper, 0, 0, interval);
-    producer.write(0, 0, BigInt(now()), 0n, 0, src, 0, size);
+    packet.pts = BigInt(now());
+    producer.write(packet);
   }
 
   producer.end();
