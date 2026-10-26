@@ -24,6 +24,16 @@ type Store = Awaited<ReturnType<typeof openChatStore>>;
 type Responder = ReturnType<typeof createChatResponder>;
 type Pending = Set<Promise<unknown>>;
 
+type State = {
+  /** Set by `close`: nothing more is taken or written. */
+  closed: boolean;
+  /**
+   * After a reconnect, who the version vector goes to, best first: the next is sent it if the
+   * first one's link closes, until a batch from it arrives.
+   */
+  catchUp: KeyId[];
+};
+
 // A clock value below every message's: this peer's own messages are never late.
 const NOT_LATE = "0000000000000000";
 
@@ -81,22 +91,16 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   const holdings = createChatHoldings();
   // Every open link, oldest first, per peer: the relay's and a direct one may both be open.
   const links = new Map<KeyId, Link[]>();
-  // What may still write to the store, for `close` to wait for; this peer's own batches on
-  // their way into the holdings, for `writable` to.
+  // What may still write to the store, for `close` to wait for.
   const writing: Pending = new Set();
-  const own: Pending = new Set();
-  // After a reconnect, who the version vector goes to, best first: the next is sent it if the
-  // first one's link closes, until a batch from it arrives.
-  const state: { closed: boolean; catchUp: KeyId[] } = { closed: false, catchUp: [] };
-
-  const newest = (peer: KeyId) => links.get(peer)?.at(-1);
+  const state: State = { closed: false, catchUp: [] };
 
   // A peer whose links have all gone, though an ask was ranked to it: the ask moves on, as on
   // close.
   function linked(peer: KeyId) {
     if (state.closed) return undefined;
 
-    const link = newest(peer);
+    const link = links.get(peer)?.at(-1);
     if (link === undefined) repairs.closed(peer);
     return link;
   }
@@ -116,8 +120,6 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   });
 
   await receiver.restore(store.records);
-  const records = store.records.get(self) ?? { messages: [], checkpoints: [] };
-  const { last, pending } = unsent(records);
 
   // Takes a batch; one that doesn't prove itself changes nothing, and a repair it answered has
   // already moved on.
@@ -134,6 +136,76 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     options.onChange?.();
   }
 
+  const { write, writable, unwritable } = createOwnChat({
+    chat: options,
+    self,
+    store,
+    log,
+    clock,
+    state,
+    writing,
+    take,
+  });
+
+  /** A batch from an author's chat track. */
+  const received = (key: string, bytes: Bytes) => counted(take(key, bytes), writing);
+
+  const { connect, reconnected } = createPeerLinks({
+    self,
+    content,
+    log,
+    holdings,
+    repairs,
+    links,
+    state,
+    take: (key, bytes, peer) => counted(take(key, bytes, peer), writing),
+  });
+
+  /**
+   * Stops taking messages and batches, waits for what is still being written, and releases the
+   * chat store, for the session to be opened again or deleted.
+   */
+  async function close() {
+    state.closed = true;
+    await Promise.all(writing);
+    await store.close();
+  }
+
+  return {
+    id: self,
+    entries: log.entries,
+    write,
+    received,
+    writable,
+    unwritable,
+    connect,
+    reconnected,
+    close,
+  };
+}
+
+type OwnChatOptions = {
+  chat: ChatOptions;
+  self: KeyId;
+  store: Store;
+  log: ReturnType<typeof createChatLog>;
+  clock: ReturnType<typeof createClock>;
+  state: State;
+  /** What may still write to the store, shared with the session. */
+  writing: Pending;
+  /** Takes a batch into the log and holdings, as one from another author is. */
+  take(key: string, bytes: Bytes): Promise<void>;
+};
+
+// This peer's own chat: each message stored and shown, then sent, and each batch taken back
+// into the holdings. Messages the store holds that may never have been published go first.
+function createOwnChat(options: OwnChatOptions) {
+  const { chat, self, store, log, state, writing } = options;
+  // This peer's own batches on their way into the holdings, for `writable` to wait for.
+  const own: Pending = new Set();
+  const records = store.records.get(self) ?? { messages: [], checkpoints: [] };
+  const { last, pending } = unsent(records);
+
   // Stored, then shown, before the sender can queue it: the batch that carries it back finds it
   // in the log already, so it is never marked late.
   async function keep(message: Parameters<ChatSenderOptions["keep"]>[0]) {
@@ -141,7 +213,7 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
 
     await counted(store.append(self, { messages: [message] }), writing);
     log.add(message, NOT_LATE);
-    options.onChange?.();
+    chat.onChange?.();
   }
 
   // This peer's own batch goes through the same path as everyone's, into the holdings, so it
@@ -149,14 +221,14 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   function publish(key: string, bytes: Bytes) {
     if (state.closed) throw new ChatClosedError("the chat is closed");
 
-    options.publish(key, bytes);
-    void counted(take(key, bytes), writing, own);
+    chat.publish(key, bytes);
+    void counted(options.take(key, bytes), writing, own);
   }
 
   const sender = createChatSender({
-    peer: options.peer,
-    content,
-    clock,
+    peer: chat.peer,
+    content: chat.content,
+    clock: options.clock,
     keep,
     last,
     pending,
@@ -169,9 +241,6 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
    */
   const write = (message: Content, mediaUs: number) => sender.write(message, mediaUs);
 
-  /** A batch from an author's chat track. */
-  const received = (key: string, bytes: Bytes) => counted(take(key, bytes), writing);
-
   /**
    * The chat track takes more: sends what has queued. Resolves once the batch is handed over
    * and in this peer's holdings.
@@ -183,6 +252,28 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
 
   /** The chat track closed: messages queue until it is writable again. */
   const unwritable = () => sender.closed();
+
+  return { write, writable, unwritable };
+}
+
+type PeerLinksOptions = {
+  self: KeyId;
+  content: CryptoKey;
+  log: ReturnType<typeof createChatLog>;
+  holdings: ReturnType<typeof createChatHoldings>;
+  repairs: ReturnType<typeof createChatRepairs>;
+  /** Every open link, oldest first, per peer, shared with the session. */
+  links: Map<KeyId, Link[]>;
+  state: State;
+  /** Takes a batch a peer delivered, counted among what may still write to the store. */
+  take(key: string, bytes: Bytes, peer: KeyId): Promise<unknown>;
+};
+
+// The session's links to peers: each one's requests answered, the batches it delivers taken,
+// and the version vector sent after a reconnect, moving on as links close.
+function createPeerLinks(options: PeerLinksOptions) {
+  const { self, log, repairs, links, state } = options;
+  const newest = (peer: KeyId) => links.get(peer)?.at(-1);
 
   // Sends the version vector to the best peer still linked, if a catch-up is under way.
   function catchUp() {
@@ -212,7 +303,7 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   function delivered(peer: KeyId, key: string, bytes: Bytes) {
     if (!key.startsWith("chat/")) return undefined;
     if (state.catchUp[0] === peer) state.catchUp = [];
-    return counted(take(key, bytes, peer), writing);
+    return options.take(key, bytes, peer);
   }
 
   // A link closed. Asks don't record which of a peer's links they went on, so every ask waiting
@@ -243,8 +334,8 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     if (held) held.push(link);
     else links.set(peer, [link]);
     const responder = createChatResponder({
-      content,
-      holdings,
+      content: options.content,
+      holdings: options.holdings,
       send: (_, message) => link.send(message),
       deliver: (_, key, bytes) => link.deliver(key, bytes),
     });
@@ -265,25 +356,5 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     catchUp();
   }
 
-  /**
-   * Stops taking messages and batches, waits for what is still being written, and releases the
-   * chat store, for the session to be opened again or deleted.
-   */
-  async function close() {
-    state.closed = true;
-    await Promise.all(writing);
-    await store.close();
-  }
-
-  return {
-    id: self,
-    entries: log.entries,
-    write,
-    received,
-    writable,
-    unwritable,
-    connect,
-    reconnected,
-    close,
-  };
+  return { connect, reconnected };
 }

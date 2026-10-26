@@ -16,14 +16,13 @@ import {
   type Catalog,
   type CodecSetup,
 } from "../src/catalog";
-import { generateKeyPair, keyId, sign, type Bytes } from "../src/crypto";
+import { generateKeyPair } from "../src/crypto";
 import { InvalidRecordError } from "../src/signed-record";
 import { rejection } from "./support/rejection";
+import { createRecordSigner, json } from "./support/signed-record";
 
-const pair = await generateKeyPair();
-const session = await keyId(pair.publicKey);
+const { pair, resigned } = await createRecordSigner();
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 const catalog: Catalog = {
   version: 2,
@@ -44,27 +43,10 @@ const video: CodecSetup = {
   codedHeight: 1080,
 };
 
-const base64 = (bytes: Bytes) => bytes.toBase64({ alphabet: "base64url", omitPadding: true });
-const json = (bytes: Bytes): Record<string, unknown> => JSON.parse(decoder.decode(bytes));
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 // A catalog as a caller without types might pass one, whatever its fields.
 const untyped = (value: object): Catalog => JSON.parse(JSON.stringify(value));
-
-// A record's JSON with `change` made, signed again by the session key as `domain` gives it.
-async function resigned(
-  bytes: Bytes,
-  domain: string,
-  change: (record: Record<string, unknown>) => void,
-) {
-  const { sig: _, ...record } = json(bytes);
-  change(record);
-  const sig = await sign(
-    pair.privateKey,
-    encoder.encode(`${domain}\n${JSON.stringify({ session, ...record })}`),
-  );
-  return encoder.encode(JSON.stringify({ ...record, sig: base64(sig) }));
-}
 
 test("a catalog round-trips under the key of its version", async () => {
   const { key, bytes } = await encodeCatalog(pair, catalog);

@@ -43,13 +43,8 @@ const previousHash = async (last?: ChatMessage) => (last === undefined ? "" : me
 export function createChatSender(options: ChatSenderOptions) {
   const author = keyId(options.peer.publicKey);
   const queue: ChatMessage[] = options.pending ?? [];
-  const state: {
-    last?: ChatMessage | undefined;
-    writable: boolean;
-    /** Counts the stream's closes, so a seal can tell whether one happened meanwhile. */
-    closes: number;
-    sealing?: Promise<void> | undefined;
-  } = { last: options.last, writable: false, closes: 0 };
+  const batches = createBatches(options, queue);
+  const state: { last?: ChatMessage | undefined } = { last: options.last };
   // Writes run one after another: each chains to the one before.
   let written: Promise<unknown> = Promise.resolve();
 
@@ -93,11 +88,24 @@ export function createChatSender(options: ChatSenderOptions) {
   // queue, and the next `writable()` reports the failure.
   async function flushQuietly() {
     try {
-      await flush();
+      await batches.flush();
     } catch {
       // Kept for the next writable event.
     }
   }
+
+  return { write, writable: batches.writable, closed: batches.closed };
+}
+
+// The queue sent as batches: whenever the stream is free, everything queued is sealed as one
+// batch and handed to it.
+function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
+  const state: {
+    writable: boolean;
+    /** Counts the stream's closes, so a seal can tell whether one happened meanwhile. */
+    closes: number;
+    sealing?: Promise<void> | undefined;
+  } = { writable: false, closes: 0 };
 
   // Sends what has queued if the stream is writable; one batch is sealed at a time, and a call
   // made meanwhile waits for it, then looks again.
@@ -181,5 +189,5 @@ export function createChatSender(options: ChatSenderOptions) {
     state.closes++;
   }
 
-  return { write, writable, closed };
+  return { flush, writable, closed };
 }

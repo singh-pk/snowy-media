@@ -7,7 +7,7 @@
   "src/chat-repairs.ts": 100,
   "src/chat-requests.ts": 97,
   "src/chat-sender.ts": 100,
-  "src/chat-session.ts": 96,
+  "src/chat-session.ts": 97,
   "src/chat-store.ts": 96,
   "src/chat.ts": 99,
   "src/chunk-store.ts": 99,

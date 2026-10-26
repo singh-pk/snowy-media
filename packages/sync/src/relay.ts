@@ -279,46 +279,18 @@ function sessionUrl(relay: string, session: KeyId, token: string) {
   return url;
 }
 
-/**
- * Connects to the relay with this peer's tracks announced; `listen` then starts presence and
- * links. Rejects if the connection fails; a token the relay refuses ends the connection with
- * `close` instead.
- */
-export async function connectRelay(options: RelayOptions) {
-  const { session, self } = options;
-  // What this peer publishes, and what the relay announces to it. Paths are relative to the
-  // session's root.
-  const local = new Moq.Origin.Producer();
-  const remote = new Moq.Origin.Producer();
-  const events = emitter<RelayEvents>({ announce: [], unannounce: [], link: [], close: [] });
-  const links = new Map<KeyId, ReturnType<typeof relayLink>>();
-  const online = new Set<KeyId>();
-  // Peers whose inbox for this peer, `inbox/<self>/<peer>`, is announced.
-  const inboxes = new Set<KeyId>();
-  const state = { closed: false };
+// Subscribes to a track, handing each object's payload to `handle`, once the relay accepts the
+// subscription; `stopped` is called if it ends without being cancelled.
+type Subscribe = (
+  path: Moq.Path.Valid,
+  name: string,
+  handle: (payload: Bytes) => unknown,
+  stopped?: () => void,
+) => Promise<Subscription>;
 
-  // The source announces `source` before itself, so a peer that subscribes to it on seeing the
-  // source online finds it.
-  const sourceTracks = new Map<string, Publisher>();
-
-  if (options.source !== undefined) {
-    const broadcast = local.createBroadcast(Moq.Path.from("source"));
-    for (const name of options.source) sourceTracks.set(name, publisher(broadcast, name));
-    broadcast.announce();
-  }
-
-  const own = local.createBroadcast(Moq.Path.from("peer", self));
-  const ownTracks = new Map(options.tracks.map((name) => [name, publisher(own, name)]));
-  own.announce();
-
-  // Subscribes to a track, handing each object's payload to `handle`, once the relay accepts the
-  // subscription; `stopped` is called if it ends without being cancelled.
-  async function subscriber(
-    path: Moq.Path.Valid,
-    name: string,
-    handle: (payload: Bytes) => unknown,
-    stopped: () => void = () => undefined,
-  ): Promise<Subscription> {
+// Subscribing to tracks the relay announces, refused once the connection has closed.
+function createSubscribe(remote: Moq.Origin.Producer, state: { closed: boolean }): Subscribe {
+  return async (path, name, handle, stopped = () => undefined) => {
     if (state.closed)
       throw new RelayRequestError(`subscribe ${path}/${name}: the connection closed`);
     const request = remote.request(path);
@@ -351,139 +323,204 @@ export async function connectRelay(options: RelayOptions) {
       stopped();
     });
     return { cancel };
+  };
+}
+
+/** What a connection shares with its links and its presence. */
+type RelayContext = {
+  self: KeyId;
+  /** What this peer publishes, and what the relay announces to it, relative to the session. */
+  local: Moq.Origin.Producer;
+  remote: Moq.Origin.Producer;
+  events: ReturnType<typeof emitter<RelayEvents>>;
+  /** The current link to each peer: a link leaves it as it shuts. */
+  links: Map<KeyId, RelayLink>;
+  state: { closed: boolean };
+  subscribe: Subscribe;
+};
+
+type RelayLink = {
+  link: Link;
+  /**
+   * Whether this link's inbox from the peer has been announced, which a withdrawal of an
+   * earlier one, coming late, mustn't close.
+   */
+  seen: { inbox: boolean };
+  /** The other end has announced its side: subscribe, then say this end is listening. */
+  inbound: () => Promise<void>;
+  /** Ends this link's subscriptions and withdraws its broadcast. */
+  shut: () => void;
+};
+
+type LinkStatus = {
+  listening: boolean;
+  subscribed: boolean;
+  heard: boolean;
+  open: boolean;
+  closed: boolean;
+};
+
+/** The parts of a link that subscribing to the other end's side uses. */
+type LinkEnds = {
+  status: LinkStatus;
+  subscriptions: Subscription[];
+  heard: (payload: Bytes) => void;
+  object: (payload: Bytes) => void;
+  post: (payload: Bytes) => void;
+  open: (answer: boolean) => void;
+  shut: () => void;
+};
+
+// This end's side of a link, `inbox/<peer>/<self>`. Its tracks exist before the broadcast is
+// announced, so the other end finds both when it subscribes on seeing it. An earlier link to the
+// peer has withdrawn its broadcast at this path already: a link leaves `links`, which is the only
+// way to a new one, as it shuts.
+function outbox(local: Moq.Origin.Producer, peer: KeyId, self: KeyId) {
+  const broadcast = local.createBroadcast(Moq.Path.from("inbox", peer, self));
+  const ctl = publisher(broadcast, "ctl");
+  const deliver = publisher(broadcast, "deliver");
+  broadcast.announce();
+
+  function close() {
+    ctl.stop();
+    deliver.stop();
+    broadcast.close();
   }
 
-  // A link to `peer` over the inbox broadcasts: this peer publishes `inbox/<peer>/<self>` and
-  // subscribes to `inbox/<self>/<peer>`, each with a `ctl` track for messages and a `deliver`
-  // track for objects. It opens once this end has both subscriptions and has heard from the
-  // other end, which sends nothing before it has both of its own.
-  function relayLink(peer: KeyId) {
-    const handlers = emitter<LinkEvents>({ message: [], object: [], close: [] });
-    const status = {
-      listening: false,
-      subscribed: false,
-      heard: false,
-      open: false,
-      closed: false,
-    };
-    // Whether this link's inbox from the peer has been announced, which a withdrawal of an
-    // earlier one, coming late, mustn't close.
-    const seen = { inbox: false };
-    const subscriptions: Subscription[] = [];
-    // What arrived before the link opened, handed to its handlers in order once it does.
-    const early: Array<() => void> = [];
-    // This end's tracks exist before their broadcast is announced, so the other end finds both
-    // when it subscribes on seeing it. An earlier link to the peer has withdrawn its broadcast at
-    // this path already: a link leaves `links`, which is the only way to a new one, as it shuts.
-    const outbox = local.createBroadcast(Moq.Path.from("inbox", peer, self));
-    const ctl = publisher(outbox, "ctl");
-    const deliver = publisher(outbox, "deliver");
-    outbox.announce();
+  return { ctl, deliver, close };
+}
 
-    const link: Link = {
-      peer,
-      send: (message: Message) => post(encoder.encode(JSON.stringify(message))),
-      deliver: (key, bytes) => {
-        if (status.open && !status.closed) deliver.send(frame(key, bytes));
-      },
-      on: handlers.on,
-      close: () => shut(),
-    };
+// Keeps a subscription, or ends it if the link closed while the relay was answering.
+async function keep(ends: LinkEnds, subscribing: Promise<Subscription>) {
+  const subscription = await subscribing;
+  ends.subscriptions.push(subscription);
+  if (ends.status.closed) subscription.cancel();
+}
 
-    function post(payload: Bytes) {
-      if (!status.closed) ctl.send(payload);
-    }
+// Subscribes to the other end's side of a link, at `path`, then says this end is listening.
+async function listenTo(subscribe: Subscribe, path: Moq.Path.Valid, ends: LinkEnds) {
+  const { status } = ends;
+  if (status.listening || status.closed) return;
+  status.listening = true;
 
-    // Opens the link, then hands on what arrived early. Answers with an open of its own when
-    // this end's first one may have gone before the other end subscribed.
-    function open(answer: boolean) {
-      status.open = true;
-      if (answer) post(OPEN_BYTES);
-      events.emit("link", link);
-      for (const arrival of early.splice(0)) arrival();
-    }
-
-    // Something arrived from the other end, which proves it subscribed to this one: the link
-    // opens if this end has subscribed too. `handOn` is what goes to the handlers, if anything.
-    function arrived(handOn?: () => void) {
-      if (status.closed) return;
-
-      if (status.open) {
-        handOn?.();
-        return;
-      }
-
-      if (handOn !== undefined) early.push(handOn);
-      status.heard = true;
-      if (status.subscribed) open(true);
-    }
-
-    function heard(payload: Bytes) {
-      const value = parsed(payload);
-      if (value === undefined) return;
-      const opening = isRecord(value) && value.type === OPEN;
-      arrived(opening ? undefined : () => handlers.emit("message", value));
-    }
-
-    function object(payload: Bytes) {
-      const framed = unframe(payload);
-      if (framed !== undefined) arrived(() => handlers.emit("object", framed.key, framed.bytes));
-    }
-
-    // Keeps a subscription, or ends it if the link closed while the relay was answering.
-    async function keep(subscribing: Promise<Subscription>) {
-      const subscription = await subscribing;
-      subscriptions.push(subscription);
-      if (status.closed) subscription.cancel();
-    }
-
-    // The other end has announced its side: subscribe, then say this end is listening.
-    async function inbound() {
-      if (status.listening || status.closed) return;
-      status.listening = true;
-      const path = Moq.Path.from("inbox", self, peer);
-
-      // A subscription the relay ends leaves this end deaf to the other: close the link, so the
-      // peer's next announcement opens a new one.
-      try {
-        await Promise.all([
-          keep(subscriber(path, "ctl", heard, shut)),
-          keep(subscriber(path, "deliver", object, shut)),
-        ]);
-      } catch {
-        // The relay refused: the link never opens, and closes with the peer.
-        return;
-      }
-
-      if (status.closed) return;
-      status.subscribed = true;
-      post(OPEN_BYTES);
-      if (status.heard && !status.open) open(false);
-    }
-
-    // Ends this link's subscriptions and withdraws its broadcast.
-    function shut() {
-      if (status.closed) return;
-      status.closed = true;
-      if (links.get(peer)?.link === link) links.delete(peer);
-      early.length = 0;
-      const wasOpen = status.open;
-      status.open = false;
-      if (wasOpen) handlers.emit("close");
-      for (const subscription of subscriptions) subscription.cancel();
-      ctl.stop();
-      deliver.stop();
-      outbox.close();
-    }
-
-    return { link, seen, inbound, shut };
+  // A subscription the relay ends leaves this end deaf to the other: close the link, so the
+  // peer's next announcement opens a new one.
+  try {
+    await Promise.all([
+      keep(ends, subscribe(path, "ctl", ends.heard, ends.shut)),
+      keep(ends, subscribe(path, "deliver", ends.object, ends.shut)),
+    ]);
+  } catch {
+    // The relay refused: the link never opens, and closes with the peer.
+    return;
   }
+
+  if (status.closed) return;
+  status.subscribed = true;
+  ends.post(OPEN_BYTES);
+  if (status.heard && !status.open) ends.open(false);
+}
+
+// A link to `peer` over the inbox broadcasts: this peer publishes `inbox/<peer>/<self>` and
+// subscribes to `inbox/<self>/<peer>`, each with a `ctl` track for messages and a `deliver`
+// track for objects. It opens once this end has both subscriptions and has heard from the
+// other end, which sends nothing before it has both of its own.
+function relayLink(context: RelayContext, peer: KeyId): RelayLink {
+  const { self, links } = context;
+  const handlers = emitter<LinkEvents>({ message: [], object: [], close: [] });
+  const status: LinkStatus = {
+    listening: false,
+    subscribed: false,
+    heard: false,
+    open: false,
+    closed: false,
+  };
+  const seen = { inbox: false };
+  const subscriptions: Subscription[] = [];
+  // What arrived before the link opened, handed to its handlers in order once it does.
+  const early: Array<() => void> = [];
+  const out = outbox(context.local, peer, self);
+
+  const link: Link = {
+    peer,
+    send: (message: Message) => post(encoder.encode(JSON.stringify(message))),
+    deliver: (key, bytes) => {
+      if (status.open && !status.closed) out.deliver.send(frame(key, bytes));
+    },
+    on: handlers.on,
+    close: () => shut(),
+  };
+
+  function post(payload: Bytes) {
+    if (!status.closed) out.ctl.send(payload);
+  }
+
+  // Opens the link, then hands on what arrived early. Answers with an open of its own when
+  // this end's first one may have gone before the other end subscribed.
+  function open(answer: boolean) {
+    status.open = true;
+    if (answer) post(OPEN_BYTES);
+    context.events.emit("link", link);
+    for (const arrival of early.splice(0)) arrival();
+  }
+
+  // Something arrived from the other end, which proves it subscribed to this one: the link
+  // opens if this end has subscribed too. `handOn` is what goes to the handlers, if anything.
+  function arrived(handOn?: () => void) {
+    if (status.closed) return;
+
+    if (status.open) {
+      handOn?.();
+      return;
+    }
+
+    if (handOn !== undefined) early.push(handOn);
+    status.heard = true;
+    if (status.subscribed) open(true);
+  }
+
+  function heard(payload: Bytes) {
+    const value = parsed(payload);
+    if (value === undefined) return;
+    const opening = isRecord(value) && value.type === OPEN;
+    arrived(opening ? undefined : () => handlers.emit("message", value));
+  }
+
+  function object(payload: Bytes) {
+    const framed = unframe(payload);
+    if (framed !== undefined) arrived(() => handlers.emit("object", framed.key, framed.bytes));
+  }
+
+  function shut() {
+    if (status.closed) return;
+    status.closed = true;
+    if (links.get(peer)?.link === link) links.delete(peer);
+    early.length = 0;
+    const wasOpen = status.open;
+    status.open = false;
+    if (wasOpen) handlers.emit("close");
+    for (const subscription of subscriptions) subscription.cancel();
+    out.close();
+  }
+
+  const ends: LinkEnds = { status, subscriptions, heard, object, post, open, shut };
+  const path = Moq.Path.from("inbox", self, peer);
+  return { link, seen, inbound: () => listenTo(context.subscribe, path, ends), shut };
+}
+
+// Presence and links: who is online, from the peers' broadcasts, and a link to each, subscribed
+// once its inbox for this peer is announced too.
+function createPresence(context: RelayContext) {
+  const { self, links, events } = context;
+  const online = new Set<KeyId>();
+  // Peers whose inbox for this peer, `inbox/<self>/<peer>`, is announced.
+  const inboxes = new Set<KeyId>();
 
   function linkTo(peer: KeyId) {
     const existing = links.get(peer);
     if (existing !== undefined) return existing;
 
-    const created = relayLink(peer);
+    const created = relayLink(context, peer);
     links.set(peer, created);
     return created;
   }
@@ -535,13 +572,66 @@ export async function connectRelay(options: RelayOptions) {
 
   // Hands each announcement and withdrawal under `scope` to `handle`, until the connection ends.
   async function follow(scope: string, handle: (update: Moq.Announce.Update) => void) {
-    const updates = remote.announced(Moq.Path.Pattern.parse(scope));
+    const updates = context.remote.announced(Moq.Path.Pattern.parse(scope));
 
     for await (const update of updates) {
-      if (state.closed) return;
+      if (context.state.closed) return;
       call(handle, update);
     }
   }
+
+  /**
+   * Starts presence and links: follows this peer's inboxes and the peers' broadcasts, so
+   * `announce` fires for every peer online, and `link` as each link opens. Called once the
+   * handlers are registered, so none misses an event.
+   */
+  function listen() {
+    void follow(`inbox/${self}/*`, inbox);
+    void follow("peer/*", present);
+  }
+
+  return { listen };
+}
+
+// This peer's tracks under `peer/<self>` and, for the source, its tracks under `source`, each
+// announced with its tracks in place. The source announces `source` before itself, so a peer
+// that subscribes to it on seeing the source online finds it.
+function publishTracks(local: Moq.Origin.Producer, options: RelayOptions) {
+  const sourceTracks = new Map<string, Publisher>();
+
+  if (options.source !== undefined) {
+    const broadcast = local.createBroadcast(Moq.Path.from("source"));
+    for (const name of options.source) sourceTracks.set(name, publisher(broadcast, name));
+    broadcast.announce();
+  }
+
+  const own = local.createBroadcast(Moq.Path.from("peer", options.self));
+  const ownTracks = new Map(options.tracks.map((name) => [name, publisher(own, name)]));
+  own.announce();
+  return { ownTracks, sourceTracks };
+}
+
+/**
+ * Connects to the relay with this peer's tracks announced; `listen` then starts presence and
+ * links. Rejects if the connection fails; a token the relay refuses ends the connection with
+ * `close` instead.
+ */
+export async function connectRelay(options: RelayOptions) {
+  const local = new Moq.Origin.Producer();
+  const remote = new Moq.Origin.Producer();
+  const state = { closed: false };
+  const context: RelayContext = {
+    self: options.self,
+    local,
+    remote,
+    events: emitter<RelayEvents>({ announce: [], unannounce: [], link: [], close: [] }),
+    links: new Map(),
+    state,
+    subscribe: createSubscribe(remote, state),
+  };
+  const { links, events, subscribe: subscriber } = context;
+  const { ownTracks, sourceTracks } = publishTracks(local, options);
+  const presence = createPresence(context);
 
   // Ends everything this peer published or watched.
   function release() {
@@ -555,7 +645,7 @@ export async function connectRelay(options: RelayOptions) {
   async function connect() {
     try {
       return await Moq.Connection.connect({
-        url: sessionUrl(options.url, session, options.token),
+        url: sessionUrl(options.url, options.session, options.token),
         webtransport: { serverCertificateHashes: options.serverCertificateHashes ?? [] },
         websocket: { enabled: false },
         publish: local.consume(),
@@ -580,16 +670,6 @@ export async function connectRelay(options: RelayOptions) {
   }
 
   void ended();
-
-  /**
-   * Starts presence and links: follows this peer's inboxes and the peers' broadcasts, so
-   * `announce` fires for every peer online, and `link` as each link opens. Called once the
-   * handlers are registered, so none misses an event.
-   */
-  function listen() {
-    void follow(`inbox/${self}/*`, inbox);
-    void follow("peer/*", present);
-  }
 
   /**
    * One of this peer's tracks, `peer/<self>/<name>`; each object goes as a group. Its `send`
@@ -639,5 +719,13 @@ export async function connectRelay(options: RelayOptions) {
     await established.closed;
   }
 
-  return { on: events.on, listen, track, sourceTrack, subscribe, subscribeSource, close };
+  return {
+    on: events.on,
+    listen: presence.listen,
+    track,
+    sourceTrack,
+    subscribe,
+    subscribeSource,
+    close,
+  };
 }
