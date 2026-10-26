@@ -13,6 +13,7 @@ import {
   type LaunchOptions,
   type Page,
 } from "playwright";
+import { coverBrowser } from "../../../../tooling/coverage";
 
 // On a machine without a GPU, as CI's Windows and Linux runners, WebGPU renders in software
 // with SNOWY_GPU: `swiftshader` on Linux, Chromium's software Vulkan, with ANGLE and the
@@ -120,7 +121,9 @@ async function confine(browser: Browser) {
 // Options replace the GPU ones: with them, Chromium keeps WebGPU on through
 // --disable-features=WebGPU.
 export async function launch(options: LaunchOptions = {}) {
-  const browser = await chromium.launch({ ...GPU, ...options });
+  const launched = await chromium.launch({ ...GPU, ...options });
+  // With SNOWY_COVERAGE=1, each page it opens collects coverage of src/.
+  const browser = coverBrowser(Bun.fileURLToPath(new URL("../../", import.meta.url)), launched);
   if (PROFILE !== "low-end") return browser;
   // Confinements one after another; close waits for them, so a failure comes out there.
   const confined = { last: Promise.resolve() };

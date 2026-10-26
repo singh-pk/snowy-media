@@ -2,11 +2,10 @@
 // SPDX-License-Identifier: MIT
 //
 // The module worker tooling/run-unit.ts starts for each unit test file, the file's bundle in
-// its URL (`?file=`). Once told to start, which waits for coverage to start when it is
-// collected (tooling/coverage.ts), it imports the file, which settles only once it has loaded,
-// top-level awaits and all, so every test is registered, and posts their names. Then it runs
-// one test each time it is asked, in the order they were registered, and posts its failures:
-// an error or rejection the test leaves behind fails it too.
+// its URL (`?file=`). Once told to start, it imports the file, which settles only once it has
+// loaded, top-level awaits and all, so every test is registered, and posts their names. Then it
+// runs one test each time it is asked, in the order they were registered, and posts its
+// failures: an error or rejection the test leaves behind fails it too.
 
 import { registry } from "./unit";
 
