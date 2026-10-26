@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: MIT
 //
-// Maps V8's block coverage of a bundle back to the lines of a package's `src/` files, through
+// Maps V8's block coverage of a bundle back to the source positions of a package's `src/` files, through
 // the bundle's source map, and finds which lines of those files hold code at all, from a build
 // of each one on its own (a test's bundle leaves out what it doesn't import).
 
@@ -21,10 +21,13 @@ export interface ScriptCoverage {
   functions: Array<{ ranges: Range[] }>;
 }
 
-/** Per `src/` file, relative to the package: the lines that ran. */
-export type Ran = Record<string, number[]>;
+/**
+ * Per `src/` file, relative to the package: each source position (`line:column`) that code
+ * maps to, and whether it ran.
+ */
+export type Ran = Record<string, Record<string, boolean>>;
 
-/** Per `src/` file: the lines that hold code, and those of them that ran. */
+/** Per `src/` file: the lines that hold code, and those of them that ran in full. */
 type Report = Record<string, { lines: number; covered: number; uncovered: number[] }>;
 
 const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -47,7 +50,7 @@ function vlqs(segment: string) {
   return values;
 }
 
-/** Each mapped position of a source map: the generated line and column, and the source line. */
+/** Each mapped position of a source map: the generated line and column, and the source's. */
 function* positions(mappings: string) {
   const at = { source: 0, line: 0, column: 0 };
 
@@ -66,7 +69,7 @@ function* positions(mappings: string) {
       at.line += sourceLine;
       at.column += sourceColumn;
       if (repeats) continue;
-      yield { generatedLine, column, source: at.source, line: at.line + 1 };
+      yield { generatedLine, column, source: at.source, line: at.line + 1, at: at.column };
     }
   }
 }
@@ -96,8 +99,8 @@ function srcFile(dir: string, out: string, source: string) {
 }
 
 /**
- * The lines of each `src/` file of the package at `dir` that code in the bundle `js` maps to,
- * with whether it ran, by `count` at each offset of the bundle.
+ * The source positions of each `src/` file of the package at `dir` that code in the bundle `js`
+ * maps to, as `line:column`, with whether it ran, by `count` at each offset of the bundle.
  */
 export async function mappedLines(dir: string, js: string, count?: (at: number) => number) {
   const map: SourceMap = await Bun.file(`${js}.map`).json();
@@ -111,15 +114,16 @@ export async function mappedLines(dir: string, js: string, count?: (at: number) 
 
   const out = outdirOf(dir, js, map.sources);
   const files = map.sources.map((source) => srcFile(dir, out, source));
-  const lines = new Map<string, Map<number, boolean>>();
+  const lines = new Map<string, Map<string, boolean>>();
 
   for (const p of positions(map.mappings)) {
     const file = files[p.source];
     if (!file) continue;
     const ran = (count?.((lineStarts[p.generatedLine] ?? 0) + p.column) ?? 0) > 0;
-    const of = lines.get(file) ?? new Map<number, boolean>();
+    const of = lines.get(file) ?? new Map<string, boolean>();
     lines.set(file, of);
-    of.set(p.line, (of.get(p.line) ?? false) || ran);
+    const key = `${p.line}:${p.at}`;
+    of.set(key, (of.get(key) ?? false) || ran);
   }
 
   return lines;
@@ -172,7 +176,8 @@ async function codeLines(dir: string) {
     for (const entry of entries) {
       const js = join(out, entry.replace(/\.ts$/, ".js"));
       const mapped = await mappedLines(dir, js);
-      lines.set(entry, new Set(mapped.get(entry)?.keys()));
+      const keys = [...(mapped.get(entry)?.keys() ?? [])];
+      lines.set(entry, new Set(keys.map((key) => Number.parseInt(key, 10))));
     }
 
     return lines;
@@ -181,7 +186,11 @@ async function codeLines(dir: string) {
   }
 }
 
-/** The report of each `src/` file of the package at `dir`, from the lines that ran. */
+/**
+ * The report of each `src/` file of the package at `dir`, from the positions that ran in every
+ * take. A line is covered only if every position on it ran, in one take or another: `if (x) throw
+ * e` with the throw never reached is not.
+ */
 export async function report(dir: string, ran: Ran) {
   const code = await codeLines(dir);
   // Were Bun to name sources some other way, nothing would map, and every file would pass.
@@ -190,8 +199,14 @@ export async function report(dir: string, ran: Ran) {
   const result: Report = {};
 
   for (const [file, lines] of code) {
-    const covered = new Set(ran[file]);
-    const uncovered = [...lines].filter((line) => !covered.has(line)).toSorted((a, b) => a - b);
+    const all = new Map<number, boolean>();
+
+    for (const [key, wasRun] of Object.entries(ran[file] ?? {})) {
+      const line = Number.parseInt(key, 10);
+      all.set(line, (all.get(line) ?? true) && wasRun);
+    }
+
+    const uncovered = [...lines].filter((line) => all.get(line) !== true).toSorted((a, b) => a - b);
     result[file] = { lines: lines.size, covered: lines.size - uncovered.length, uncovered };
   }
 

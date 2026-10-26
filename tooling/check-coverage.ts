@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Holds a package's line coverage to its floors: each `src/` file's share of lines its tests
-// run (tooling/coverage.ts, written by `SNOWY_COVERAGE=1 bun test`) may not fall below
+// run in full (tooling/coverage-map.ts; written by `SNOWY_COVERAGE=1 bun test`) may not fall below
 // what `coverage-floor.json` lists for it, in whole percent. A file without a floor fails, as
 // does a floor for a file that is gone. Coverage above a floor is only pointed out: `--update`
 // raises the floors to it, never lowering one, adds new files at their coverage and drops the
@@ -48,8 +48,12 @@ const run = `${newest.split("-")[0]}-`;
 const ran: Ran = {};
 
 for (const take of takes.filter((t) => t.startsWith(run))) {
-  const lines: Ran = await Bun.file(join(ranDir, take)).json();
-  for (const [file, of] of Object.entries(lines)) ran[file] = [...(ran[file] ?? []), ...of];
+  const positions: Ran = await Bun.file(join(ranDir, take)).json();
+
+  for (const [file, of] of Object.entries(positions)) {
+    const all = (ran[file] ??= {});
+    for (const [key, wasRun] of Object.entries(of)) all[key] = (all[key] ?? false) || wasRun;
+  }
 }
 
 await rm(ranDir, { recursive: true, force: true });

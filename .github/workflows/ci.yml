@@ -182,12 +182,15 @@ jobs:
       - run: bun run build
       # --with-deps installs the libraries Chromium needs on Linux, and nothing elsewhere.
       - run: bunx playwright install --with-deps chromium
-      # Line coverage of every test, held to coverage-floor.json (tooling/coverage.ts); not the
-      # benchmarks', which it would slow.
+      # Line coverage of every test, held to coverage-floor.json (tooling/coverage.ts), on the
+      # macOS runner, whose GPU decodes and imports what the software ones cannot; not the
+      # benchmarks', which it would slow. The other runners test the code as it ships, without
+      # the coverage hooks in every thread.
       - run: bun run test
         env:
-          SNOWY_COVERAGE: "1"
-      - run: bun ../../tooling/check-coverage.ts engine
+          SNOWY_COVERAGE: ${{ runner.os == 'macOS' && '1' || '' }}
+      - if: runner.os == 'macOS'
+        run: bun ../../tooling/check-coverage.ts engine
       # For reading only: shared runners are too noisy to fail on (packages/engine/bench).
       - run: bun run bench --runs 5 >> "$GITHUB_STEP_SUMMARY"
 

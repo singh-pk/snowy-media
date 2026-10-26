@@ -28,7 +28,7 @@ const GO = "globalThis.__snowyCovered = true; globalThis.__snowyGo?.();";
 interface Params {
   sessionId?: string;
   message?: string;
-  targetInfo?: { type: string };
+  targetInfo?: { type: string; url?: string };
 }
 
 interface Reply {
@@ -110,11 +110,12 @@ function threadSession(parent: Session, sessionId: string) {
 }
 
 /**
- * Where the lines each take ran go, for the package at `dir`: a file per take, so the takes of
- * every page and browser add up without any state shared between them.
+ * Where the positions each take mapped and ran go, for the package at `dir`: a file per take, so
+ * the takes of every page and browser add up without any state shared between them. A line is
+ * judged only in `report`, once every take is in, since a take may end between two branches of it.
  */
 async function save(dir: string, scripts: ScriptCoverage[]) {
-  const ran = new Map<string, Set<number>>();
+  const ran: Ran = {};
 
   for (const script of scripts) {
     // A script made by `eval` or `new Function` has no URL, and no bundle to map it through.
@@ -124,17 +125,15 @@ async function save(dir: string, scripts: ScriptCoverage[]) {
     if (!existsSync(`${js}.map`)) continue;
     const mapped = await mappedLines(dir, js, counter(script));
 
-    for (const [file, lines] of mapped) {
-      const of = ran.get(file) ?? new Set<number>();
-      ran.set(file, of);
-      for (const [line, wasRun] of lines) if (wasRun) of.add(line);
+    for (const [file, positions] of mapped) {
+      const of = (ran[file] ??= {});
+      for (const [key, wasRun] of positions) of[key] = (of[key] ?? false) || wasRun;
     }
   }
 
-  if (ran.size === 0) return;
-  const result: Ran = Object.fromEntries([...ran].map(([file, lines]) => [file, [...lines]]));
+  if (Object.keys(ran).length === 0) return;
   const name = `${process.pid}-${crypto.randomUUID()}.json`;
-  await Bun.write(join(dir, "coverage/ran", name), JSON.stringify(result));
+  await Bun.write(join(dir, "coverage/ran", name), JSON.stringify(ran));
 }
 
 async function resume(session: Session) {
@@ -142,6 +141,31 @@ async function resume(session: Session) {
     await session.send("Debugger.resume");
   } catch {
     // Ended while paused: there is nothing left to let go.
+  }
+}
+
+// The coverage of every thread in `live` since the last take.
+async function collect(live: Set<Session>) {
+  const taken = await Promise.all(
+    [...live].map(async (session) => {
+      try {
+        const reply = await session.send("Profiler.takePreciseCoverage");
+        return reply.result ?? [];
+      } catch {
+        // A thread that ended meanwhile took what it ran with it.
+        return [];
+      }
+    }),
+  );
+  return taken.flat();
+}
+
+// The coverage of every thread in `live`, taken while `session` is paused, which is then let go.
+async function collectPaused(live: Set<Session>, session: Session) {
+  try {
+    return await collect(live);
+  } finally {
+    await resume(session);
   }
 }
 
@@ -173,28 +197,27 @@ function createWatch(dir: string, root: Session) {
   const live = new Set<Session>();
   const starts = createStarts();
 
-  // Coverage of every live thread since the last take, saved.
+  // Saves still being written, of takes that let their thread go first.
+  const saving = new Set<Promise<void>>();
+
+  // Coverage of every live thread since the last take, saved, with every save before it.
   async function take() {
-    const taken = await Promise.all(
-      [...live].map(async (session) => {
-        try {
-          const reply = await session.send("Profiler.takePreciseCoverage");
-          return reply.result ?? [];
-        } catch {
-          // A thread that ended meanwhile took what it ran with it.
-          return [];
-        }
-      }),
-    );
-    await save(dir, taken.flat());
+    const scripts = await collect(live);
+    await save(dir, scripts);
+    await Promise.all(saving);
   }
 
-  // Code paused in `session` to end a worker: taken first, then let go.
+  // Code paused in `session` to end a worker: taken, then let go before it is saved, since
+  // mapping a take to source lines would hold the thread, and the playback it drives, still.
   async function paused(session: Session) {
+    const scripts = await collectPaused(live, session);
+    const saved = save(dir, scripts);
+    saving.add(saved);
+
     try {
-      await take();
+      await saved;
     } finally {
-      await resume(session);
+      saving.delete(saved);
     }
   }
 
@@ -206,10 +229,20 @@ function createWatch(dir: string, root: Session) {
     try {
       // A worklet starts no threads of its own, and has no Target domain to say so.
       await cover(thread, attached.targetInfo?.type === "worker");
+    } catch (error) {
+      // A thread that ended or failed before its coverage started reports nothing, which
+      // lowers coverage; said here, since the floor that then fails may be another file's.
+      console.warn(
+        `coverage: none from ${attached.targetInfo?.type} ${attached.targetInfo?.url}:`,
+        error,
+      );
+    }
+
+    try {
+      // Let go even if its coverage failed to start, so the thread runs rather than hangs.
       await thread.send("Runtime.evaluate", { expression: GO });
     } catch {
-      // A thread that ended or failed before its coverage started reports nothing, which
-      // only lowers coverage; a worklet waiting on it is let go all the same.
+      // A thread that ended meanwhile has nothing to let go.
     } finally {
       starts.started(attached.targetInfo?.type ?? "");
     }

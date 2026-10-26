@@ -24,7 +24,7 @@ Run from the root for every package, or inside `packages/<name>` for one.
 | Browser tests (Chromium) | `bun test` |
 | Format everything (root only) | `bun run format` |
 | All static checks, CI's `check` job (root only) | `bun run check` |
-| Line coverage of the tests, held to the package's `coverage-floor.json` | `SNOWY_COVERAGE=1 bun test` in the package, then `bun tooling/check-coverage.ts <name>` from the root |
+| Line coverage of the tests, held to the package's `coverage-floor.json` (engine's on macOS, where CI measures it) | `SNOWY_COVERAGE=1 bun test` in the package, then `bun tooling/check-coverage.ts <name>` from the root |
 
 Run `bun run check` before every commit; the hook runs it anyway.
 
@@ -38,7 +38,7 @@ Run `bun run check` before every commit; the hook runs it anyway.
 | `tooling/markdownlint-rules/` | markdown lint rules, such as `no-slop` (plain prose) |
 | `tooling/check-duplication.ts` | the check that no block of code is repeated (rule 7) |
 | `tooling/test-server.ts`, `tooling/run-unit.ts`, `tooling/unit.ts`, `tooling/unit-worker.ts` | serving a package to Chromium for its tests and benchmarks, and running unit tests there (rule 2) |
-| `tooling/coverage.ts`, `tooling/coverage-map.ts`, `tooling/coverage-worker.ts`, `tooling/check-coverage.ts` | line coverage of `src/` from every page, worker and worklet the tests run, mapped through source maps, and the per-file floors it may not fall below (rule 11) |
+| `tooling/coverage.ts`, `tooling/coverage-map.ts`, `tooling/coverage-worker.ts`, `tooling/check-coverage.ts`, `tooling/check-floors.ts` | line coverage of `src/` from every page, worker and worklet the tests run, mapped through source maps, and the per-file floors it may not fall below (rule 11) |
 | `tooling/oxlint-dist.json` | the lint CI runs on FFmpeg's built modules: no `eval`, `new Function` or `javascript:` URL in what Emscripten emits (rule 7) |
 | `tooling/lint-edited.ts` | the Claude Code hook that lints and format-checks each file an agent edits (`.claude/settings.json`) |
 | `scripts/` | repository scripts, such as `settings.ts`, which applies `.github/settings.yml` |
@@ -61,7 +61,7 @@ Shared configuration lives once, at the root: `tsconfig.base.json`, `.oxlintrc.j
 8. **No internal notes in the repository.** No plans, roadmaps, TODO lists, meeting notes or agent scratch files. Documents say what is there, plainly: `bun run lint:md` reports marketing words (`robust`, `seamless`, `powerful`), plan markers (`TODO:`, `next steps`, `Phase 2`) and emoji in headings. A package's README is at most 150 lines, draws the package in a ` ```mermaid ` diagram and ends with its licence; a new `src/` file gets a row in the package's Map, saying what it is for (`bun run lint:structure`). Rationale for the current design goes in the package's `docs/`; user-visible changes go in its `CHANGELOG.md` under *Unreleased*.
 9. **Licences have boundaries.** Every file carries the licence of where it lives ([LICENSE.md](LICENSE.md)): `LicenseRef-Snowy-License-1.0` in every package except `packages/ffmpeg`, new packages included; `LGPL-2.1-or-later` in `packages/ffmpeg`; `MIT` for tooling, configuration and root documents. A new package sets `"license": "SEE LICENSE IN LICENSE"` and its release copies the licence text into `LICENSE`. Never move code across a boundary, such as Snowy-licensed code into tooling or FFmpeg's C into another package. Third-party code keeps its own licence and SPDX header and is listed in the package's NOTICE. Changing a licence, `LICENSE.md`, `TRADEMARKS.md` or `CLA.md` is the maintainer's decision, never an agent's.
 10. **Packages are headless.** A package is framework-agnostic and unstyled: no CSS, no UI framework or component library, and nothing it adds to the DOM; it draws only into what the app hands it, such as a canvas. It carries no product policy either: no telemetry or analytics, no accounts, billing or usage limits, and no call to a service Snowy runs. Those belong to Snowy's apps and their server. Where an app needs a say, the package takes a neutral extension point, such as a callback, that knows nothing of the app's policy and allows everything when the app passes none. A package never limits quality: no cap on resolution, bitrate, frame rate, length or exports, and no watermark.
-11. **Tests are honest.** An expected value comes from a source independent of the code under test, never from that code. A tolerance is the measured spread of the setup it applies to, with its reason in a comment, and is never widened so that one runner passes. A test that could see nothing asserts how much it saw, such as a minimum number of reads, so it cannot pass vacuously. A test waits on an event, never a sleep. Each `src/` file's line coverage by the tests, unit and page, in every worker and worklet they start, may not fall below its floor in the package's `coverage-floor.json`, which CI checks; `bun tooling/check-coverage.ts <name> --update` raises the floors, adds new files and drops gone ones, and lowering a floor is a hand edit with its reason in the pull request.
+11. **Tests are honest.** An expected value comes from a source independent of the code under test, never from that code. A tolerance is the measured spread of the setup it applies to, with its reason in a comment, and is never widened so that one runner passes. A test that could see nothing asserts how much it saw, such as a minimum number of reads, so it cannot pass vacuously. A test waits on an event, never a sleep. Each `src/` file's line coverage by the tests, unit and page, in every worker and worklet they start, may not fall below its floor in the package's `coverage-floor.json`, which CI checks; a line counts only if all of its code ran, so `if (x) throw e` with the throw never reached does not, nor do the header and closing lines of a block that never ran. `bun tooling/check-coverage.ts <name> --update` raises the floors, adds new files and drops gone ones. Lowering a floor is a hand edit with its reason in the pull request and the `lowers-coverage` label, without which CI fails it (`tooling/check-floors.ts`).
 
 ## Standards
 
@@ -72,7 +72,7 @@ What every change is held to, and what holds it. A reviewer doesn't repeat what 
 | One way of writing code: formatting, the house rules, sizes, no repeated blocks (rule 7) | `bun run check` |
 | Each `src/` file says its job in the package's Map; a README is short, drawn and ends with its licence (rule 8) | `bun run lint:structure` |
 | Documents say what is there, without marketing words or plans (rule 8) | `bun run lint:md` |
-| Tests run the code they claim to: per-file coverage floors (rule 11) | `tooling/check-coverage.ts`, in CI |
+| Tests run the code they claim to: per-file coverage floors (rule 11) | `tooling/check-coverage.ts` and `tooling/check-floors.ts`, in CI |
 | A name says what a file or function holds or does: no `utils`, `helpers`, `manager`, `misc` or `common` | review |
 | A file has one job, which its Map row names | review |
 | A comment says why, never what the next line does or how the code came to be | review |
