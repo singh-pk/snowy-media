@@ -105,3 +105,18 @@ test("keys inserted together are in order, between their neighbours", () => {
   expectAscending(["a0", ...keys, "a1"]);
   expect(Math.max(...keys.map((key) => key.length))).toBeLessThan(6);
 });
+
+test("keys at the edges of an integer part, of a fraction and of the key space", () => {
+  // The integer after Yzz is Z0, and the one before b00 is az, each one digit shorter.
+  expect(keyBetween("Yzz")).toBe("Z0");
+  expect(keyBetween(undefined, "b00")).toBe("az");
+  // Before a key with a fraction comes its integer alone.
+  expect(keyBetween(undefined, "a0V")).toBe("a0");
+  // V and W are adjacent digits, so between a0V and a0W5 is a0W.
+  expect(keyBetween("a0V", "a0W5")).toBe("a0W");
+  // Past the largest integer, keys go on as fractions of it.
+  const largest = "z".repeat(27);
+  expect(keyBetween(largest)).toBe(`${largest}V`);
+  expect(() => keysBetween("a0", "a1", -1)).toThrow(RangeError);
+  expect(() => keysBetween("a0", "a1", 1.5)).toThrow(RangeError);
+});

@@ -62,6 +62,18 @@ export function setUp() {
   return { project, apply };
 }
 
+/** A second sequence, Inner, and a video role of it: the first two operations of batch `seq`. */
+export const innerSequence = (seq: number): Op[] => [
+  {
+    op: "sequence.add",
+    sequence: { name: "Inner", rate: [24, 1], width: 1920, height: 1080, sampleRate: 48_000 },
+  },
+  {
+    op: "role.add",
+    role: { sequence: id(seq, 0), name: "V", kind: "video", color: "#000000", order: "a0" },
+  },
+];
+
 export function clip(changes: Partial<Extract<ItemRecord, { kind: "clip" }>> = {}): Op {
   return {
     op: "item.add",

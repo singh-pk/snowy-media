@@ -98,7 +98,7 @@ function increment(integer: string) {
   return next + digits.join("");
 }
 
-// The integer before `integer`, or undefined past the smallest.
+// The integer before `integer`, which isn't the smallest.
 function decrement(integer: string) {
   const head = integer.charAt(0);
   const digits = integer.slice(1).split("");
@@ -115,7 +115,6 @@ function decrement(integer: string) {
   }
 
   if (head === "a") return `Z${LAST}`;
-  if (head === "A") return undefined;
   const next = String.fromCharCode(head.charCodeAt(0) - 1);
 
   if (next < "Z") digits.push(LAST);
@@ -153,7 +152,6 @@ function keyBefore(after: PositionKey) {
   if (integer === SMALLEST) return integer + midpoint("", fraction);
   if (fraction !== "") return integer;
   const previous = decrement(integer);
-  if (previous === undefined) throw new RangeError(`no position key before ${after}`);
   // The smallest integer isn't a key on its own; a fraction after it is, and still sorts first.
   return previous === SMALLEST ? previous + midpoint("", undefined) : previous;
 }

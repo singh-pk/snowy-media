@@ -8,6 +8,7 @@
 
 import { expect, test } from "../../../tooling/unit";
 import { createBranches, type Changes } from "../src/branches";
+import { entries } from "../src/entry";
 import { createFolder, openFolder, SEGMENT_BYTES, type Write } from "../src/folder";
 import { author, fail, rename } from "./support/history";
 import type { Op } from "./support/project";
@@ -185,4 +186,73 @@ test("a batch is written once, however often it is handed over", async () => {
   const { batch, hash } = await a.commit([rename("One")], "0000000000000001");
   expect(folder.batch(batch, hash)?.path).toBe(`logs/${a.key}/1`);
   expect(folder.batch(batch, hash)).toBe(undefined);
+});
+
+// A record as a segment holds it: its length, then its bytes.
+function framed(bytes: Uint8Array) {
+  const record = new Uint8Array(4 + bytes.byteLength);
+  new DataView(record.buffer).setUint32(0, bytes.byteLength);
+  record.set(bytes, 4);
+  return record;
+}
+
+test("every kind of damage is reported by its file, and the rest of the project opens", async () => {
+  const { a, b, disk, edit, reopen, branches } = await setUp();
+  await edit(a, "main", [rename("One")]);
+  await edit(b, "main", [rename("Two")]);
+
+  const grow = (path: string, more: Uint8Array) => {
+    const was = disk.files.get(path) ?? fail();
+    const grown = new Uint8Array(was.byteLength + more.byteLength);
+    grown.set(was);
+    grown.set(more, was.byteLength);
+    disk.files.set(path, grown);
+  };
+
+  // Two bytes, too few for a record's length.
+  grow(`logs/${a.key}/1`, new Uint8Array(2));
+  // A whole record that isn't a batch.
+  grow(`logs/${b.key}/1`, framed(new Uint8Array([0xff])));
+  // A file that isn't a segment, which is passed over, not reported.
+  disk.files.set(`logs/${b.key}/notes`, new Uint8Array([1]));
+  // A batch whose author's batch before it is missing.
+  const c = await author();
+  await c.commit([rename("Lost")], "0000000000000001");
+  const unchained = await c.commit([rename("Three")], "0000000000000002");
+  const written = createFolder().batch(unchained.batch, unchained.hash) ?? fail();
+  disk.files.set(written.path, written.bytes);
+  // An entry not signed by the sequencer.
+  const head = branches().history("main")?.head() ?? fail();
+  const forged = await entries.sign(b.peer.privateKey, {
+    branch: "main",
+    n: head.n + 1,
+    term: 1,
+    prev: head.hash,
+    batch: { author: c.key, seq: 2, hash: unchained.hash },
+  });
+  disk.files.set(`history/main/${head.n + 1}`, framed(entries.encode(forged)));
+
+  const { unreadable } = await reopen();
+  expect(unreadable.toSorted()).toEqual(
+    [
+      `history/main/${head.n + 1}`,
+      `logs/${a.key}/1`,
+      `logs/${b.key}/1`,
+      `logs/${c.key}/2`,
+    ].toSorted(),
+  );
+  const main = branches().history("main") ?? fail();
+  expect(main.entries()).toHaveLength(2);
+  expect(main.document().name()).toBe("Two");
+});
+
+test("an entry is written once, however often it is handed over", async () => {
+  const a = await author();
+  const branches = createBranches({ sequencer: a.key });
+  const folder = createFolder();
+  const { batch, hash } = await a.commit([rename("One")], "0000000000000001");
+  await branches.pend(batch, hash);
+  const { changes } = await branches.sequence(a.peer);
+  expect(folder.changes(changes).map(({ path }) => path)).toEqual(["history/main/1"]);
+  expect(folder.changes(changes)).toEqual([]);
 });

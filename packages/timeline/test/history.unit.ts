@@ -13,7 +13,15 @@ import { createHistory } from "../src/history";
 import { createProject } from "../src/project";
 import { InvalidError } from "../src/schema";
 import { asset, clip, id, sequence, setUp, video, type Op } from "./support/project";
-import { author, fail, generate, rename, sequenceAdd, sequencedBy } from "./support/history";
+import {
+  author,
+  fail,
+  generate,
+  pendEach,
+  rename,
+  sequenceAdd,
+  sequencedBy,
+} from "./support/history";
 import { rejection } from "./support/rejection";
 
 test("an entry and a refusal sign, verify and read back from their bytes", async () => {
@@ -256,10 +264,7 @@ test("an entry whose author couldn't see another's change to the same leaf is co
     [b, set("name", "B"), "0000000000050000"],
   ];
 
-  for (const [by, op, hlc] of commits) {
-    const { batch, hash } = await by.commit([op], hlc, base);
-    await history.pend(batch, hash);
-  }
+  await pendEach(history, commits, base);
 
   const { change } = await history.sequence(a.peer);
   expect(change.entered.map(({ concurrent }) => concurrent)).toEqual([false, false, false, true]);

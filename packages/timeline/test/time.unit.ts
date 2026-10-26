@@ -13,6 +13,7 @@ import {
   frameFlicks,
   snapToFrame,
   sourceToFlicks,
+  sourceToFlicksDown,
   toFlicks,
 } from "../src/time";
 
@@ -117,4 +118,12 @@ test("video snaps down to the frame boundary at or before it", () => {
   expect(snapToFrame(frame, [24, 1])).toBe(frame);
   expect(snapToFrame(frame * 2 + 1, [24, 1])).toBe(frame * 2);
   expect(snapToFrame(-1, [24, 1])).toBe(-frame);
+});
+
+test("how long a stream plays, rounded down, is the same played backwards, and nothing at no speed", () => {
+  // A second at 11 times speed is 705,600,000 / 11 flicks, which isn't whole.
+  const down = Math.floor(FLICKS_PER_SECOND / 11);
+  expect(sourceToFlicksDown(1, [1, 1], [11, 1])).toBe(down);
+  expect(sourceToFlicksDown(1, [1, 1], [-11, 1])).toBe(down);
+  expect(() => sourceToFlicksDown(1, [1, 1], [0, 1])).toThrow("speed is zero");
 });

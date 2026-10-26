@@ -71,6 +71,18 @@ export function sequencedBy(sequencer: Awaited<ReturnType<typeof author>>) {
   return { history, run };
 }
 
+/** Commits each operation as a batch of its author's, made on `base`, and pends it. */
+export async function pendEach(
+  history: ReturnType<typeof createHistory>,
+  commits: Array<[Awaited<ReturnType<typeof author>>, Op, string]>,
+  base: EntryRef,
+) {
+  for (const [by, op, hlc] of commits) {
+    const { batch, hash } = await by.commit([op], hlc, base);
+    await history.pend(batch, hash);
+  }
+}
+
 export function fail(): never {
   throw new Error("missing");
 }
