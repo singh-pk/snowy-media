@@ -15,6 +15,7 @@
 import { $ } from "bun";
 import { mkdir, rm } from "node:fs/promises";
 
+// jscpd:ignore-start: mirrors packages/engine/scripts/release.ts, since packages share no code
 const tag = process.argv[2] ?? "";
 const root = new URL("../", import.meta.url).pathname;
 const pkg = await Bun.file(`${root}package.json`).json();
@@ -24,6 +25,7 @@ if (tag !== `${pkg.name}@${version}`) throw new Error(`tag "${tag}" is not ${pkg
 const changelog = await Bun.file(`${root}CHANGELOG.md`).text();
 const section = changelog.split(/^## /m).find((s) => s.startsWith(`[${version}]`));
 if (!section) throw new Error(`CHANGELOG.md has no [${version}] section`);
+// jscpd:ignore-end
 
 const out = `${root}release/`;
 const name = `snowy-media-ffmpeg-${version}`;
@@ -58,6 +60,7 @@ const expected = [
     [`${m}.js`, `${m}.wasm`, "index.js", "index.d.ts"].map((f) => `dist/${m}/${f}`),
   ),
 ].toSorted();
+// jscpd:ignore-start: mirrors packages/engine/scripts/release.ts, since packages share no code
 await $`bun pm pack --quiet --destination ${out}`.cwd(root);
 const listing = await $`tar -tzf ${out}${name}.tgz`.text();
 const packed = listing
@@ -71,6 +74,7 @@ if (packed.join("\n") !== expected.join("\n")) {
     `the npm package holds\n${packed.join("\n")}\nbut should hold\n${expected.join("\n")}`,
   );
 }
+// jscpd:ignore-end
 
 await $`git -C ${root} archive HEAD | tar -xf - -C ${stage}`;
 await $`docker buildx build --target source --output type=local,dest=${stage}third_party ${root}`;

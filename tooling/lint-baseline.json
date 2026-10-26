@@ -2,14 +2,10 @@
   "duplication": {
     "packages/engine/bench/run.ts": 1,
     "packages/engine/bench/run.ts and packages/engine/test/play.test.ts": 1,
-    "packages/engine/scripts/release.ts and packages/ffmpeg/scripts/release.ts": 2,
     "packages/engine/test/play.test.ts": 3,
     "packages/engine/test/play.test.ts and packages/engine/test/seek.test.ts": 3,
     "packages/engine/test/render.test.ts": 3,
     "packages/engine/test/seek.test.ts": 2,
-    "packages/ffmpeg/bench/decode.ts and packages/ffmpeg/bench/video.ts": 1,
-    "packages/ffmpeg/bench/decode.worker.js and packages/ffmpeg/bench/video.worker.js": 3,
-    "packages/ffmpeg/bench/decode.worker.js and packages/ffmpeg/test/demux.worker.js": 1,
     "packages/sync/test/catalog.unit.ts and packages/sync/test/control.unit.ts": 1,
     "packages/sync/test/chat-store.unit.ts": 1
   },
@@ -28,7 +24,6 @@
     "packages/engine/src/wasm-video.ts": 2,
     "packages/engine/test/seek.test.ts": 1,
     "packages/engine/test/support/page.ts": 1,
-    "packages/ffmpeg/test/demux.worker.js": 2,
     "packages/sync/src/chat-holdings.ts": 1,
     "packages/sync/src/chat-sender.ts": 1,
     "packages/sync/src/chat-session.ts": 1,
@@ -49,8 +44,6 @@
     "packages/engine/src/wasm-video.ts": 1,
     "packages/engine/test/support/frame-id.ts": 1,
     "packages/engine/test/support/page.ts": 1,
-    "packages/ffmpeg/bench/video.worker.js": 1,
-    "packages/ffmpeg/test/support/decoder.js": 2,
     "packages/timeline/src/plan.ts": 4,
     "packages/timeline/src/project.ts": 1,
     "packages/timeline/test/support/history.ts": 1
