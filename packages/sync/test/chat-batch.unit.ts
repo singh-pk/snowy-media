@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // The chat batch (src/chat-batch.ts), in Chromium: a batch round-trips with its checkpoint, proves
-// itself, and is rejected when it doesn't open, is moved to another key, or holds messages its
-// key or checkpoint doesn't name.
+// itself, and is rejected when it doesn't open, isn't JSON, is moved to another key, or holds
+// messages its key or checkpoint doesn't name.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -70,23 +70,26 @@ test("a batch is sealed only with a checkpoint at its last message, by its autho
   for (const error of errors) expect(error).toBeInstanceOf(RangeError);
 });
 
-test("a batch doesn't open under another key, another content key, or altered", async () => {
+test("a batch doesn't open under another key, another content key, altered, or as anything but JSON", async () => {
   const { key, bytes } = await encodeBatch(alice.pair, content, [m1, m2]);
   const otherContent = await contentKey(crypto.getRandomValues(new Uint8Array(32)), "session");
   const altered = bytes.slice();
   altered[20] = (altered[20] ?? 0) ^ 1;
+  const notJson = await seal(content, key, encoder.encode("{"));
   const errors = await Promise.all([
     invalid(batchKey(alice.id, 2, 3), bytes),
     rejection(decodeBatch(otherContent, key, bytes)),
     invalid(key, altered),
     invalid("chat/nobody/1-2", bytes),
     invalid(`chat/${alice.id}/01-2`, bytes),
+    invalid(key, notJson),
   ]);
   expect(errors[0]).toBe("Invalid chat batch: doesn't open under the content key");
   expect(errors[1]).toBeInstanceOf(InvalidBatchError);
   expect(errors[2]).toBe("Invalid chat batch: doesn't open under the content key");
   expect(errors[3]).toBe("Invalid chat batch: not a batch key: chat/nobody/1-2");
   expect(errors[4]).toBe(`Invalid chat batch: not a batch key: chat/${alice.id}/01-2`);
+  expect(errors[5]).toBe("Invalid chat batch: not UTF-8 JSON");
 });
 
 test("a batch whose messages or checkpoint don't match its key, or don't chain, is rejected", async () => {

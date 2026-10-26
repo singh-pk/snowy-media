@@ -7,7 +7,8 @@
 // evicted chunk is reported and gone after reopening; and on reopening, a file that isn't a
 // chunk's, or an empty one a crash left, is removed. A chunk being stored isn't evicted, and one
 // being evicted isn't stored; one read while evicted reads whole or not at all; a failed write
-// stores nothing and leaves no file; and a failed evict keeps the chunk.
+// stores nothing and leaves no file, or an empty one that reopening removes; and a failed evict
+// keeps the chunk.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -353,4 +354,26 @@ test("an evict that fails keeps the chunk", async () => {
   expect(evicted).toEqual([]);
   const kept = await files(real, 0);
   expect(kept).toEqual(["0"]);
+});
+
+test("a failed write whose file can't be removed leaves it empty, and reopening removes it", async () => {
+  const { wrapped, real, faults } = await faulty();
+  const { store } = await open(wrapped);
+  faults.write = true;
+  faults.remove = true;
+  const failed = await rejection(store.put(v0));
+  expect(failed).toEqual(new DOMException("injected", "QuotaExceededError"));
+  expect(store.has({ track: 0, index: 0 })).toBe(false);
+  const left = await files(real, 0);
+  expect(left).toEqual(["0"]);
+  const media = await real.getDirectoryHandle("media");
+  const track = await media.getDirectoryHandle("0");
+  const handle = await track.getFileHandle("0");
+  const file = await handle.getFile();
+  expect(file.size).toBe(0);
+
+  const reopened = await open(real);
+  expect(reopened.store.has({ track: 0, index: 0 })).toBe(false);
+  const after = await files(real, 0);
+  expect(after).toEqual([]);
 });

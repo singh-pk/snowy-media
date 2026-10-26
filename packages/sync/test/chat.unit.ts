@@ -166,9 +166,15 @@ test("a malformed checkpoint, or a signature spelled another way, doesn't verify
   const last = alphabet.indexOf(checkpoint.sig.at(-1)!);
   const alias = checkpoint.sig.slice(0, 85) + alphabet[last | 1];
   const results = await Promise.all(
-    [null, "checkpoint", [], { ...checkpoint, extra: 1 }, { ...checkpoint, sig: alias }].map(
-      (value) => verifyCheckpoint(value),
-    ),
+    [
+      null,
+      "checkpoint",
+      [],
+      { ...checkpoint, extra: 1 },
+      { ...checkpoint, sig: alias },
+      { ...checkpoint, head: "not a hash" },
+      { ...checkpoint, seq: 0 },
+    ].map((value) => verifyCheckpoint(value)),
   );
-  expect(results).toEqual([false, false, false, false, false]);
+  expect(results).toEqual([false, false, false, false, false, false, false]);
 });

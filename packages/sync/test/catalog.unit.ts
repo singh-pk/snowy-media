@@ -125,18 +125,21 @@ test("an altered record, or one with a field nobody signed, is rejected", async 
   ]);
 });
 
-test("a codec setup with a field nobody signed, or a description that isn't text, is rejected", async () => {
+test("a codec setup with a field nobody signed, or a description that isn't base64url text, is rejected", async () => {
   const { key, bytes } = await encodeSetup(pair, video);
-  const [added, numeric] = await Promise.all([
+  const [added, numeric, garbled] = await Promise.all([
     resigned(bytes, "snowy init v1", (record) => (record.profile = "high")),
     resigned(bytes, "snowy init v1", (record) => (record.description = 7)),
+    resigned(bytes, "snowy init v1", (record) => (record.description = "not base64!")),
   ]);
   const errors = await Promise.all([
     rejection(decodeSetup(pair.publicKey, key, added)),
     rejection(decodeSetup(pair.publicKey, key, numeric)),
+    rejection(decodeSetup(pair.publicKey, key, garbled)),
   ]);
   expect(errors).toEqual([
     new InvalidRecordError("unknown field profile"),
+    new InvalidRecordError("bad description"),
     new InvalidRecordError("bad description"),
   ]);
 });
