@@ -49,8 +49,8 @@ test("an open record refuses anything but an object, too many keys and a key of 
 test("an open record's keys come back in code-point order, which differs from UTF-16's past U+FFFF", () => {
   const any = map(/^/u, integer());
   // U+1F600 is the surrogates D83D DE00: before U+FFFF by code unit, after it by code point.
-  const checked = any({ "😀b": 1, "￿": 2, "😀a": 3, ab: 4, a: 5 }, "");
-  expect(Object.keys(checked)).toEqual(["a", "ab", "￿", "😀a", "😀b"]);
+  const checked = any({ "😀b": 1, "\uFFFF": 2, "😀a": 3, ab: 4, a: 5 }, "");
+  expect(Object.keys(checked)).toEqual(["a", "ab", "\uFFFF", "😀a", "😀b"]);
 });
 
 test("a union refuses anything but an object and a tag it doesn't know, at the tag", () => {

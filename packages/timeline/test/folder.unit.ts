@@ -213,7 +213,7 @@ test("every kind of damage is reported by its file, and the rest of the project 
   grow(`logs/${a.key}/1`, new Uint8Array(2));
   // A whole record that isn't a batch.
   grow(`logs/${b.key}/1`, framed(new Uint8Array([0xff])));
-  // A file that isn't a segment.
+  // A file that isn't a segment, which is passed over, not reported.
   disk.files.set(`logs/${b.key}/notes`, new Uint8Array([1]));
   // A batch whose author's batch before it is missing.
   const c = await author();

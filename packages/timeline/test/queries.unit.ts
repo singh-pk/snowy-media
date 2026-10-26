@@ -19,7 +19,7 @@ const keyframe = (param: string, when: number): Op => ({
   keyframe: { target: id(2, 0), param, at: when, value: 1, ease: "linear" },
 });
 
-test("effects, roles and keyframes in one place are ordered by id, or by source point", () => {
+test("effects and roles in one place are ordered by id, and keyframes by param, then source point", () => {
   const { project, apply } = setUp();
   apply(clip());
   const { seq } = apply(effect("a1"), effect("a0"), effect("a0"));

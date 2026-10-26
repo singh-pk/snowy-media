@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Operations that no longer fit, or never could, in Chromium (src/edits.ts, src/placement.ts,
-// src/leaf.ts): each is skipped with the kind of reason the design names, and the document is
-// left as it was.
+// Operations at the edges of what fits, in Chromium (src/edits.ts, src/placement.ts, src/cuts.ts,
+// src/leaf.ts): one that no longer fits, or never could, is skipped with the kind of reason the
+// design names and leaves the document as it was; one that just fits is applied.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -128,7 +128,7 @@ test("a leaf under a field that isn't an object can't be set", () => {
   expect(leafOf(project.item(id(2, 0)) ?? {}, "video.transform.x")).toBe(12);
 });
 
-test("a leaf read past a value, or of an array, is what the record holds", () => {
+test("a leaf read past a value is absent, an array is a leaf, and an object isn't", () => {
   const record = { duration: 5, params: { lift: [0, 0.5, 1], names: [["a"], ["b"]] } };
   expect(leafOf(record, "duration.x")).toBeUndefined();
   expect(leafOf(record, "params.lift")).toEqual([0, 0.5, 1]);

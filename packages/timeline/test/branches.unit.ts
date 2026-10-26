@@ -139,7 +139,8 @@ test("a merge of chosen entries applies them in the branch's order, and a stale 
   const second = historyOf(alt).head();
   await edit(b, alt, [rename("Five")]);
   const third = historyOf(alt).head();
-  await edit(a, "main", [{ op: "branch.merge", branch: alt, entries: [second, first, third] }]);
+  await edit(a, "main", [{ op: "branch.merge", branch: alt, entries: [first, third, second] }]);
+  // In the order named, the last would be Four; in the branch's order it is Five.
   expect(historyOf("main").document().name()).toBe("Five");
 
   const { entered } = await edit(a, "main", [
