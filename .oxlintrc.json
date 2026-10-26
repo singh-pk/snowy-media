@@ -63,6 +63,12 @@
     "repo/no-loose-let": "error",
     "repo/no-process-comments": "error",
     "max-depth": ["error", 4],
+    "max-lines": ["error", { "max": 600, "skipBlankLines": true, "skipComments": true }],
+    "max-lines-per-function": [
+      "error",
+      { "max": 80, "skipBlankLines": true, "skipComments": true }
+    ],
+    "max-params": ["error", 4],
     "no-else-return": "error",
     "unicorn/no-useless-spread": "error",
     "unicorn/no-array-for-each": "error",

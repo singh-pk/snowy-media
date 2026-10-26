@@ -17,7 +17,7 @@ Then check, in this order, and report only real problems:
 3. **The package's `## Review` dimensions.** Go through each one for the code the diff adds or changes, such as copies in the engine or bytes on the wire in sync.
 4. **Tests.**
    - A behaviour change without a test, or a test that cannot fail.
-   - Run `git diff -U0 origin/main...HEAD -- '*/test/*' '*/scripts/gen-fixtures.ts' '*/coverage-floor.json' tooling/lint-baseline.json` and look at every removed or changed `expect`, tolerance, fixture, minimum, floor and count. A blocker unless the pull request says why the old value was wrong: an assertion loosened, deleted or rewritten to match new output, a tolerance widened, a coverage floor lowered, or a baseline count raised.
+   - Run `git diff -U0 origin/main...HEAD -- '*/test/*' '*/scripts/gen-fixtures.ts' '*/coverage-floor.json' .oxlintrc.json .jscpd.json` and look at every removed or changed `expect`, tolerance, fixture, minimum, floor and count. A blocker unless the pull request says why the old value was wrong: an assertion loosened, deleted or rewritten to match new output, a tolerance widened, a coverage floor lowered, or a lint rule or duplication setting loosened. Also look at every added `oxlint-disable` and `jscpd:ignore-start` in the diff (`git diff origin/main...HEAD | grep -E '^\+.*(oxlint-disable|jscpd:ignore-start)'`): each is a blocker unless its reason holds, since a limit has no other way around it.
    - An expected value computed by the code under test instead of an independent source.
 5. **Clarity.** The review rows of `## Standards`: names, one job per file, comments that say why, one way per concern, nothing written twice. Also dead code, and scope beyond the pull request's purpose.
 
