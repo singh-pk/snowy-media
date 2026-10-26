@@ -4,12 +4,14 @@
 // Checks every repository lint rule, for oxlint and for markdownlint, against its fixtures: in
 // `bad.ts` (or `bad.md`) the rule reports exactly the lines its `expected lines:` comment
 // lists, and in `good.ts` (or `good.md`) nothing. Other rules' reports are left out. A rule
-// without fixtures fails.
+// without fixtures fails. tooling/exceptions.ts, which reads exceptions from outside the
+// linter, is checked the same way against `fixtures/exceptions/`.
 // Usage: bun tooling/check-lint-rules.ts
 
 import { existsSync, readdirSync } from "node:fs";
 import { lint as lintMarkdown } from "markdownlint/promise";
 import type { Rule } from "markdownlint";
+import { exceptions } from "./exceptions";
 
 const ROOT = new URL("oxlint-rules/", import.meta.url);
 const MD_ROOT = new URL("markdownlint-rules/", import.meta.url);
@@ -84,6 +86,24 @@ async function checkMarkdown(name: string) {
   return problems.map((p) => `${name}: ${p}`);
 }
 
+// tooling/exceptions.ts, against `fixtures/exceptions/` as a rule against its own.
+async function checkExceptions() {
+  const dir = new URL("exceptions/", FIXTURES).pathname;
+  const source = await Bun.file(`${dir}bad.ts`).text();
+  const good = await Bun.file(`${dir}good.ts`).text();
+  const listed = /\/\/ expected lines: ([\d ]+)/.exec(source)?.[1] ?? "";
+  const expected = listed.trim().split(/\s+/).map(Number).join(" ");
+  const reported = exceptions(source)
+    .map((p) => p.line)
+    .toSorted((a, b) => a - b)
+    .join(" ");
+  const extra = exceptions(good).map((p) => `line ${p.line}: ${p.text}`);
+  const problems =
+    reported === expected ? [] : [`bad.ts: lines ${reported || "none"}, not ${expected}`];
+  if (extra.length > 0) problems.push(`good.ts: ${extra.join(", ")}`);
+  return problems.map((p) => `exceptions: ${p}`);
+}
+
 // The plugin is plain JavaScript, so it is imported by URL, untyped.
 const plugin: { default: { rules: Record<string, unknown> } } = await import(
   new URL("index.js", ROOT).href
@@ -91,10 +111,11 @@ const plugin: { default: { rules: Record<string, unknown> } } = await import(
 const markdownRules = readdirSync(MD_ROOT)
   .filter((file) => file.endsWith(".js"))
   .map((file) => file.slice(0, -3));
-const rules = [...Object.keys(plugin.default.rules), ...markdownRules];
+const rules = [...Object.keys(plugin.default.rules), ...markdownRules, "exceptions"];
 const results = await Promise.all([
   ...Object.keys(plugin.default.rules).map(check),
   ...markdownRules.map(checkMarkdown),
+  checkExceptions(),
 ]);
 const failing = results.filter((r) => r.length > 0);
 for (const problem of failing.flat()) console.error(problem);

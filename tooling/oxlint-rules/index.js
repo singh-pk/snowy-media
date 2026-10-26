@@ -9,6 +9,7 @@ import disableNeedsReason from "./disable-needs-reason.js";
 import factoryOnly from "./factory-only.js";
 import noAccessModifiers from "./no-access-modifiers.js";
 import noAwaitAssertion from "./no-await-assertion.js";
+import noCodeStrings from "./no-code-strings.js";
 import noClasses from "./no-classes.js";
 import noConditionalExpect from "./no-conditional-expect.js";
 import noFocusedTests from "./no-focused-tests.js";
@@ -17,7 +18,6 @@ import noLooseLet from "./no-loose-let.js";
 import noNestedAwait from "./no-nested-await.js";
 import noProcessComments from "./no-process-comments.js";
 import noPromiseChains from "./no-promise-chains.js";
-import noSetInterval from "./no-set-interval.js";
 import noTimers from "./no-timers.js";
 import testHasAssertion from "./test-has-assertion.js";
 
@@ -30,6 +30,7 @@ export default {
     "factory-only": factoryOnly,
     "no-access-modifiers": noAccessModifiers,
     "no-await-assertion": noAwaitAssertion,
+    "no-code-strings": noCodeStrings,
     "no-classes": noClasses,
     "no-conditional-expect": noConditionalExpect,
     "no-focused-tests": noFocusedTests,
@@ -38,7 +39,6 @@ export default {
     "no-nested-await": noNestedAwait,
     "no-process-comments": noProcessComments,
     "no-promise-chains": noPromiseChains,
-    "no-set-interval": noSetInterval,
     "no-timers": noTimers,
     "test-has-assertion": testHasAssertion,
   },

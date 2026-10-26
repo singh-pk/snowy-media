@@ -20,3 +20,10 @@ seamless
 ```
 robust after an inner fence
 ````
+
+Search every
+TODO marker in the code.
+
+The **TODO** list is gone.
+
+- [ ] write the guide

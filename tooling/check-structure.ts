@@ -4,7 +4,7 @@
 // Checks what each package says about itself against what it holds:
 // - every file under `src/` has a row in the Map table of the package's AGENTS.md, which says
 //   what the file is for, and every row names a path that exists. A row may be a glob
-//   (`src/*.c`) or a folder (`test/`), which covers what is in it;
+//   (`src/*.c`) or a folder (`test/`), which covers what is in it, though not all of `src/`;
 // - the README is at most 150 lines, draws the package in a ```mermaid block, and ends with its
 //   licence.
 // Usage: bun tooling/check-structure.ts
@@ -45,6 +45,9 @@ function checkMap(dir: string, agents: string) {
 
   for (const path of paths) {
     if (!exists(dir, path)) problems.push(`the Map row \`${path}\` names nothing that exists`);
+    // A row for all of `src/`, as `src/` or `src/**/*.ts`, says nothing of any one file.
+    const all = src.length > 1 && src.every((file) => covers(path, file));
+    if (all) problems.push(`the Map row \`${path}\` covers all of src/; give each file its own`);
   }
 
   return problems;
