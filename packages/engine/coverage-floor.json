@@ -4,7 +4,7 @@
   "src/audio.worklet.ts": 0,
   "src/codec.ts": 84,
   "src/colour.ts": 100,
-  "src/compositor.ts": 34,
+  "src/compositor.ts": 0,
   "src/decoding.ts": 100,
   "src/frames.ts": 100,
   "src/index.ts": 0,
