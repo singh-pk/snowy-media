@@ -260,21 +260,35 @@ test("a closed chat takes no more messages, and one closed mid-batch opens again
   await Promise.all([again.chat.close(), bob.chat.close()]);
 });
 
-test("a link's messages and objects that aren't chat change nothing, nor does a batch after close", async () => {
+test("an object that isn't chat, from the peer sent the version vector, doesn't end the catch-up", async () => {
   const network = createNetwork();
-  const [alice, bob, carol] = await Promise.all([member(), member(), member()]);
-  await say(alice, "one");
-  const [one] = alice.published;
-  const toCarol = join(network, bob, carol);
-  toCarol.send({ type: "have", n: 1, tracks: [] });
-  toCarol.deliver("catalog@1", one!.bytes);
+  const [alice, bob, x, y] = await Promise.all([member(), member(), member(), member()]);
+  await say(alice, "one", "two");
+  const [firstId] = await rank([x.chat.id, y.chat.id], bob.chat.id, "chat-versions");
+  // The first-ranked peer holds nothing, so only the next one can catch Bob up.
+  const [first, second] = firstId === x.chat.id ? [x, y] : [y, x];
+  for (const { key, bytes } of alice.published) await second.chat.received(key, bytes);
+  const fromFirst = join(network, first, bob);
+  join(network, second, bob);
+  await bob.chat.reconnected();
+  // A link carries the watch session's objects too: one of those leaves the vector waiting.
+  fromFirst.deliver("catalog@1", alice.published[0]!.bytes);
   await network.settle();
-  expect(texts(carol)).toEqual([]);
-
-  await bob.chat.close();
-  await bob.chat.received(one!.key, one!.bytes);
   expect(texts(bob)).toEqual([]);
-  await Promise.all([alice, carol].map((m) => m.chat.close()));
+
+  fromFirst.close();
+  await network.settle();
+  expect(texts(bob)).toEqual(["one", "two"]);
+  await Promise.all([alice, bob, x, y].map((m) => m.chat.close()));
+});
+
+test("a batch that comes after close changes nothing", async () => {
+  const [alice, bob] = await Promise.all([member(), member()]);
+  await say(alice, "one");
+  await bob.chat.close();
+  await bob.chat.received(alice.published[0]!.key, alice.published[0]!.bytes);
+  expect(texts(bob)).toEqual([]);
+  await alice.chat.close();
 });
 
 test("a reconnect with no peer linked sends no version vector, then or once one links", async () => {

@@ -210,11 +210,11 @@ test("a peer whose link closes while the joiner ranks isn't asked", async () => 
 });
 
 test("an ask started again while the first still ranks replaces it, so one peer is asked", async () => {
-  const [lone = "", ...others] = await ids(3);
-  const candidates = [lone, ...others];
-  const [first = ""] = await rank(candidates, "state");
+  const candidates = await ids(3);
+  const [first = "", second = ""] = await rank(candidates, "state");
   const j = await joining(candidates.map((id) => ({ id, records: whole })));
-  const superseded = j.ask.start([lone]);
+  // Not the first-ranked peer, so asking it would show.
+  const superseded = j.ask.start([second]);
   await j.ask.start(candidates);
   await superseded;
   await j.network.settle();

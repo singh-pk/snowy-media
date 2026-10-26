@@ -270,18 +270,24 @@ async function refused(config: RelayConfig) {
   const other = await generateKeyPair();
   const nobody = await keyId(other.publicKey);
   const subscribe = () => alice.relay.subscribe(nobody, "chat", () => undefined);
-  const unpublished = await rejection(subscribe());
-  const ownTrack = thrown(() => alice.relay.track("have"));
-  const sourceTrack = thrown(() => alice.relay.sourceTrack("catalog"));
-  const chat = alice.relay.track("chat");
-  await alice.relay.close();
-  const afterClose = await rejection(subscribe());
-  const sent = thrown(() => chat.send(new Uint8Array(1)));
-  return {
-    refused: unpublished instanceof RelayRequestError,
-    notPublished: [ownTrack, sourceTrack].map((e) => e instanceof Error),
-    closed: [afterClose, sent].map((e) => e instanceof RelayRequestError),
-  };
+
+  try {
+    const unpublished = await rejection(subscribe());
+    const ownTrack = thrown(() => alice.relay.track("have"));
+    const sourceTrack = thrown(() => alice.relay.sourceTrack("catalog"));
+    const chat = alice.relay.track("chat");
+    await alice.relay.close();
+    const afterClose = await rejection(subscribe());
+    const sent = thrown(() => chat.send(new Uint8Array(1)));
+    return {
+      refused: unpublished instanceof RelayRequestError,
+      notPublished: [ownTrack, sourceTrack].map((e) => (e instanceof Error ? e.message : e)),
+      closed: [afterClose, sent].map((e) => e instanceof RelayRequestError),
+    };
+  } finally {
+    // Closing again, as when something above throws, is a no-op.
+    await alice.relay.close();
+  }
 }
 
 // Whether the relay refuses a token, by ending the connection once it has asked the auth server.
