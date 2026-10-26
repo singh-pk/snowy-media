@@ -2,7 +2,12 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.ts", "tooling/check-*.ts", "tooling/lint-edited.ts"],
+      "entry": [
+        "scripts/*.ts",
+        "tooling/check-*.ts",
+        "tooling/lint-edited.ts",
+        "tooling/coverage-worker.ts"
+      ],
       "project": ["scripts/**/*.ts", "tooling/**/*.{ts,js}", "!tooling/oxlint-rules/fixtures/**"],
       "ignoreDependencies": ["jscpd"]
     },

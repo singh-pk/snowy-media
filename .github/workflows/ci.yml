@@ -157,8 +157,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       SNOWY_GPU: ${{ matrix.gpu }}
-      # Line coverage of the unit tests, held to coverage-floor.json (tooling/coverage.ts).
-      SNOWY_COVERAGE: "1"
     # It takes about 5 minutes; a browser that hangs would otherwise hold the runner for 6 hours.
     timeout-minutes: 20
     defaults:
@@ -184,7 +182,11 @@ jobs:
       - run: bun run build
       # --with-deps installs the libraries Chromium needs on Linux, and nothing elsewhere.
       - run: bunx playwright install --with-deps chromium
+      # Line coverage of every test, held to coverage-floor.json (tooling/coverage.ts); not the
+      # benchmarks', which it would slow.
       - run: bun run test
+        env:
+          SNOWY_COVERAGE: "1"
       - run: bun ../../tooling/check-coverage.ts engine
       # For reading only: shared runners are too noisy to fail on (packages/engine/bench).
       - run: bun run bench --runs 5 >> "$GITHUB_STEP_SUMMARY"

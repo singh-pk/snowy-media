@@ -8,6 +8,7 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { chromium } from "playwright";
+import { COVERAGE, coverBrowser, wrapWorkers } from "../../../tooling/coverage";
 import { serve } from "../../../tooling/test-server";
 import { startRelay } from "./support/relay";
 import type { RelayConfig, Scenario } from "./support/relay-worker";
@@ -19,13 +20,16 @@ const built = await Bun.build({
   entrypoints: [`${pkg.pathname}test/support/relay-worker.ts`],
   outdir: `${pkg.pathname}test/dist/relay`,
   target: "browser",
+  sourcemap: "external",
 });
 if (!built.success) throw new AggregateError(built.logs, "the relay worker didn't build");
+if (COVERAGE) await wrapWorkers([`${pkg.pathname}test/dist/relay/relay-worker.js`]);
 
 // Each is stopped after the tests, even if starting the next one fails.
 const server = serve(pkg, "<!doctype html><title>relay</title>");
 afterAll(() => server.stop(true));
-const browser = await chromium.launch();
+const launched = await chromium.launch();
+const browser = coverBrowser(pkg.pathname, launched);
 afterAll(() => browser.close());
 
 // Runs a scenario in a worker of a fresh page, against a relay of its own, resolving with what

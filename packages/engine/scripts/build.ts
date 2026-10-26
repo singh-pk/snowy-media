@@ -29,6 +29,8 @@ interface Options {
   ffmpeg?: string;
   /** Other entry points, relative to the package, in place of the engine's; each keeps its path. */
   entrypoints?: string[];
+  /** Source maps beside the bundles, for the tests' coverage (tooling/coverage.ts). */
+  sourcemap?: "external";
 }
 
 // Points each @snowy-media/ffmpeg import at its file under the URL path `prefix`.
@@ -46,7 +48,7 @@ function ffmpegAt(prefix: string): Bun.BunPlugin {
   };
 }
 
-export async function build({ outdir, ffmpeg, entrypoints }: Options) {
+export async function build({ outdir, ffmpeg, entrypoints, sourcemap }: Options) {
   await Bun.build({
     entrypoints: entrypoints
       ? entrypoints.map((f) => pkg + f)
@@ -64,6 +66,7 @@ export async function build({ outdir, ffmpeg, entrypoints }: Options) {
     packages: "external",
     plugins: ffmpeg ? [ffmpegAt(ffmpeg)] : [],
     banner: LICENSE_NOTICE,
+    sourcemap: sourcemap ?? "none",
   });
 }
 

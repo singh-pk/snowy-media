@@ -6,6 +6,7 @@
 // the engine from ENTRY. Shared by the tests and the benchmarks.
 
 import { dirname } from "node:path";
+import { COVERAGE, wrapWorkers } from "../../../../tooling/coverage";
 import { serve } from "../../../../tooling/test-server";
 import { build } from "../../scripts/build";
 
@@ -27,12 +28,20 @@ export const RING_WORKER = "/test/dist/bench/ring.worker.js";
 
 async function buildAll() {
   const outdir = `${dir}test/dist/`;
-  await build({ outdir, ffmpeg: "/ffmpeg/" });
+  await build({ outdir, ffmpeg: "/ffmpeg/", sourcemap: "external" });
   await build({
     outdir,
     ffmpeg: "/ffmpeg/",
     entrypoints: ["test/support/page.ts", "bench/ring.worker.ts"],
+    sourcemap: "external",
   });
+  const workers = [
+    "media.worker.js",
+    "render.worker.js",
+    "video.worker.js",
+    "bench/ring.worker.js",
+  ];
+  if (COVERAGE) await wrapWorkers(workers.map((f) => outdir + f));
 }
 
 // Once, however many servers a test starts.
