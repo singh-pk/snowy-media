@@ -32,7 +32,7 @@
     "@types/bun": "1.4.3",
     "@types/chai": "5.2.3",
     "@wasm-fmt/clang-format": "23.1.1",
-    "chai": "5.3.3",
+    "chai": "6.3.0",
     "jscpd": "5.4.1",
     "knip": "6.41.0",
     "markdownlint": "0.41.1",
