@@ -16,6 +16,7 @@ import {
   clip,
   FRAME,
   id,
+  innerSequence,
   SECOND,
   sequence,
   setUp,
@@ -360,6 +361,8 @@ test("a plan doesn't depend on its range, past items of no length", () => {
   const short = crossings(plan(project, sequence, 0, (9 * SECOND) / 10));
   expect(short).toEqual([[0.75 * MICROS, 1.25 * MICROS, id(2, 0), id(2, 2)]]);
   expect(crossings(plan(project, sequence, 0, 2 * SECOND))).toEqual(short);
+  // Starting past the cut, the clip before it is found past the item of no length.
+  expect(crossings(plan(project, sequence, (11 * SECOND) / 10, 2 * SECOND))).toEqual(short);
   // The clip after the cut starts where a shorter range ends, so it comes next.
   const ahead = plan(project, sequence, 0, 0.75 * SECOND)?.next.map((layer) => layer.clip);
   expect(ahead).toEqual([id(2, 2)]);
@@ -395,4 +398,69 @@ test("an audio clip's fades keep to its own start and end over a transition", ()
   apply(dissolve(id(2, 0), SECOND / 2));
   const [first] = plan(project, sequence, 0, 2 * SECOND)?.segments[1]?.audio ?? [];
   expect([first?.end, first?.fadeOut]).toEqual([MICROS, 0.75 * MICROS]);
+});
+
+test("a transition from a generator into a compound clip has the generator's media without end", () => {
+  const { project, apply } = setUp();
+  const inner = apply(
+    ...innerSequence(2),
+    clip({
+      source: { generator: "solid", params: {} },
+      role: id(2, 1),
+      anchor: { storyline: id(2, 0), position: "a0" },
+      duration: 2 * SECOND,
+    }),
+  );
+  expect(inner.skipped).toEqual([]);
+  // Half a second into the inner sequence, so half a second of it plays before its start.
+  apply(
+    clip({ source: { generator: "solid", params: {} }, anchor: at("a0") }),
+    clip({ source: { sequence: id(2, 0) }, anchor: at("a1"), in: SECOND / 2 }),
+  );
+  apply(dissolve(id(3, 0), SECOND / 2));
+  expect(crossings(plan(project, sequence, 0, 2 * SECOND))).toEqual([
+    [0.75 * MICROS, 1.25 * MICROS, id(3, 0), id(3, 1)],
+  ]);
+});
+
+test("a clip playing backwards after a cut has its media before its start above its in-point", () => {
+  const { project, apply } = setUp();
+  // The second clip plays its stream down from one second in; all of the stream above that is
+  // before its start.
+  apply(
+    clip({ anchor: at("a0"), in: 24_000 }),
+    clip({ anchor: at("a1"), in: 24_000, speed: [-1, 1] }),
+  );
+  apply(dissolve(id(2, 0), SECOND / 2));
+  expect(crossings(plan(project, sequence, 0, 2 * SECOND))).toEqual([
+    [0.75 * MICROS, 1.25 * MICROS, id(2, 0), id(2, 1)],
+  ]);
+});
+
+test("a transition with no media either side of its cut plays nothing", () => {
+  const { project, apply } = setUp();
+  // The first clip ends at its stream's end, and the second starts at its stream's start.
+  apply(clip({ anchor: at("a0"), in: 59 * 24_000 }), clip({ anchor: at("a1"), in: 0 }));
+  apply(dissolve(id(2, 0), SECOND / 2));
+  expect(crossings(plan(project, sequence, 0, 2 * SECOND))).toEqual([]);
+});
+
+test("a transition from a gap plays only the clip after the cut", () => {
+  const { project, apply } = setUp();
+  apply(gap("a0"), clip({ anchor: at("a1"), in: 24_000 }));
+  apply(dissolve(id(2, 0), SECOND / 2));
+  expect(crossings(plan(project, sequence, 0, 2 * SECOND))).toEqual([
+    [0.75 * MICROS, 1.25 * MICROS, undefined, id(2, 1)],
+  ]);
+});
+
+test("a clip's blend mode is in its layer, and an empty range has one segment with nothing", () => {
+  const { project, apply } = setUp();
+  expect(plan(project, sequence, 0, SECOND)?.segments).toEqual([
+    { from: 0, to: MICROS, video: [], audio: [], transitions: [] },
+  ]);
+  const transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 };
+  apply(clip({ video: { opacity: 1, blend: "multiply", transform } }));
+  const [layer] = plan(project, sequence, 0, SECOND)?.segments[0]?.video ?? [];
+  expect(layer?.blend).toBe("multiply");
 });

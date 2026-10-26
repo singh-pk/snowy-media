@@ -9,7 +9,7 @@
 import { expect, test } from "../../../tooling/unit";
 import type { Batch } from "../src/batch";
 import { createBranches } from "../src/branches";
-import type { Entry } from "../src/entry";
+import { entries as entryFormat, type Entry } from "../src/entry";
 import { author, fail, rename } from "./support/history";
 import type { Op } from "./support/project";
 
@@ -81,7 +81,13 @@ test("a batch or entry for a branch not created here yet waits for it", async ()
   const onMain = batches.filter(({ batch }) => batch.branch === "main");
 
   for (const { batch, hash } of onAlt) await other.pend(batch, hash);
-  for (const entry of entries.filter(({ branch }) => branch === alt)) await other.append(entry);
+  // One signed by someone other than the branch's sequencer waits too, and is dropped once the
+  // branch is here to refuse it.
+  const onAltEntries = entries.filter(({ branch }) => branch === alt);
+  const { sig: _, ...unsigned } = onAltEntries[0] ?? fail();
+  const forged = await entryFormat.sign(a.peer.privateKey, unsigned);
+  await other.append(forged);
+  for (const entry of onAltEntries) await other.append(entry);
   expect(other.history(alt)).toBe(undefined);
 
   for (const { batch, hash } of onMain) await other.pend(batch, hash);
@@ -131,8 +137,10 @@ test("a merge of chosen entries applies them in the branch's order, and a stale 
   const first = historyOf(alt).head();
   await edit(b, alt, [rename("Four")]);
   const second = historyOf(alt).head();
-  await edit(a, "main", [{ op: "branch.merge", branch: alt, entries: [second, first] }]);
-  expect(historyOf("main").document().name()).toBe("Four");
+  await edit(b, alt, [rename("Five")]);
+  const third = historyOf(alt).head();
+  await edit(a, "main", [{ op: "branch.merge", branch: alt, entries: [second, first, third] }]);
+  expect(historyOf("main").document().name()).toBe("Five");
 
   const { entered } = await edit(a, "main", [
     { op: "branch.merge", branch: alt, entries: [{ n: 1, hash: second.hash }] },

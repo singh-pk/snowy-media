@@ -14,6 +14,7 @@ import {
   clip,
   FRAME,
   id,
+  innerSequence,
   SECOND,
   sequence,
   setUp,
@@ -130,16 +131,7 @@ test("a clip's role must be of its sequence and take its kind of media", () => {
 
 test("a compound clip can't contain its own sequence", () => {
   const { apply } = setUp();
-  const { seq } = apply(
-    {
-      op: "sequence.add",
-      sequence: { name: "Inner", rate: [24, 1], width: 1920, height: 1080, sampleRate: 48_000 },
-    },
-    {
-      op: "role.add",
-      role: { sequence: id(2, 0), name: "V", kind: "video", color: "#000000", order: "a0" },
-    },
-  );
+  const { seq } = apply(...innerSequence(2));
   const inner = id(seq, 0);
   const innerRole = id(seq, 1);
   const result = apply(
