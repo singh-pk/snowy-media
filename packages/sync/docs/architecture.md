@@ -440,12 +440,17 @@ Players and editors can be in the same session: interests belong to each peer.
 
 The source keeps a single priority queue. A chunk's priority, highest first:
 
-1. Chunks covering a **seek target**, from the target onwards
+1. The chunk covering a **seek target**, in every pushed track
 2. Chunks a peer has **asked the source for** ([Media delivery](#media-delivery))
 3. Chunks **ahead of the playhead**, in time order, up to the **push horizon** (15 min ahead of the playhead). At each index: every subtitle track, then every audio track at least one peer has selected, then video.
 4. **Background requests** from peers with `wants: "full"` ([Media delivery](#media-delivery)). These go only when nothing above is queued.
 
 The source sends the next chunk as soon as the relay stream will accept more data (when its writer's `ready` promise resolves). It doesn't wait for playback, so pushing runs as fast as the source's upload. Nothing beyond the push horizon goes on `source/media/<track>`. Peers that want more ask for it, and those chunks go only to them, through `deliver`.
+
+- **A seek target's chunks** are the chunk covering the target in every pushed track. After them, pushing carries on ahead of the target as the new playhead.
+- **A chunk goes live once.** One that a seek or a newly selected track would push again isn't pushed again: a peer that missed it asks.
+- **What isn't cut yet waits.** Indexes are cut in order as the source demuxes, so a seek past what is cut, or a request for an index not cut yet, waits until cutting reaches it. Once every chunk is cut, a request past the last one is answered `gone`.
+- **A peer's requests are queued once each:** a chunk asked for urgently that was already asked for in the background moves up. A `cancel` takes a request out, and so does the peer leaving.
 
 ### Which tracks are pushed
 

@@ -16,6 +16,7 @@
   "src/crypto.ts": 100,
   "src/hlc.ts": 100,
   "src/link.ts": 100,
+  "src/push-queue.ts": 100,
   "src/rank.ts": 100,
   "src/relay-auth.ts": 98,
   "src/relay.ts": 5,
