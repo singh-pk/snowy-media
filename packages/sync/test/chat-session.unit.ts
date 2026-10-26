@@ -5,8 +5,9 @@
 // peer writes is shown at once and reaches others through its track; a gap is repaired over a
 // link, moving on past a peer that answers chat-gone or whose link closes, and still over one
 // link to a peer whose other link closed; a reconnecting peer catches up from one version
-// vector; after a reload, the log is back and unsent messages go with the first batch; and a
-// chat closed with a batch on its way opens again, and takes no more messages.
+// vector, which moves on to the next peer if the first one's link closes; a batch that doesn't
+// open changes nothing; after a reload, the log is back and unsent messages go with the first
+// batch; and a chat closed with a batch on its way opens again, and takes no more messages.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -77,6 +78,21 @@ function join(network: ReturnType<typeof createNetwork>, a: Member, b: Member) {
   return fromA;
 }
 
+// Alice says `lines`, which Carol and Dave hold; Bob, who holds none, is linked to both.
+async function twoHolders(...lines: string[]) {
+  const network = createNetwork();
+  const [alice, bob, carol, dave] = await Promise.all([member(), member(), member(), member()]);
+  await say(alice, ...lines);
+
+  for (const holder of [carol, dave]) {
+    for (const { key, bytes } of alice.published) await holder.chat.received(key, bytes);
+  }
+
+  const toCarol = join(network, bob, carol);
+  const toDave = join(network, bob, dave);
+  return { network, alice, bob, carol, dave, toCarol, toDave };
+}
+
 test("a message is shown at once, and reaches others through the author's track", async () => {
   const alice = await member();
   const bob = await member();
@@ -111,16 +127,11 @@ test("a gap is repaired over a link from a peer that holds it", async () => {
 });
 
 test("an ask moves to the next peer when its link closes", async () => {
-  const network = createNetwork();
-  const [alice, bob, carol, dave] = await Promise.all([member(), member(), member(), member()]);
-  await say(alice, "one", "two", "three");
-
-  for (const holder of [carol, dave]) {
-    for (const { key, bytes } of alice.published) await holder.chat.received(key, bytes);
-  }
-
-  const toCarol = join(network, bob, carol);
-  const toDave = join(network, bob, dave);
+  const { network, alice, bob, carol, dave, toCarol, toDave } = await twoHolders(
+    "one",
+    "two",
+    "three",
+  );
   const [first] = await rank([carol.chat.id, dave.chat.id], alice.chat.id, 2);
   const [one, , three] = alice.published;
   await bob.chat.received(one!.key, one!.bytes);
@@ -145,6 +156,31 @@ test("a reconnecting peer catches up from one version vector", async () => {
   await network.settle();
   expect(texts(bob).toSorted()).toEqual(["one", "three", "two"]);
   await Promise.all([alice, bob, carol].map((m) => m.chat.close()));
+});
+
+test("the version vector moves to the next peer when the first one's link closes before it answers", async () => {
+  const { network, alice, bob, carol, dave, toCarol, toDave } = await twoHolders("one", "two");
+  // Ranked as `reconnected` ranks: closing the other link would let the first peer answer, and the
+  // test would pass without the vector moving on.
+  const [first] = await rank([carol.chat.id, dave.chat.id], bob.chat.id, "chat-versions");
+  await bob.chat.reconnected();
+  // The vector is on its way to the first-ranked peer; its link closes before it arrives.
+  (first === carol.chat.id ? toCarol : toDave).close();
+  await network.settle();
+  expect(texts(bob)).toEqual(["one", "two"]);
+  await Promise.all([alice, bob, carol, dave].map((m) => m.chat.close()));
+});
+
+test("a batch that doesn't open changes nothing", async () => {
+  const [alice, bob] = await Promise.all([member(), member()]);
+  await say(alice, "one");
+  const changes = { count: 0 };
+  // A batch taken, even one adding nothing, reports a change; a refused one doesn't.
+  bob.onChange(() => changes.count++);
+  await bob.chat.received(alice.published[0]!.key, new Uint8Array([1, 2, 3]));
+  expect(texts(bob)).toEqual([]);
+  expect(changes.count).toBe(0);
+  await Promise.all([alice, bob].map((m) => m.chat.close()));
 });
 
 test("after a reload the log is back, and unsent messages go with the first batch", async () => {

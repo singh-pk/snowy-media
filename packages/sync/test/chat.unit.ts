@@ -8,6 +8,7 @@
 
 import { expect, test } from "../../../tooling/unit";
 import {
+  checkCheckpoint,
   decodeMessage,
   encodeMessage,
   InvalidMessageError,
@@ -171,4 +172,10 @@ test("a malformed checkpoint, or a signature spelled another way, doesn't verify
     ),
   );
   expect(results).toEqual([false, false, false, false, false]);
+  // Read for shape alone: the signature covers these fields, so verifying would refuse them anyway.
+  const malformed = [
+    { ...checkpoint, head: "not a hash" },
+    { ...checkpoint, seq: 0 },
+  ];
+  expect(malformed.map(checkCheckpoint)).toEqual([undefined, undefined]);
 });

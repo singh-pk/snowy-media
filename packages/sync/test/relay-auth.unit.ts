@@ -5,8 +5,8 @@
 // namespaces in its own session, the source's to `source` too, and anything forged, stale,
 // misplaced or malformed admits nothing; in an edit session a grant's rights decide what a peer
 // publishes, and the owner's token admits it to `source`; the auth server answers moq-relay's
-// requests to match, asks the app's `admit` only about connections whose token checked out, and
-// tells its `end` why each one closed.
+// requests to match, refusing a body that isn't JSON, asks the app's `admit` only about
+// connections whose token checked out, and tells its `end` why each one closed.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -177,6 +177,9 @@ test("a missing or malformed token admits nothing", async () => {
     query(altered(token, (json) => (json.request.issuedAt = "now"))),
     query(altered(token, (json) => (json.grant.rights = "editor"))),
     query(altered(token, (json) => (json.sig = `${json.sig}A`))),
+    query(altered(token, (json) => (json.kind = "viewer"))),
+    // A watch session's join grant isn't an edit session's grant.
+    query(altered(token, (json) => (json.kind = "editor"))),
   ];
   const results = await Promise.all(queries.map((q) => authorize(path, q, now)));
   expect(results).toEqual(queries.map(() => undefined));
@@ -223,14 +226,15 @@ test("the auth server grants a connection, refuses a bad token and acknowledges 
   expect([refused.status, ended.status, wrongMethod.status]).toEqual([403, 204, 405]);
 });
 
-test("a request without the relay's connection id is malformed", async () => {
+test("a request that isn't JSON, or lacks the relay's connection id, is malformed", async () => {
   const { peer, grant, path } = await setup();
   const token = await peerToken(grant, peer);
   const responses = await Promise.all([
     post({ event: "connect", path, query: query(token) }),
     post({ event: "end", path, reason: "closed" }),
+    authServer(new Request("http://auth/", { method: "POST", body: "{" })),
   ]);
-  expect(responses.map((r) => r.status)).toEqual([400, 400]);
+  expect(responses.map((r) => r.status)).toEqual([400, 400, 400]);
 });
 
 test("`admit` is asked about each connection whose token checks out, and decides it", async () => {
