@@ -175,6 +175,7 @@ test("a missing or malformed token admits nothing", async () => {
     "token=not-base64!",
     `token=${encoder.encode("[]").toBase64({ alphabet: "base64url" })}`,
     query(altered(token, (json) => (json.request.issuedAt = "now"))),
+    query(altered(token, (json) => Object.assign(json, { request: "peer" }))),
     query(altered(token, (json) => (json.grant.rights = "editor"))),
     query(altered(token, (json) => (json.sig = `${json.sig}A`))),
     query(altered(token, (json) => (json.kind = "editor"))),
@@ -224,15 +225,16 @@ test("the auth server grants a connection, refuses a bad token and acknowledges 
   expect([refused.status, ended.status, wrongMethod.status]).toEqual([403, 204, 405]);
 });
 
-test("a request that isn't JSON, or lacks the relay's connection id, is malformed", async () => {
+test("a request that isn't JSON, lacks the relay's connection id, or names another event, is malformed", async () => {
   const { peer, grant, path } = await setup();
   const token = await peerToken(grant, peer);
   const responses = await Promise.all([
     post({ event: "connect", path, query: query(token) }),
     post({ event: "end", path, reason: "closed" }),
+    post({ id: "00", event: "subscribe", path, query: query(token) }),
     authServer(new Request("http://auth/", { method: "POST", body: "{" })),
   ]);
-  expect(responses.map((r) => r.status)).toEqual([400, 400, 400]);
+  expect(responses.map((r) => r.status)).toEqual([400, 400, 400, 400]);
 });
 
 test("`admit` is asked about each connection whose token checks out, and decides it", async () => {

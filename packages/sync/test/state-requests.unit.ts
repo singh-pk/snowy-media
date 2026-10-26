@@ -209,6 +209,19 @@ test("a peer whose link closes while the joiner ranks isn't asked", async () => 
   expect(j.records.complete()).toBe(true);
 });
 
+test("an ask started again while the first still ranks replaces it, so one peer is asked", async () => {
+  const [lone = "", ...others] = await ids(3);
+  const candidates = [lone, ...others];
+  const [first = ""] = await rank(candidates, "state");
+  const j = await joining(candidates.map((id) => ({ id, records: whole })));
+  const superseded = j.ask.start([lone]);
+  await j.ask.start(candidates);
+  await superseded;
+  await j.network.settle();
+  expect(j.asked).toEqual([first]);
+  expect(j.records.complete()).toBe(true);
+});
+
 test("the source coming online during an ask is asked next", async () => {
   const [a = "", b = "", source = ""] = await ids(3);
   const [firstOfTwo = "", secondOfTwo = ""] = await rank([a, b], "state");

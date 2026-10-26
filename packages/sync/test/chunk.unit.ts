@@ -154,6 +154,13 @@ test("a chunk altered in its header, signature or body is rejected", async () =>
   }
 });
 
+test("a chunk of another format version is rejected", async () => {
+  const bytes = await encodeChunk(pair, chunk);
+  bytes[0] = (bytes[0] ?? 0) + 1;
+  const error = await rejection(decodeChunk(pair.publicKey, slot, bytes));
+  expect(error).toEqual(new InvalidChunkError("unknown version"));
+});
+
 test("a truncated chunk is rejected", async () => {
   const bytes = await encodeChunk(pair, chunk);
   const header = bytes.subarray(0, HEADER - 1);

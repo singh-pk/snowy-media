@@ -56,6 +56,20 @@ test("messages with the same clock value sort by author", async () => {
   expect(texts(reversed)).toEqual(byAuthor);
 });
 
+test("one author's messages with the same clock value, as a faulty clock would give, sort by seq", async () => {
+  const { alice } = await authors();
+  const first = await alice.write({ kind: "text", text: "first" });
+  const written = await alice.write({ kind: "text", text: "second" });
+  const second = { ...written, hlc: first.hlc };
+
+  const inOrder = createChatLog();
+  const reversed = createChatLog();
+  for (const m of [first, second]) inOrder.add(m, ZERO);
+  for (const m of [second, first]) reversed.add(m, ZERO);
+  expect(texts(inOrder)).toEqual(["first", "second"]);
+  expect(texts(reversed)).toEqual(["first", "second"]);
+});
+
 test("a message that sorts below the peer's clock when it arrives is marked late", async () => {
   const { alice, bob } = await authors();
   const offline = await alice.write({ kind: "text", text: "written offline" });

@@ -104,6 +104,17 @@ test("a lost batch is asked for, and a repair from another peer's holdings fills
   expect(bob.log.versions()).toEqual({ [alice.id]: 4 });
 });
 
+test("a batch past an author's first message asks for the start, with none of theirs in order yet", async () => {
+  const alice = await author();
+  const carol = peerState("carol", () => []);
+  const bob = peerState("bob", () => [carol.id]);
+  await alice.say("one", "two");
+  const [, two] = alice.published;
+  await bob.receiver.receive(two!.key, two!.bytes);
+  expect(bob.asked).toEqual([[carol.id, alice.id, 1]]);
+  expect(bob.log.versions()).toEqual({ [alice.id]: 0 });
+});
+
 test("a repair that fills part of a gap asks again for the rest", async () => {
   const alice = await author();
   const carol = peerState("carol", () => []);

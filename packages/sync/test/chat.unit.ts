@@ -87,6 +87,7 @@ test("a malformed message is refused", () => {
     { ...edit, text: undefined },
     { ...edit, target: { author: alice.id } },
     { ...edit, target: { author: alice.id, seq: 1, extra: 1 } },
+    { ...edit, target: { author: alice.id, seq: 0 } },
     { ...remove, text: "gone" },
     { ...react, emoji: "" },
     { ...react, text: "no" },

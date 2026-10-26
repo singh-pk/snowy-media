@@ -79,6 +79,11 @@ test("a malformed record is refused before it is signed", async () => {
     { ...catalog, tracks: [{ ...first, codec: "" }] },
     { ...catalog, tracks: [{ ...first, kind: "image" }] },
     { ...catalog, extra: true },
+    { ...catalog, tracks: "none" },
+    { ...catalog, tracks: [1] },
+    { ...catalog, tracks: [{ ...first, language: "" }] },
+    { ...catalog, tracks: [{ ...first, title: 7 }] },
+    [catalog],
   ];
   const setups = [
     { ...video, track: -1 },

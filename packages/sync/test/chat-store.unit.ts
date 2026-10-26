@@ -90,14 +90,16 @@ async function afterCrash(tail: string) {
   return { read, carriedOn };
 }
 
-test("a torn last record is cut off, and the log carries on after it", async () => {
-  const { read, carriedOn } = await afterCrash(`{"message":{"author":"${alice.id}"`);
+test("a torn last record, and a bad line before it, are cut off, and the log carries on after them", async () => {
+  const { read, carriedOn } = await afterCrash(`\0\n{"message":{"author":"${alice.id}"`);
   expect(read).toEqual({ messages: [a1], checkpoints: [] });
   expect(carriedOn).toEqual([a1, a2]);
 });
 
 test("bad lines at the end, as a crash can leave, are cut off", async () => {
-  const { read, carriedOn } = await afterCrash(`\0\0\0\n${JSON.stringify({ message: b1 })}\n`);
+  // Garbage, a value that isn't a record, and another author's message and checkpoint.
+  const others = [{ message: b1 }, { checkpoint: bcp1 }].map((r) => JSON.stringify(r)).join("\n");
+  const { read, carriedOn } = await afterCrash(`\0\0\0\nnull\n${others}\n`);
   expect(read?.messages).toEqual([a1]);
   expect(carriedOn).toEqual([a1, a2]);
 });
@@ -161,6 +163,24 @@ test("a file that isn't an author's log is left alone", async () => {
   const kept = await file.getFile();
   const text = await kept.text();
   expect(text).toBe("not a log");
+});
+
+test("a new author's log that fails to open is tried again on the next append", async () => {
+  const dir = await session();
+  const store = await openChatStore(dir);
+  // Held elsewhere, so the store can't lock it.
+  const chat = await dir.getDirectoryHandle("chat");
+  const file = await chat.getFileHandle(alice.id, { create: true });
+  const held = await file.createSyncAccessHandle();
+  const error = await rejection(store.append(alice.id, { messages: [a1] }));
+  expect(error).toBeInstanceOf(DOMException);
+  held.close();
+
+  await store.append(alice.id, { messages: [a1] });
+  await store.close();
+  const reopened = await openChatStore(dir);
+  expect(reopened.records.get(alice.id)?.messages).toEqual([a1]);
+  await reopened.close();
 });
 
 test("two appends for a new author open its log once", async () => {

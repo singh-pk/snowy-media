@@ -46,6 +46,7 @@ test("a malformed control record is refused before it is signed", async () => {
     withoutEnded,
     { ...control, ended: true },
     { ...control, sequence: "main" },
+    [control],
   ];
   const errors = await Promise.all(
     bad.map(async (c) => rejection(encodeControl(pair, untyped(c)))),
@@ -60,11 +61,12 @@ test("a malformed control record is refused before it is signed", async () => {
     "bad ended",
     "bad ended",
     "unknown field sequence",
+    "not an object",
   ];
   expect(errors).toEqual(reasons.map((reason) => new InvalidRecordError(reason)));
 });
 
-test("a control record signed by another session, altered, with an unsigned field, or without a well-formed sig is rejected", async () => {
+test("a control record signed by another session, altered, with an unsigned field, not an object, or without a well-formed sig is rejected", async () => {
   const other = await generateKeyPair();
   const [{ key, bytes }, fromOther] = await Promise.all([
     encodeControl(pair, control),
@@ -75,15 +77,17 @@ test("a control record signed by another session, altered, with an unsigned fiel
   const added = encoder.encode(JSON.stringify({ ...record, rate: 2 }));
   const { sig, ...unsigned } = record;
   const badSigs = [unsigned, { ...unsigned, sig: 5 }, { ...unsigned, sig: String(sig).slice(1) }];
+  const listed = encoder.encode(JSON.stringify([record]));
   const errors = await Promise.all([
     rejection(decodeControl(pair.publicKey, fromOther.key, fromOther.bytes)),
     rejection(decodeControl(pair.publicKey, key, altered)),
     rejection(decodeControl(pair.publicKey, key, added)),
+    rejection(decodeControl(pair.publicKey, key, listed)),
     ...badSigs.map(async (r) =>
       rejection(decodeControl(pair.publicKey, key, encoder.encode(JSON.stringify(r)))),
     ),
   ]);
-  const reasons = ["bad signature", "bad signature", "unknown field rate"];
+  const reasons = ["bad signature", "bad signature", "unknown field rate", "not an object"];
   expect(errors).toEqual(
     [...reasons, "bad sig", "bad sig", "bad sig"].map((reason) => new InvalidRecordError(reason)),
   );

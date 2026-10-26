@@ -259,3 +259,32 @@ test("a closed chat takes no more messages, and one closed mid-batch opens again
   expect(texts(bob)).toEqual(["hi"]);
   await Promise.all([again.chat.close(), bob.chat.close()]);
 });
+
+test("a link's messages and objects that aren't chat change nothing, nor does a batch after close", async () => {
+  const network = createNetwork();
+  const [alice, bob, carol] = await Promise.all([member(), member(), member()]);
+  await say(alice, "one");
+  const [one] = alice.published;
+  const toCarol = join(network, bob, carol);
+  toCarol.send({ type: "have", n: 1, tracks: [] });
+  toCarol.deliver("catalog@1", one!.bytes);
+  await network.settle();
+  expect(texts(carol)).toEqual([]);
+
+  await bob.chat.close();
+  await bob.chat.received(one!.key, one!.bytes);
+  expect(texts(bob)).toEqual([]);
+  await Promise.all([alice, carol].map((m) => m.chat.close()));
+});
+
+test("a reconnect with no peer linked sends no version vector, then or once one links", async () => {
+  const network = createNetwork();
+  const [alice, bob, carol] = await Promise.all([member(), member(), member()]);
+  await say(alice, "one");
+  for (const { key, bytes } of alice.published) await carol.chat.received(key, bytes);
+  await bob.chat.reconnected();
+  join(network, bob, carol);
+  await network.settle();
+  expect(texts(bob)).toEqual([]);
+  await Promise.all([alice, bob, carol].map((m) => m.chat.close()));
+});

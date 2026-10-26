@@ -57,7 +57,7 @@ test("only the author's consecutive messages make a batch", async () => {
   for (const error of errors) expect(error).toBeInstanceOf(RangeError);
 });
 
-test("a batch is sealed only with a checkpoint at its last message, by its author", async () => {
+test("a batch is sealed only with messages and a checkpoint at its last one, by its author", async () => {
   const bobs = await bob.write({ kind: "text", text: "bob" });
   const [atTwo, theirs] = await Promise.all([
     signCheckpoint(alice.pair, m2),
@@ -66,6 +66,7 @@ test("a batch is sealed only with a checkpoint at its last message, by its autho
   const errors = await Promise.all([
     rejection(sealBatch(content, { messages: [m1, m2, m3], checkpoint: atTwo })),
     rejection(sealBatch(content, { messages: [m1, m2], checkpoint: theirs })),
+    rejection(sealBatch(content, { messages: [], checkpoint: atTwo })),
   ]);
   for (const error of errors) expect(error).toBeInstanceOf(RangeError);
 });
@@ -108,6 +109,8 @@ test("a batch whose messages or checkpoint don't match its key, or don't chain, 
     sealed(key, { messages: [m2, m3], checkpoint: { ...cp3, sig: "x" } }),
     sealed(key, { messages: [forged, m3], checkpoint: cp3 }),
     sealed(key, [m2, m3]),
+    sealed(key, null),
+    sealed(key, { messages: [m2, m3], checkpoints: cp3 }),
   ]);
   const errors = await Promise.all(cases.map((c) => invalid(c.key, c.bytes)));
   expect(errors).toEqual([
@@ -119,6 +122,8 @@ test("a batch whose messages or checkpoint don't match its key, or don't chain, 
     "Invalid chat batch: bad checkpoint",
     "Invalid chat batch: not proven by its checkpoint",
     "Invalid chat batch: bad body",
+    "Invalid chat batch: bad body",
+    "Invalid chat batch: bad checkpoint",
   ]);
 });
 

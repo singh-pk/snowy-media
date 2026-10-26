@@ -62,6 +62,11 @@ test("a counter past 16 bits carries into the wall clock", () => {
   expect(clock.send()).toBe("0000000000010000");
 });
 
+test("a wall clock past 48 bits of ms gives no clock value", () => {
+  const clock = createClock(() => 2 ** 48);
+  expect(() => clock.send()).toThrow(RangeError);
+});
+
 test("a clock created from a stored value never goes back after a reload", () => {
   const before = createClock(() => 9000);
   before.send();

@@ -251,21 +251,37 @@ async function chatting(config: RelayConfig) {
   return result;
 }
 
-// Refusal: the relay refuses a subscription to a track nobody publishes.
+// What `call` throws, or undefined.
+function thrown(call: () => unknown) {
+  try {
+    call();
+  } catch (error) {
+    return error;
+  }
+
+  return undefined;
+}
+
+// Refusals: a subscription to a track nobody publishes, a track this peer doesn't publish, and a
+// subscription or a send once the connection has closed.
 async function refused(config: RelayConfig) {
   const grant = await newSession();
-  const alice = await peer(config, grant);
+  const alice = await peer(config, grant, ["chat"]);
   const other = await generateKeyPair();
   const nobody = await keyId(other.publicKey);
-
-  try {
-    await alice.relay.subscribe(nobody, "chat", () => undefined);
-    return { refused: false };
-  } catch (error) {
-    return { refused: error instanceof RelayRequestError };
-  } finally {
-    await alice.relay.close();
-  }
+  const subscribe = () => alice.relay.subscribe(nobody, "chat", () => undefined);
+  const unpublished = await rejection(subscribe());
+  const ownTrack = thrown(() => alice.relay.track("have"));
+  const sourceTrack = thrown(() => alice.relay.sourceTrack("catalog"));
+  const chat = alice.relay.track("chat");
+  await alice.relay.close();
+  const afterClose = await rejection(subscribe());
+  const sent = thrown(() => chat.send(new Uint8Array(1)));
+  return {
+    refused: unpublished instanceof RelayRequestError,
+    notPublished: [ownTrack, sourceTrack].map((e) => e instanceof Error),
+    closed: [afterClose, sent].map((e) => e instanceof RelayRequestError),
+  };
 }
 
 // Whether the relay refuses a token, by ending the connection once it has asked the auth server.

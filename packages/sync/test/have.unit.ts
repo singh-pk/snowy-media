@@ -58,11 +58,13 @@ test("indexes become the fewest ranges, in order", () => {
   expect(rangesOf([])).toEqual([]);
 });
 
-test("sealed ranges open as they were sent, only under their peer's key", async () => {
+test("sealed ranges open as they were sent, only under their peer's key, and malformed ones aren't sealed", async () => {
   const object = await sealHave(content, peer, have);
   expect(object.key).toBe(`have/${peer}@3`);
   const opened = await openHave(content, peer, object);
   expect(opened).toEqual(have);
+  const malformed = await rejection(sealHave(content, peer, { n: 0, tracks: [] }));
+  expect(malformed).toBeInstanceOf(RangeError);
 
   const garbage = await seal(content, `have/${peer}@4`, new TextEncoder().encode("[{]"));
   const errors = await Promise.all([

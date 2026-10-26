@@ -178,3 +178,21 @@ test("one version vector on reconnect brings everything beyond it", async () => 
   expect(texts(bob)).toEqual(["one", "two", "three", "four"]);
   expect(bob.asked).toEqual([]);
 });
+
+test("a held reply that no longer seals is answered with chat-gone, and left out of a version reply", async () => {
+  const holdings = createChatHoldings();
+  // No messages: what sealing refuses, as it would a stored message that no longer checks.
+  const unsealable = { messages: [], checkpoint: { author: aliceId, seq: 1, head: "", sig: "" } };
+  const sent: unknown[] = [];
+  const delivered: string[] = [];
+  const responder = createChatResponder({
+    content,
+    holdings: { ...holdings, repair: () => unsealable, after: () => [unsealable] },
+    send: (to, message) => sent.push([to, message]),
+    deliver: (_, key) => delivered.push(key),
+  });
+  await responder.requested("bob", { type: "chat-request", author: aliceId, firstSeq: 1 });
+  await responder.requested("bob", { type: "chat-versions", versions: {} });
+  expect(sent).toEqual([["bob", { type: "chat-gone", author: aliceId, firstSeq: 1 }]]);
+  expect(delivered).toEqual([]);
+});
