@@ -11,6 +11,7 @@ import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
 import {
   createConsumer,
   createOutgoingPacket,
+  createPlaceReader,
   createProducer,
   createRing,
   END,
@@ -18,6 +19,8 @@ import {
   KEY_FLAG,
   NO_TIMESTAMP,
   type OutgoingPacket,
+  PART,
+  type Place,
 } from "../src/ring";
 import { size } from "./support/ring-packets";
 
@@ -202,7 +205,7 @@ test("a producer fails at once on a full ring, and the consumer reads FAILED aft
   expect(producer.offer(out({ pts: 1n, dts: 1n, duration: 1, data, size: 64 }))).toBe(true);
   expect(producer.offerEnd()).toBe(true);
   expect(producer.offerEnd()).toBe(true);
-  expect(producer.hasRoom(0, 0)).toBe(false);
+  expect(producer.offerEnd()).toBe(false);
   producer.fail();
   const read: (number | undefined)[] = [];
 
@@ -227,17 +230,6 @@ test("a failure wakes the consumer waiting on an empty ring", async () => {
   await waited;
   expect(consumer.peek()?.stream).toBe(FAILED);
   consumer.close();
-});
-
-test("hasRoom says whether a record fits with room to spare", () => {
-  const producer = createProducer(createRing(256));
-  const data = new Uint8Array(64);
-  // A record of 64 bytes takes 96 with its header: one leaves 160 bytes.
-  expect(producer.hasRoom(64, 160)).toBe(true);
-  expect(producer.hasRoom(64, 161)).toBe(false);
-  expect(producer.offer(out({ duration: 1, data, size: 64 }))).toBe(true);
-  expect(producer.hasRoom(64, 64)).toBe(true);
-  expect(producer.hasRoom(64, 65)).toBe(false);
 });
 
 test("the key flag and the unknown timestamp are FFmpeg's", () => {
@@ -310,51 +302,59 @@ test("a packet larger than the ring arrives whole, with other records between it
   consumer.close();
 });
 
-test("a packet given up partway arrives not at all, and the next arrives whole", () => {
-  const ring = createRing(256);
-  const producer = createProducer(ring);
-  const consumer = createConsumer(ring);
-  const big = pattern(3, 1000);
-  expect(producer.offer(out({ stream: 5, data: big, size: big.length }))).toBe(false);
-  // Its first pieces are read, and the rest never come.
-  expect(consumer.peek()).toBeUndefined();
-  expect(producer.abandon()).toBe(true);
-  const next = pattern(4, 600);
-
-  for (let rounds = 0; ; rounds++) {
-    if (rounds > 100) throw new Error("no progress");
-    const done = producer.offer(
-      out({ stream: 6, pts: 1n, dts: 1n, data: next, size: next.length }),
-    );
-    const packet = consumer.peek();
-
-    if (packet) {
-      expect([packet.stream, packet.data]).toEqual([6, next]);
-      consumer.release();
-      break;
-    }
-
-    expect(done).toBe(false);
-  }
-
-  consumer.close();
-});
-
-test("an offer leaves the spare it is asked to, and one packet at a time goes in pieces", () => {
+test("one packet at a time goes in pieces, and smaller ones go between them", () => {
   const ring = createRing(256);
   const producer = createProducer(ring);
   const consumer = createConsumer(ring);
   const big = pattern(5, 1000);
-  // Its first piece of 64 bytes and header take 96; a spare of 192 leaves room for none.
-  expect(producer.offer(out({ stream: 5, data: big, size: big.length }), 192)).toBe(false);
-  expect(consumer.peek()).toBeUndefined();
-  // A spare of 96 leaves room for one piece, not the two that would otherwise go.
-  expect(producer.offer(out({ stream: 5, data: big, size: big.length }), 96)).toBe(false);
-  expect([producer.hasRoom(big.length, 96), producer.hasRoom(big.length, 0)]).toEqual([
-    false,
-    true,
-  ]);
+  // Two pieces of 64 bytes, each 96 with its header, go; the rest waits for room.
+  expect(producer.offer(out({ stream: 5, data: big, size: big.length }))).toBe(false);
   expect(() => producer.offer(out({ stream: 6, data: big, size: big.length }))).toThrow(RangeError);
   expect(producer.offer(out({ stream: 9, data: big, size: 8 }))).toBe(true);
+  consumer.close();
+});
+
+test("a record read where it is comes out whole, across the ring's end and in pieces", () => {
+  const ring = createRing(256);
+  const producer = createProducer(ring);
+  const consumer = createConsumer(ring);
+  const { read } = createPlaceReader(ring);
+  const place: Place = { start: 0, size: 0, part: 0 };
+  const into = new Uint8Array(1000);
+
+  // Three records of 64 bytes, read and freed, so the next starts 64 bytes before the end.
+  for (let i = 0; i < 3; i++) {
+    expect(producer.offer(out({ data: pattern(i, 8), size: 8 }))).toBe(true);
+    consumer.peek();
+    consumer.release();
+  }
+
+  const wraps = pattern(6, 96);
+  expect(producer.offer(out({ stream: 4, pts: 2n, data: wraps, size: wraps.length }))).toBe(true);
+  const packet = consumer.peekPlace(place);
+  expect([packet?.stream, packet?.pts, packet?.data.length]).toEqual([4, 2n, 0]);
+  expect([place.part, place.start + place.size > 256]).toEqual([PART.whole, true]);
+  read(place, into, 0);
+  expect(into.subarray(0, place.size)).toEqual(wraps);
+  consumer.release();
+  const big = pattern(7, 1000);
+  const parts: number[] = [];
+  let length = 0;
+
+  for (let rounds = 0; parts.at(-1) !== PART.last; rounds++) {
+    if (rounds > 100) throw new Error("no progress");
+    producer.offer(out({ stream: 5, data: big, size: big.length }));
+
+    for (let p = consumer.peekPlace(place); p; p = consumer.peekPlace(place)) {
+      read(place, into, length);
+      length += place.size;
+      parts.push(place.part);
+      consumer.release();
+    }
+  }
+
+  expect(into.subarray(0, length)).toEqual(big);
+  expect(new Set(parts.slice(0, -1))).toEqual(new Set([PART.piece]));
+  expect(parts.length).toBeGreaterThan(2);
   consumer.close();
 });

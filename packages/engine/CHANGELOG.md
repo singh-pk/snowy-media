@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A WebCodecs frame that Chromium converts with another matrix or range than the stream states, such as untagged 4K H.264 from the macOS hardware decoder, is drawn straight from the GPU too, its conversion undone in the shader, where Chromium does not clip: that 4K stream plays on about a third less CPU, and on a budget laptop on under half.
 - Video that FFmpeg decodes, such as ProRes and DNxHD, decodes up to a third faster: packets and frames pass between the render worker and the video decode worker through shared rings, not a message each.
 - A WebCodecs stream whose first frames are too muted to show the matrix or range Chromium took is measured on its later frames, up to the first 60, where its planes were read back for the whole play: such an untagged 4K H.264 stream on macOS plays on about a quarter less CPU.
+- The render worker no longer copies each packet of video that FFmpeg decodes: the video decode worker copies it straight from the packet ring into FFmpeg's memory. For 4K ProRes HQ, the render worker spends a tenth of the time it did on packets, 0.34 ms a second instead of 3.2 on an Apple M5.
 
 ### Fixed
 

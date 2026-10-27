@@ -46,7 +46,7 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
     },
     flush: () => decoder.flush(),
     queued: () => decoder.decodeQueueSize,
-    fits: () => true,
+    reading: () => false,
     close() {
       if (decoder.state !== "closed") decoder.close();
     },
@@ -85,8 +85,6 @@ function createState(from: number) {
     // lead it are left out.
     started: false,
     leading: false,
-    // Part of the packet in hand is with the decoder, the rest waiting for room.
-    handing: false,
     // Where it plays from, which a scrub moves on, and whether one has.
     from,
     moved: false,
@@ -251,37 +249,38 @@ async function room(o: Output) {
   }
 }
 
-// Tells the decode tracker of the packet in hand, due at `pts` and `timestamp`, the first time
-// it is handed over. False for a picture to leave out: started at a CRA, as after a seek, the
-// RASL pictures after it refer to pictures the decoder never had.
-function begin(o: Output, packet: Packet, pts: bigint, timestamp: number) {
+// Whether `packet` is a picture to leave out: started at a CRA, as after a seek, the RASL
+// pictures after it refer to pictures the decoder never had.
+function leftOut(o: Output, packet: Packet) {
   const { state, p } = o;
-  if (state.handing) return true;
   const first = !state.started;
   state.started = true;
-  if (!first && state.leading && isRasl(p, packet.data)) return false;
+  if (!first && state.leading && isRasl(p, packet.data)) return true;
   state.leading = first;
-  const dts = o.micros(Number(packet.dts === NO_TIMESTAMP ? pts : packet.dts));
-  o.decoding.feed(timestamp, dts, makesFrame(p, packet.data));
-  return true;
+  return false;
 }
 
-// Hands `packet` to the decoder, all of it or as much as fits, and frees it once all is in.
+// Hands `packet` to the decoder, and tells the decode tracker of it once the decoder has all of
+// it, due at its pts.
 function hand(o: Output, packet: Packet) {
-  const { state, consumer } = o;
+  const { p } = o;
   // A missing pts takes the dts, right for a stream without B-frames. A raw stream with
   // them has neither, and fails here.
   const pts = packet.pts === NO_TIMESTAMP ? packet.dts : packet.pts;
   if (pts === NO_TIMESTAMP) throw new Error("a video packet has no timestamp");
   const timestamp = o.micros(Number(pts));
+  // Only HEVC's (RASL) and VP8's (makesFrame) data is read here, and WebCodecs decodes both, so
+  // a packet read in place, without its data, never reaches either.
+  if (leftOut(o, packet)) return;
+  if (!o.decoder.decode(packet, pts, timestamp, o.micros(packet.duration))) return;
+  const dts = o.micros(Number(packet.dts === NO_TIMESTAMP ? pts : packet.dts));
+  o.decoding.feed(timestamp, dts, makesFrame(p, packet.data));
+}
 
-  if (!begin(o, packet, pts, timestamp)) {
-    consumer.release();
-    return;
-  }
-
-  state.handing = !o.decoder.decode(packet, pts, timestamp, o.micros(packet.duration));
-  if (!state.handing) consumer.release();
+// Resolves once the decoder no longer reads the record handed, so it can be freed, or the
+// output closes.
+async function read(o: Output) {
+  while (o.decoder.reading() && !o.state.closed) await woken(o);
 }
 
 // Ends when the decoder has decoded the last packet, or at once when the output closes.
@@ -291,7 +290,8 @@ async function run(o: Output) {
   for (;;) {
     await room(o);
     if (state.closed) return;
-    const packet = consumer.peek();
+    // A decoder that reads the record where it is, in another thread, gets it unread.
+    const packet = decoder.place ? consumer.peekPlace(decoder.place) : consumer.peek();
 
     if (!packet) {
       // Closed by the main thread, as a seek or an open stops this play, no packet comes; a
@@ -307,9 +307,11 @@ async function run(o: Output) {
     if (packet.stream === END) break;
     // The media worker reports why, to the main thread, which stops this play.
     if (packet.stream === FAILED) return;
-    // The decoder has no room for it yet; a packet decoded makes some.
-    if (decoder.fits(packet.data.length)) hand(o, packet);
-    else await woken(o);
+
+    hand(o, packet);
+    await read(o);
+    // Nothing once the output has closed.
+    consumer.release();
   }
 
   await decoder.flush();
@@ -390,7 +392,7 @@ export function createVideoOutput(
   const shared = createShared(p, compositor, changed, from);
   const events = decoderEvents(shared);
   const decoder =
-    p.decoder === "webcodecs" ? webCodecsDecoder(p, events) : wasm.createDecoder(p, events);
+    p.decoder === "webcodecs" ? webCodecsDecoder(p, events) : wasm.createDecoder(p, events, ring);
   const o: Output = Object.assign(shared, { decoder, consumer });
   const { state, decoding } = o;
   const done = Promise.race([finish(o), o.failed.promise]);

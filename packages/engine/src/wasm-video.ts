@@ -4,8 +4,9 @@
 // The render worker's decoders for the video streams WebCodecs does not decode: each stands in
 // for a VideoDecoder in src/video.ts, and decodes in the video decode worker
 // (src/video.worker.ts), which this starts once and keeps, so a seek or another file does not
-// load its FFmpeg module again. Packets and frames go both ways through two rings, with no
-// message per packet or frame (src/protocol.ts).
+// load its FFmpeg module again. Records go both ways through two rings, with no message per
+// packet or frame (src/protocol.ts). A packet's bytes never pass through here: the decode worker
+// copies them out of the packet ring, and only where they are goes to it.
 
 import type { VideoParams } from "./codec";
 import {
@@ -13,25 +14,26 @@ import {
   FROM_VIDEO,
   KIND_BITS,
   PIXEL_FORMATS,
+  PLACE,
   TO_VIDEO,
   VIDEO_MODULES,
   type FromVideo,
   type ToVideo,
 } from "./protocol";
 import {
-  RING_CAPACITY,
+  PART,
   createConsumer,
   createProducer,
   createRing,
   type OutgoingPacket,
   type Packet,
+  type Place,
 } from "./ring";
 
-// The ring to the worker: room for the packets of a decoder, which waits while the next does not
-// fit (`fits`), and as much again for another's, with a sixteenth (SPARE) kept for the records
-// that must always go, the frames going back above all. The ring back holds small records only.
-const TO_CAPACITY = 2 * RING_CAPACITY;
-const SPARE = 1 / 16;
+// The ring to the worker: small records only, a packet's place and never its bytes. It holds
+// one packet's at a time, as the decode loop waits for it to be taken, and the frames shown
+// meanwhile going back, 32 bytes each. The ring back holds small records only too.
+const TO_CAPACITY = 1 << 20;
 // A frame's `packed` word as the record's pts.
 const PACKED = [0n, 1n] as const;
 const FROM_CAPACITY = 1 << 16;
@@ -70,21 +72,24 @@ export interface DecoderEvents {
 /** A video decoder, as src/video.ts uses one. */
 export interface Decoder {
   /**
+   * For a decoder that copies its packets out of the packet ring itself: where the record handed
+   * next is, which src/video.ts peeks into it (peekPlace) and hands on unread. None for one that
+   * takes a packet's bytes.
+   */
+  readonly place?: Place;
+  /**
    * Decodes `packet`, whose frame is due at `pts`, in the stream's time base: at `timestamp`,
    * for `duration`, in microseconds. `pts` is the packet's, or its dts where it has none.
-   * Whether it has all of it: a packet larger than the room `fits` saw goes in parts, the
-   * rest on later calls with the same packet, each once it `fits`.
+   * Whether the decoder now has all of a packet: one in pieces comes a record at a time, at
+   * `place`, and only its last piece completes it.
    */
   decode(packet: Packet, pts: bigint, timestamp: number, duration: number): boolean;
   /** Resolves once every packet is decoded and its frames are out. */
   flush(): Promise<void>;
   /** Packets handed over and not yet decoded. */
   queued(): number;
-  /**
-   * Whether a packet of `size` bytes, or its next part, can be handed over now; if not, one
-   * decoded makes room.
-   */
-  fits(size: number): boolean;
+  /** Whether it still reads the record last handed, which is freed only once it has not. */
+  reading(): boolean;
   close(): void;
 }
 
@@ -93,10 +98,8 @@ interface Open {
   queued: number;
   // Made by a flush, so a close without one rejects nothing no one awaits.
   flushed?: PromiseWithResolvers<void>;
-  // Part of a packet is in the worker's ring, the rest waiting for room.
-  handing: boolean;
-  // Whether a `roomFor` waits for the rest of the packet, so one at a time does.
-  waiting: boolean;
+  // A packet ring record handed over and not yet copied out.
+  reading: boolean;
 }
 
 type Producer = ReturnType<typeof createProducer>;
@@ -105,16 +108,16 @@ type Producer = ReturnType<typeof createProducer>;
 // packed it into a buffer of its own.
 type GiveBack = (frame: number, packed: bigint, module: number) => void;
 
-// What the decoders share: the open ones by id, the next id, the worker's failure, the ring to
-// the worker of `capacity` bytes, and how records go into it.
+// What the decoders share: the open ones by id, the next id, the worker's failure, and how records
+// and messages go to it.
 interface Wasm {
   state: { next: number; failed: Error | undefined };
   open: Map<number, Open>;
-  capacity: number;
-  worker: () => Producer;
+  /** Posts `message` to the worker, started first if it is not. */
+  post: (message: ToVideo) => void;
   /** The record to fill, of `stream`, its other fields cleared, for `put`. */
   record: (stream: number) => OutgoingPacket;
-  /** Writes a record that must go: one that does not fit means the spare room is spent. */
+  /** Writes a record that must go: one that does not fit means the ring is full. */
   put: (packet: OutgoingPacket) => void;
 }
 
@@ -198,8 +201,10 @@ function createReplies(open: Map<number, Open>, giveBack: GiveBack) {
       else release();
     } else if (kind === FROM_VIDEO.decoded) {
       if (decoder) decoder.queued--;
-      // A packet decoded, of any decoder, closed ones too, makes room in the ring for every one.
-      for (const each of open.values()) each.events.dequeue();
+      decoder?.events.dequeue();
+    } else if (kind === FROM_VIDEO.taken) {
+      if (decoder) decoder.reading = false;
+      decoder?.events.dequeue();
     } else if (kind === FROM_VIDEO.failed) {
       reason.set(record.data);
       decoder?.events.error(new Error(text.decode(reason.subarray(0, record.data.length))));
@@ -255,21 +260,31 @@ function failing(failure: Error): Decoder {
     },
     flush: async () => {},
     queued: () => 0,
-    fits: () => true,
+    reading: () => false,
     close() {},
   };
 }
 
-/** A decoder of the stream with parameters `p`, which an FFmpeg module decodes. */
-function createDecoder(w: Wasm, p: VideoParams, events: DecoderEvents): Decoder {
-  const { state, open, capacity, worker, record, put } = w;
+/**
+ * A decoder of the stream with parameters `p`, which an FFmpeg module decodes, its packets in
+ * packet ring `ring`.
+ */
+function createDecoder(
+  w: Wasm,
+  p: VideoParams,
+  events: DecoderEvents,
+  ring: SharedArrayBuffer,
+): Decoder {
+  const { state, open, post, record, put } = w;
   const module = p.decoder === "video" || p.decoder === "video-ext" ? p.decoder : undefined;
   // No module decodes it, or the worker has failed: it fails at its first packet.
   if (!module) return failing(new Error(`${p.codec}: no decoder for this codec`));
   if (state.failed) return failing(state.failed);
   const id = state.next++;
-  const decoder: Open = { events, queued: 0, handing: false, waiting: false };
-  open.set(id, decoder);
+  const opened: Open = { events, queued: 0, reading: false };
+  open.set(id, opened);
+  // Before the open, which waits for it.
+  post({ type: "packets", id, ring });
   const [num, den] = p.timeBase;
   const opening = record((id << KIND_BITS) | TO_VIDEO.open);
   opening.pts = BigInt(num);
@@ -278,62 +293,42 @@ function createDecoder(w: Wasm, p: VideoParams, events: DecoderEvents): Decoder 
   opening.data = p.params;
   opening.size = p.params.length;
   put(opening);
-
-  // Wakes the decode loop once the next part of a packet of `size` bytes fits: the worker frees
-  // each piece as it copies it, with no packet decoded to say so. The flag goes up before the
-  // count is read, so a piece freed after the check moves the count.
-  async function roomFor(size: number) {
-    const records = worker();
-    decoder.waiting = true;
-    records.waitingForRoom(true);
-
-    for (;;) {
-      const seen = records.bell();
-      if (!open.has(id) || records.hasRoom(size, capacity * SPARE)) break;
-      await records.moved(seen);
-    }
-
-    records.waitingForRoom(false);
-    decoder.waiting = false;
-    if (open.has(id)) events.dequeue();
-  }
+  const place: Place = { start: 0, size: 0, part: PART.whole };
+  // A packet record's payload, filled from `place`.
+  const words = new Int32Array(PLACE.bytes / 4);
+  const where = new Uint8Array(words.buffer);
 
   return {
-    // Copied from the packet ring into the worker's, which `fits` has made room in.
-    decode({ data, dts, duration, flags }, pts) {
+    place,
+    // The record at `place` goes as where it is.
+    decode({ dts, duration, flags }, pts) {
       const packet = record((id << KIND_BITS) | TO_VIDEO.packet);
       packet.flags = flags;
       packet.pts = pts;
       packet.dts = dts;
       packet.duration = duration;
-      packet.data = data;
-      packet.size = data.length;
-      decoder.handing = !worker().offer(packet, capacity * SPARE);
-
-      if (decoder.handing) {
-        if (!decoder.waiting) void roomFor(data.length);
-        return false;
-      }
-
-      decoder.queued++;
-      return true;
+      words[PLACE.start] = place.start;
+      words[PLACE.size] = place.size;
+      words[PLACE.part] = place.part;
+      packet.data = where;
+      packet.size = PLACE.bytes;
+      put(packet);
+      opened.reading = true;
+      const whole = place.part === PART.whole || place.part === PART.last;
+      if (whole) opened.queued++;
+      return whole;
     },
     flush() {
-      decoder.flushed = Promise.withResolvers<void>();
+      opened.flushed = Promise.withResolvers<void>();
       put(record((id << KIND_BITS) | TO_VIDEO.flush));
-      return decoder.flushed.promise;
+      return opened.flushed.promise;
     },
-    queued: () => decoder.queued,
-    fits: (size) => worker().hasRoom(size, capacity * SPARE),
+    queued: () => opened.queued,
+    reading: () => opened.reading,
     // A flush under way ends, as VideoDecoder.close() ends one.
     close() {
       if (!open.delete(id)) return;
-      decoder.flushed?.reject(new DOMException("closed", "AbortError"));
-
-      if (decoder.handing && !worker().abandon()) {
-        throw new Error("video decode worker: its ring is full");
-      }
-
+      opened.flushed?.reject(new DOMException("closed", "AbortError"));
       put(record((id << KIND_BITS) | TO_VIDEO.close));
     },
   };
@@ -341,15 +336,16 @@ function createDecoder(w: Wasm, p: VideoParams, events: DecoderEvents): Decoder 
 
 /**
  * The decoders, in the worker `start` starts: the bundled src/video.worker.ts next to this
- * file, written out as is so that a bundler finds the worker. Packets go to it through a ring of
- * `capacity` bytes.
+ * file, written out as is so that a bundler finds the worker. Records go to it through a ring of
+ * `capacity` bytes, a packet's as where it is in its packet ring.
  */
 export function createWasmVideo(
   start = () => new Worker(new URL("./video.worker.js", import.meta.url), { type: "module" }),
   capacity = TO_CAPACITY,
 ) {
   const state = {
-    // The ring to the worker, once it is started.
+    // The worker and the ring to it, once it is started.
+    thread: undefined as Worker | undefined,
     records: undefined as Producer | undefined,
     next: 0,
     failed: undefined as Error | undefined,
@@ -403,12 +399,20 @@ export function createWasmVideo(
     const begin: ToVideo = { type: "start", to, from };
     started.postMessage(begin);
     void replies.listen(createConsumer(from));
+    state.thread = started;
     state.records = records;
     return records;
   }
 
-  const wasm: Wasm = { state, open, capacity, worker, record, put };
+  function post(message: ToVideo) {
+    worker();
+    state.thread?.postMessage(message);
+  }
+
+  const wasm: Wasm = { state, open, post, record, put };
   return {
-    createDecoder: (p: VideoParams, events: DecoderEvents) => createDecoder(wasm, p, events),
+    /** A decoder of the stream with parameters `p`, whose packets are in packet ring `ring`. */
+    createDecoder: (p: VideoParams, events: DecoderEvents, ring: SharedArrayBuffer) =>
+      createDecoder(wasm, p, events, ring),
   };
 }

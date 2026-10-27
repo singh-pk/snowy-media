@@ -113,15 +113,20 @@ export type FromMedia =
 
 // The render worker's decoders in the video decode worker (src/video.worker.ts), each by its
 // id, talk through two rings (src/ring.ts) the render worker makes once and sends at the start,
-// with no message per packet or frame. In the ring to the worker, a decoder opens for a play's
-// video stream that one of VIDEO_MODULES decodes, from the stream's exported codec parameters,
-// then takes the stream's packets in decoding order (timestamps in its time base), a flush once
-// the stream ends, and a close; and a frame goes back, by its module, once it is uploaded or
-// dropped, whether its decoder is open or not. In the ring from the worker come each decoded
-// frame, each packet decoded, the flush done, and a decoder's first error, after which it
-// decodes nothing. A module's memory, which frames are read from, comes by message once it loads,
-// before any of its frames.
-export type ToVideo = { type: "start"; to: SharedArrayBuffer; from: SharedArrayBuffer };
+// with no message per packet or frame. Each decoder's packets stay in its play's packet ring,
+// which comes by message (`packets`) before the decoder opens: the decode worker copies each
+// out of there itself, so only where it is crosses. In the ring to the worker, a decoder opens
+// for a play's video stream that one of VIDEO_MODULES decodes, from the stream's exported codec
+// parameters, then takes the stream's packets in decoding order (timestamps in its time base),
+// a record of the packet ring at a time, a flush once the stream ends, and a close; and a frame
+// goes back, by its module, once it is uploaded or dropped, whether its decoder is open or not.
+// In the ring from the worker come each packet ring record taken, after which the render
+// worker frees it, each decoded frame, each packet decoded, the flush done, and a decoder's
+// first error, after which it decodes nothing. A module's memory, which frames are read from,
+// comes by message once it loads, before any of its frames.
+export type ToVideo =
+  | { type: "start"; to: SharedArrayBuffer; from: SharedArrayBuffer }
+  | { type: "packets"; id: number; ring: SharedArrayBuffer };
 export type FromVideo = { type: "memory"; module: number; memory: WebAssembly.Memory };
 
 /** The FFmpeg modules that decode video, by their index in records. */
@@ -130,13 +135,23 @@ export const VIDEO_MODULES = ["video", "video-ext"] as const;
 /**
  * A record's kind, in the low KIND_BITS of its stream, and its decoder's id in the rest. To the
  * worker: `open`, its module in the duration, its time base in pts and dts, the parameters as
- * payload; `packet`, as the packet ring's; `flush` and `close`; and `release`, of the frame in
- * the flags from the module in the duration, which the pts says is packed (1) or not (0).
+ * payload; `packet`, a record of the decoder's packet ring, with its packet's header and its
+ * place there (PLACE) as payload; `flush` and `close`; and `release`, of the frame in the flags
+ * from the module in the duration, which the pts says is packed (1) or not (0).
  */
 export const TO_VIDEO = { open: 0, packet: 1, flush: 2, close: 3, release: 4 } as const;
-/** From the worker: `frame`, its FRAME payload; `decoded`; `flushed`; `failed`, its message. */
-export const FROM_VIDEO = { frame: 0, decoded: 1, flushed: 2, failed: 3 } as const;
+/**
+ * From the worker: `frame`, its FRAME payload; `decoded`; `flushed`; `failed`, its message; and
+ * `taken`, a packet ring record copied out.
+ */
+export const FROM_VIDEO = { frame: 0, decoded: 1, flushed: 2, failed: 3, taken: 4 } as const;
 export const KIND_BITS = 3;
+
+/**
+ * A packet record's payload, in 32-bit words: where its packet ring record's payload starts and
+ * its size, and which PART of its packet it is (src/ring.ts).
+ */
+export const PLACE = { start: 0, size: 1, part: 2, bytes: 12 } as const;
 
 /**
  * A frame record's payload, in 32-bit words, then its timestamp as a float64 (`timestamp`, an

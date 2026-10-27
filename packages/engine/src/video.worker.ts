@@ -6,8 +6,10 @@
 // synchronously, in software, so it does so here, never in the render worker's animation
 // frames. Each frame, in a format VideoFrame takes (sny_to_video_format), stays where the
 // decoder left it in the module's shared memory, which the render worker uploads it from; the
-// render worker sends it back once it is uploaded or dropped. Packets and frames go both ways
-// through the rings the render worker sends at the start, with no message per packet or frame.
+// render worker sends it back once it is uploaded or dropped. Records go both ways through the
+// rings the render worker sends at the start, with no message per packet or frame; a packet is
+// copied out of its play's packet ring, which comes by message, straight into the module's
+// memory.
 
 import {
   AVERROR_EAGAIN,
@@ -20,12 +22,20 @@ import {
   FROM_VIDEO,
   KIND_BITS,
   PIXEL_FORMATS,
+  PLACE,
   TO_VIDEO,
   VIDEO_MODULES,
   type FromVideo,
   type ToVideo,
 } from "./protocol";
-import { createConsumer, createProducer, type Packet } from "./ring";
+import {
+  PART,
+  createConsumer,
+  createPlaceReader,
+  createProducer,
+  type Packet,
+  type Place,
+} from "./ring";
 
 type Ptr = number;
 type Module = (typeof VIDEO_MODULES)[number];
@@ -42,6 +52,36 @@ const words = new Int32Array(payload.buffer);
 const doubles = new Float64Array(payload.buffer);
 // Where a failure's message is put; a longer one is cut short.
 const message = new Uint8Array(1024);
+// Where a packet record's payload is read.
+const placeWords = new Int32Array(PLACE.bytes / 4);
+const placeBytes = new Uint8Array(placeWords.buffer);
+// Whether a packet ring record of PART `part` completes its packet.
+const completes = (part: number | undefined) => part === PART.whole || part === PART.last;
+
+// Where the packet ring record is that the last packet record read places, filled by `placeOf`.
+const placed: Place = { start: 0, size: 0, part: PART.whole };
+
+// Reads where the packet ring record that packet record `record` places is into `placed`.
+function placeOf(record: Packet) {
+  // copy: 12 bytes, into words to read them.
+  placeBytes.set(record.data);
+  placed.start = placeWords[PLACE.start] ?? 0;
+  placed.size = placeWords[PLACE.size] ?? 0;
+  placed.part = placeWords[PLACE.part] ?? 0;
+  return placed;
+}
+
+// Each decoder's packet ring, by its id, as it comes by message.
+const packetRings = new Map<number, PromiseWithResolvers<SharedArrayBuffer>>();
+
+// Decoder `id`'s packet ring, whichever comes first, its message or its open.
+function packetRing(id: number) {
+  const known = packetRings.get(id);
+  if (known) return known;
+  const ring = Promise.withResolvers<SharedArrayBuffer>();
+  packetRings.set(id, ring);
+  return ring;
+}
 
 // Module `name`, loaded when a stream first needs it: video-ext only for the rarer codecs.
 async function load(name: Module): Promise<VideoModule> {
@@ -126,18 +166,60 @@ function pack(m: VideoModule, held: Ptr, size: number, width: number) {
   return at;
 }
 
+// What copies packet ring records of `packets` into packet `pkt` of module `m`, whose memory
+// `heap` views, putting a packet's pieces back together first.
+function createTaker(m: VideoModule, pkt: Ptr, heap: () => Uint8Array, packets: SharedArrayBuffer) {
+  // copy: a piece, out of a ring record freed before the next comes, and the packet's size
+  // known only at its last piece.
+  const { pieces, read, join } = createPlaceReader(packets);
+
+  // Where in memory a packet of `size` bytes, with the header of `record`, goes.
+  function make({ pts, dts, duration, flags }: Packet, size: number) {
+    const at = m._sny_packet_make(pkt, size, pts, dts, BigInt(duration), flags);
+    if (!at) throw new Error("packet_make: out of memory");
+    return at;
+  }
+
+  return {
+    /**
+     * Copies the packet ring record at `place`, with its packet's header `record`, into memory,
+     * where the packet is decoded from once whole: a piece waits for the rest. Whether it is.
+     */
+    take(record: Packet, place: Place) {
+      if (place.part === PART.whole) {
+        const at = make(record, place.size);
+        // copy: into the module's memory, which FFmpeg decodes from; the ring record is freed
+        // after.
+        read(place, heap(), at);
+        return true;
+      }
+
+      join(place);
+      if (place.part === PART.piece) return false;
+      const at = make(record, pieces.length);
+      // copy: the pieces, into the packet in memory.
+      heap().set(pieces.data.subarray(0, pieces.length), at);
+      pieces.length = 0;
+      return true;
+    },
+  };
+}
+
 // What a decoder is made from: stream parameters `params` for the `module`th module, a time base
-// of `num`/`den`, and `send`, which sends each frame it decodes.
+// of `num`/`den`, the packet ring its packets are in, and `send`, which sends each frame it
+// decodes.
 interface DecoderOptions {
   module: number;
   params: Uint8Array;
   num: number;
   den: number;
+  packets: SharedArrayBuffer;
   send: () => void;
 }
 
 // A decoder in module `m`.
-function createDecoder(m: VideoModule, { module, params, num, den, send }: DecoderOptions) {
+function createDecoder(m: VideoModule, options: DecoderOptions) {
+  const { module, params, num, den, packets, send } = options;
   // Rounded as src/video.ts rounds the packets' timestamps, so a frame's matches its packet's.
   const micros = (t: bigint) => Math.round((Number(t) * num * 1e6) / den);
 
@@ -223,13 +305,10 @@ function createDecoder(m: VideoModule, { module, params, num, den, send }: Decod
     }
   }
 
+  const taker = createTaker(m, pkt, heap, packets);
+
   return {
-    // Copies `packet` into memory, to decode once its record is freed.
-    put({ data, pts, dts, duration, flags }: Packet) {
-      const at = m._sny_packet_make(pkt, data.length, pts, dts, BigInt(duration), flags);
-      if (!at) throw new Error("packet_make: out of memory");
-      heap().set(data, at);
-    },
+    take: (record: Packet, place: Place) => taker.take(record, place),
     decode: () => decode(pkt),
     flush: () => decode(0),
     close,
@@ -238,23 +317,10 @@ function createDecoder(m: VideoModule, { module, params, num, den, send }: Decod
 
 type Decoder = ReturnType<typeof createDecoder>;
 
-// Serves the render worker through the rings of `start`.
-async function serve({ to, from }: ToVideo) {
-  const records = createConsumer(to);
-  const replies = createProducer(from);
-  // The modules loaded, for a frame that goes back.
+// The modules, each loaded once, when a decoder first needs it, and kept for the frames that go
+// back to it.
+function createModules() {
   const loaded: (VideoModule | undefined)[] = [];
-  // Open decoders by id; one that failed stays, without a decoder, until it closes.
-  const decoders = new Map<number, Decoder | undefined>();
-  const encoder = new TextEncoder();
-
-  const reply = (id: number, kind: number, data = payload, size = 0) => {
-    const { packet } = replies;
-    packet.stream = (id << KIND_BITS) | kind;
-    packet.data = data;
-    packet.size = size;
-    return replies.write(packet);
-  };
 
   // The `index`th module, loaded once; its memory goes to the render worker before any frame.
   async function module(index: number) {
@@ -270,15 +336,51 @@ async function serve({ to, from }: ToVideo) {
     return m;
   }
 
-  // Opens decoder `id` from its `open` record, once its module is loaded.
+  return { loaded, module };
+}
+
+// Serves the render worker through the rings of `start`.
+async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
+  const records = createConsumer(to);
+  const replies = createProducer(from);
+  const { loaded, module } = createModules();
+  // Open decoders by id; one that failed stays, without a decoder, until it closes.
+  const decoders = new Map<number, Decoder | undefined>();
+  const encoder = new TextEncoder();
+
+  const reply = (id: number, kind: number, data = payload, size = 0) => {
+    const { packet } = replies;
+    packet.stream = (id << KIND_BITS) | kind;
+    packet.data = data;
+    packet.size = size;
+    return replies.write(packet);
+  };
+
+  // Opens decoder `id` from its `open` record, once its module is loaded and its packet ring
+  // has come.
   async function open(record: Packet, id: number) {
     const m = await module(record.duration);
+    const packets = await packetRing(id).promise;
     const send = () => reply(id, FROM_VIDEO.frame, payload, FRAME.bytes);
     const [num, den] = [Number(record.pts), Number(record.dts)];
-    decoders.set(
-      id,
-      createDecoder(m, { module: record.duration, params: record.data, num, den, send }),
-    );
+    const options = { module: record.duration, params: record.data, num, den, packets, send };
+    decoders.set(id, createDecoder(m, options));
+  }
+
+  // Takes the packet ring record that packet record `record` of decoder `id` places, then frees
+  // `record` and says the other is taken, so the render worker frees it, before any decoding.
+  // Whether its packet is whole, failed decoder or not.
+  function take(record: Packet, id: number) {
+    const place = placeOf(record);
+
+    try {
+      decoders.get(id)?.take(record, place);
+    } finally {
+      records.release();
+      reply(id, FROM_VIDEO.taken);
+    }
+
+    return completes(place.part);
   }
 
   // Handles any other `record` of decoder `id`; it is freed once this returns, or a packet's
@@ -289,14 +391,10 @@ async function serve({ to, from }: ToVideo) {
     if (kind === TO_VIDEO.close) {
       decoder?.close();
       decoders.delete(id);
+      packetRings.delete(id);
     } else if (kind === TO_VIDEO.packet) {
-      // Freed before decoding, which takes long, so the render worker has room for the next.
-      try {
-        decoder?.put(record);
-      } finally {
-        records.release();
-      }
-
+      // Taken before decoding, which takes long, so the render worker hands on the next.
+      if (!take(record, id)) return;
       decoder?.decode();
       reply(id, FROM_VIDEO.decoded);
     } else {
@@ -338,8 +436,11 @@ async function serve({ to, from }: ToVideo) {
       decoders.set(id, undefined);
       const { written } = encoder.encodeInto(e instanceof Error ? e.message : String(e), message);
       reply(id, FROM_VIDEO.failed, message, written);
-      // Still decoded, as its room in the ring is free, which another decoder may wait for.
-      if (kind === TO_VIDEO.packet) reply(id, FROM_VIDEO.decoded);
+
+      // A whole packet still decoded, as the render worker counts it handed over.
+      if (kind === TO_VIDEO.packet && completes(placed.part)) {
+        reply(id, FROM_VIDEO.decoded);
+      }
     }
 
     // A packet's record is freed already.
@@ -347,6 +448,7 @@ async function serve({ to, from }: ToVideo) {
   }
 }
 
-addEventListener("message", ({ data }: MessageEvent<ToVideo>) => void serve(data), {
-  once: true,
+addEventListener("message", ({ data }: MessageEvent<ToVideo>) => {
+  if (data.type === "start") void serve(data);
+  else packetRing(data.id).resolve(data.ring);
 });
