@@ -23,8 +23,8 @@ const MIN_POINTS = 300;
 // matrix apart, and a frame with fewer than MIN_COLOURED, near grey, is not measured either.
 const COLOURED = 0.1;
 const MIN_COLOURED = 400;
-// The frames measured before giving up on a stream, as in a dark or grey one: its planes are
-// read back from then on, as when there is no measurement.
+// The frames measured before giving up on a stream, as in a dark, grey or muted one, or one
+// Chromium clips: its planes are read back from then on, as when there is no measurement.
 const MAX_TRIES = 60;
 // How far Chromium's conversion may be from this one's, at the median and the 95th percentile of
 // the points: the two filter differently at edges, and Apple's gamma moves a midtone by 11 levels
@@ -34,7 +34,8 @@ const P95_OFF = 6 / 255;
 // Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped: shown by at
 // least BEYOND_POINTS of its channels further than BEYOND below 0, and as many above 1, as one
 // clip may be at one end only. Where Chromium clips, as into an 8-bit texture, a saturated
-// colour would not come back; a frame whose colours all fit shows nothing either way.
+// colour would not come back; a frame whose colours all fit shows nothing either way, so it
+// decides nothing, and a later, more saturated frame is measured.
 const BEYOND = 2 / 255;
 const BEYOND_POINTS = 10;
 
@@ -132,7 +133,9 @@ function differences(data: Float32Array, apple: boolean, undo: Float32Array, off
  * then this one's, in rows of GRID_ROW bytes. Undecided while too few channels are midtones or
  * too few points coloured. Chromium's conversion is tried as it is, then, where it is unclipped,
  * through each matrix and range it may have taken instead of `stream.stated`, each with and
- * without Apple's gamma undone; the first that matches is written into `stream.undo`.
+ * without Apple's gamma undone; the first that matches is written into `stream.undo`. A frame
+ * that matches neither as it is, and whose conversion does not go past both 0 and 1, is
+ * undecided too: a later, more saturated one may show the matrix.
  * `off` holds a difference for each channel.
  */
 export function verdict(
@@ -170,12 +173,12 @@ export function verdict(
   if (matches(false)) return "imported";
   if (matches(true)) return "apple";
 
-  if (below >= BEYOND_POINTS && above >= BEYOND_POINTS) {
-    for (const assumed of ASSUMED) {
-      undoMatrix(undo, stated, assumed, depth);
-      if (matches(false)) return "imported";
-      if (matches(true)) return "apple";
-    }
+  if (below < BEYOND_POINTS || above < BEYOND_POINTS) return undefined;
+
+  for (const assumed of ASSUMED) {
+    undoMatrix(undo, stated, assumed, depth);
+    if (matches(false)) return "imported";
+    if (matches(true)) return "apple";
   }
 
   identity(undo);
@@ -230,7 +233,7 @@ function drawGrid(
 
   for (const [i, t] of targets.entries()) {
     const at = { buffer, offset: i * GRID_HEIGHT * GRID_ROW, bytesPerRow: GRID_ROW };
-    // readback: a small grid, of a few frames per stream, until they decide the route.
+    // readback: a small grid, of up to MAX_TRIES frames per stream, until they decide the route.
     encoder.copyTextureToBuffer({ texture: t }, at, [GRID_WIDTH, GRID_HEIGHT]);
   }
 
