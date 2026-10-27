@@ -92,6 +92,19 @@ test("a grant gives nothing in another session, or once anything it signs is cha
   expect(checks).toEqual(grants.map(() => false));
 });
 
+test("a peer's own signature over a chain it forged gives nothing", async () => {
+  const { project, person, session, personId, agentId } = await setup();
+  const own = await signGrant(project, { session, rights: ["view"], to: personId });
+  // The project key's grant with rights it never signed, under the peer's valid signature.
+  const forged: Grant = { ...own, rights: ["view", "propose", "edit"] };
+  const grants = await Promise.all([
+    signGrant(person, { session, rights: ["view", "propose", "edit"], to: agentId, chain: forged }),
+    signGrant(person, { session, rights: ["view"], to: agentId, chain: { ...own, sig: "" } }),
+  ]);
+  const checks = await Promise.all(grants.map((g) => verifyGrant(g, session)));
+  expect(checks).toEqual([false, false]);
+});
+
 test("a grant reads only in canonical shape, with a chain at most 2 long", async () => {
   const { project, person, agent, session, personId, agentId } = await setup();
   const own = await signGrant(project, { session, rights: ["view", "propose"], to: personId });
