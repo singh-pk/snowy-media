@@ -727,14 +727,16 @@ type Grant = {
 };
 ```
 
+- **Each right needs the one before it,** so `rights` is `["view"]`, `["view", "propose"]` or `["view", "propose", "edit"]`, spelled in that order: whoever may edit may propose, and whoever may propose may view.
 - **An invite** is a grant without `to`, signed by the project key, in the invite link's fragment as in a watch session: `https://<app>/edit#v=1&relay=…&s=…&k=…&g=…`. Whoever holds it has its rights.
 - **The owner** gives its own peer key a grant with every right, signed by the project key, so the owner's edits are checked like anyone's.
 - **A grant to an agent** is signed by the peer that connects it, names the agent's key in `to`, and carries in `chain` the grant that peer holds.
 - **Checking a grant:** its signature covers `snowy grant v1\n` followed by its canonical JSON without `sig`, fields in the order above. It is valid if:
-  1. it is signed by the project key and names this session; or
-  2. it is signed by a peer, has a `to`, names this session, its `rights` are a subset of its `chain`'s, and its `chain` is valid and either names the signer in `to` or is an invite.
-  A chain is at most 2 grants long: from the project key to a person, or an invite, then to an agent.
+  1. it is signed by the project key, names this session and has no `chain`; or
+  2. it is signed by a peer, has a `to`, names this session, and its `rights` are a subset of its `chain`'s; and its `chain` is valid, is signed by the project key, and either names the signer in `to` or is an invite.
+  A chain is at most 2 grants long: from the project key to a person, or an invite, then to an agent. `verifyGrant` reads a grant back in canonical shape before checking it, so the key order of the JSON it arrived in doesn't matter.
 - **Grants travel with their holders.** Each peer publishes its own grant, and the grants of the agents it carries, on `peer/<self>/grants`, a record that changes only when an agent is connected or disconnected. A peer checks every batch and asset catalog against its author's grant, so a relay that lets something through still can't make anyone accept it.
+- **The relay token** in an edit session is `{ kind: "editor", grant, request, sig }`: the grant its peer holds, and the request a watch session's peer signs ([Join grant](#join-grant)). The grant must be valid, and either name the peer in `to` or be an invite; its rights decide what the peer may publish ([Authorization](#authorization)). The owner's token is `{ kind: "owner", request, sig, sessionSig }`, the request signed by the project key after `snowy owner v1\n`, so a watch source's token can't pass for it. `editorToken` and `ownerToken` make them, and `signGrant` and `verifyGrant` in `src/grant.ts` make and check grants.
 - **Who sequences isn't a grant.** The timeline's signed project record names it, and sync never checks it ([Timeline batches and histories](#timeline-batches-and-histories)).
 
 ### Asset sources
@@ -767,12 +769,13 @@ The editor moves the first on every `progress` event, and replaces the others on
 | --- | --- | --- | --- |
 | `source` / `project` | The owner | All | The timeline's signed project record |
 | `peer/<PeerId>` / `grants` | That peer | All | Its grant, and the grants of agents it carries |
-| `peer/<PeerId>` / `batches` | That peer | All | Timeline batches by that peer, and by agents it carries |
-| `peer/<PeerId>` / `history/<BranchId>` | That peer, while it or an agent it carries sequences the branch | All | The branch's entries, refusals and terms |
+| `peer/<PeerId>/batches` / `batches` | That peer | All | Timeline batches by that peer, and by agents it carries |
+| `peer/<PeerId>/history/<BranchId>` / `history` | That peer, while it or an agent it carries sequences the branch | All | The branch's entries, refusals and terms |
 | `peer/<PeerId>` / `presence` | That peer | All | Selection, playhead, the tool in use, a drag in progress, and the agents it carries |
 | `peer/<PeerId>` / `control` | That peer | Peers following it | Its playhead, as a [control record](#control-record) |
 | `asset/<PeerId>` / `<AssetId>/…` | That peer, a source of the asset | Peers that ask | The asset's catalog, codec setups and chunks |
 
+- **Batches and histories are broadcasts of their own,** beside `peer/<PeerId>`, because the relay authorizes broadcasts, not tracks: so it can refuse them to a peer with `view` alone.
 - **Sync never reads timeline content.** For every timeline object it receives, it calls the consumer's `verify(bytes)`, which `@snowy-media/timeline` provides. It returns a batch's `{ author, seq }`, a history object's `{ branch, term, n, hash }`, or invalid. Sync orders, detects gaps and repairs by those fields alone. An invalid object, live or repaired, is dropped and not passed on; a repaired one counts as `gone`, and the next candidate is asked. Which sequencer to accept, and whether an author's rights allow a batch, are the consumer's to decide.
 - **Batches** are sent like chat: queued while the stream is busy, and sent as one object when it frees up, keyed `batches/<author>/<firstSeq>-<lastSeq>`. Every batch carries its author's signature, so no checkpoint is needed.
 - **History objects** are keyed by term: `history/<branch>/<term>/<firstN>-<lastN>`. A sequencer publishes on its own track, so two sequencers never write one object, even two that start the same term.
@@ -784,7 +787,7 @@ The editor moves the first on every `progress` event, and replaces the others on
 
 An agent connected in a tab has its own peer key and grant, but no relay connection: the tab that connected it, named in its grant's `by`, is its **carrier**.
 
-- The carrier publishes the agent's batches on its own `batches` track, its grant on `grants`, and, while the agent sequences a proposal branch, that branch's history on its own `history/<BranchId>` track, signed by the agent's key.
+- The carrier publishes the agent's batches on its own `peer/<PeerId>/batches` broadcast, its grant on `grants`, and, while the agent sequences a proposal branch, that branch's history on its own `peer/<PeerId>/history/<BranchId>` broadcast, signed by the agent's key.
 - **The agent is online while its carrier is,** and the carrier's presence lists it. When the carrier's namespace is announced or withdrawn, the consumer hears of the agent too.
 - **Messages to the agent** go to the carrier's inbox, naming the agent.
 - **Repair candidates** for the agent's objects are the same as for its carrier's own.
@@ -881,10 +884,12 @@ The transports' keepalives and idle timeouts (QUIC's idle timeout, WebRTC's conn
 | --- | --- | --- |
 | Source `S` (token signed by the session key and `S`'s peer key) | `source`, plus everything peer `S` may publish | Everything |
 | Peer `P` (join grant plus a request signed by `P`) | `peer/P`, `inbox/*/P` | `source`, `peer/*`, `inbox/P/*` |
-| Edit session: owner `O` (token signed by the project key and `O`'s peer key) | `source/*`, plus everything peer `O` may publish | Everything |
-| Edit session: peer `P` with `view` | `peer/P/*` except `batches` and `history/*`, `inbox/*/P/*` | `source/*`, `asset/*`, `peer/*/chat`, `peer/*/grants`, `peer/*/batches`, `peer/*/history/*`, `peer/*/presence`, `peer/*/control`, `inbox/P/*` |
-| Edit session: peer `P` with `propose` or `edit` | The same, plus `peer/P/batches`, `peer/P/history/*` and, with `edit`, `asset/P/*` | The same |
+| Edit session: owner `O` (token signed by the project key and `O`'s peer key) | `source`, plus everything peer `O` may publish with every right | Everything |
+| Edit session: peer `P` with `view` (its grant plus a request signed by `P`) | `peer/P`, `inbox/*/P` | `source`, `asset/*`, `peer/**`, `inbox/P/*` |
+| Edit session: peer `P` with `propose` | The same, plus `peer/P/batches` and `peer/P/history/*` | The same |
+| Edit session: peer `P` with `edit` | The same as with `propose`, plus `asset/P` | The same |
 
+- **Patterns are moq-relay's:** a path without a wildcard is that broadcast alone, so `peer/P` doesn't cover `peer/P/batches`; `*` is one segment, and `**` any number. The relay tests check that a peer with `view` alone can't publish batches, histories, assets or `source`. They also check that one with `propose` can't publish assets, and one with `edit` can.
 - **The relay authorizes broadcasts**, the paths in the table, and every track in a broadcast with it, so a peer may subscribe to any track of another peer's broadcast, `have` and `probe` included. Neither is secret.
 - **moq-relay asks an auth server** about each connection (`--auth-url`), posting the path and query it was dialed with; the server answers with the patterns the table gives, or refuses. The server is `authServer` in `src/relay-auth.ts`, or one `createAuthServer` makes with the app's [admission](#admission): a `fetch` handler on Web Crypto that keeps nothing between requests, run beside the relay (`Bun.serve({ fetch: authServer })`, on a loopback address, since moq-relay asks a plain `http://` server only there).
 - **A new connection's token must be fresh**: made at most 5 minutes before, or 1 minute after, by the server's clock. A connection already admitted keeps its grant, however old its token, until it closes or the app's `admit` refuses it.
@@ -895,18 +900,30 @@ The transports' keepalives and idle timeouts (QUIC's idle timeout, WebRTC's conn
 The auth server decides what keys allow. Whether to admit someone the keys allow, such as a limit on how many may join, is the app's policy, and the package knows nothing of it. An app that has one passes it to `createAuthServer`.
 
 ```ts
-type Connection = { id: string; session: SessionId; peer: PeerId; role: "source" | "peer" };
+type Connection = {
+  id: string;
+  session: SessionId;
+  peer: PeerId;
+  role: "source" | "peer" | "owner" | "editor";
+  rights: Array<"view" | "propose" | "edit">;
+  grant?: Grant;              // an editor's: who gave it its rights
+};
+
+type Ended = { id: string; reason?: string; bytes?: { toPeer: number; fromPeer: number } };
 
 type Admission = {
   admit?: (connection: Connection) => boolean | Promise<boolean>;
-  end?: (id: string) => void | Promise<void>;
+  end?: (ended: Ended) => void | Promise<void>;
 };
 ```
 
-- **`admit` is asked after the token checks out,** on every `connect` and `revalidate`; a token that fails is refused without asking. `id` is the relay's own id for the connection, which every request about it carries, and `role` is the token's kind: the source's, or a peer's. `false` refuses with 403, as a failed token does.
+- **`admit` is asked after the token checks out,** on every `connect` and `revalidate`; a token that fails is refused without asking. `id` is the relay's own id for the connection, which every request about it carries, `role` is the token's kind, and `rights` what it carries: a grant's rights in an edit session, every right for the owner, and `view` alone in a watch session. An app that limits who edits counts the connections with `propose` or `edit`. `false` refuses with 403, as a failed token does.
+- **An editor's `grant` says who gave it its rights,** so an app can count a person's agents as that person. An agent that connects itself is asked as itself, and its grant's `by` names the person who passed it on. A grant from the project key names only the peer; an invite's names no one, and an app that needs to know who holds it asks in its own way.
 - **A refusal on `revalidate` ends an admitted connection.** moq-relay asks again when the grant's cadence or a push to its internal listener (`/sessions/revalidate?id=…`) says so, so an app removes someone by refusing them and pushing. This server sets no cadence, so without a push an admitted connection is never asked again.
 - **`end` is told the id of every admitted connection the relay closes,** including one a revalidation refused; a connection refused on `connect` has no `end`. The id is what a connection's `connect`, `revalidate` and `end` share, and `end`'s token isn't checked again, so an app that counts connections keys them by id. The id is the relay's word only while the relay alone can reach the auth server, as on the loopback address above; anyone else who can post to it can report an end.
 - **A failure answers 500.** moq-relay refuses a new connection on any answer but a grant or a refusal, retries a revalidation with backoff, and only logs a failed `end`, so an app whose policy is down admits no one new and removes no one.
+- **`end` carries why the connection ended and what it moved through the relay,** as moq-relay reports it. `reason` is the relay's: the connection's own close reason, or `refused`, `expired`, `invalid` or `dropped` when the relay closed it. `toPeer` is what the relay sent the peer, and `fromPeer` what it received, over the connection's whole life. With the session `admit` saw for the same id, that is what an app meters relay traffic by, per session or per person.
+- **`bytes` is absent unless the relay counted them.** moq-relay counts bytes only over QUIC, WebTransport included, and reports zeros for its other transports, which a peer may dial whatever Snowy's clients use. It also reports zeros for a connection it closed itself as `refused`, `expired`, `invalid` or `dropped`. An app that meters by `end` has no count for those connections. The reason and counts are the relay's word on the same terms as the id.
 - **An `end` can be missed.** The grant sets no cadence or expiry, so if the relay stops, or gives up on a `connect` that `admit` already allowed, no `end` comes and nothing asks again. An app that counts connections expires them itself.
 - **Without `admit`, every connection whose token checks out is admitted.** `authServer` is `createAuthServer()`.
 - **The package keeps nothing for the policy.** Counting connections, mapping peer keys to people (a person has a peer key per device) and limiting them are the app's, in its own server. An agent a tab carries never reaches `admit`, since it rides that peer's connection; a headless agent connects as a peer and is asked like one.
@@ -921,6 +938,7 @@ type Admission = {
 | A peer forging chat while repairing gaps | Author hash chains plus signed checkpoints |
 | A peer posting as someone else | Relay authorization: only `P` can publish `peer/P` |
 | A relay token read from a log or by the relay | Replayed, it admits a connection only within 5 minutes of being made, as the peer that signed it, in its own session. The join grant inside it never expires, so whoever reads one can join with keys of their own for the session's life, as with a leaked invite but without the session secret: they see track names and sizes, and can write to peers' inboxes, but can't read or forge content. A connection once admitted is never revoked. |
+| An edit-session token read from a log or by the relay | Replayed, it admits a connection only within 5 minutes of being made, as the peer that signed it, in its own session. A grant naming a key in `to` admits only that key, unless its `chain` is an invite: the token then carries the invite, which anyone can reuse. A grant that is an invite admits anyone with keys of their own, at its rights, for the project's life; without the session secret they can't read content or get an edit accepted. An owner token carries no grant to reuse. |
 | A viewer controlling playback | Only the source can publish `source`, and control records are signed |
 | Script injection through chat | `textContent` only |
 | A peer forging an edit or another's asset | Timeline batches are signed by their author and checked against the author's grant; asset chunk headers are signed by the source named in the namespace |

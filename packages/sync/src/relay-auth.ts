@@ -2,23 +2,16 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Relay authorization (docs/architecture.md#authorization): the join grant, the token a peer
-// dials the relay with, and the auth server moq-relay asks (`--auth-url`), which checks a token
-// and answers with what its peer may publish and subscribe to. The server keeps nothing: each
-// answer comes from the token and the dialed path alone, and from the app's `admit` when it
-// passes one, which keeps whatever state its own policy needs. It is a `fetch` handler on Web
-// Crypto, so it runs wherever that does: `Bun.serve({ fetch: authServer })`, or a Worker.
+// dials the relay with in a watch or an edit session, and the auth server moq-relay asks
+// (`--auth-url`), which checks a token and answers with what its peer may publish and subscribe
+// to. The server keeps nothing: each answer comes from the token and the dialed path alone, and
+// from the app's `admit` when it passes one, which keeps whatever state its own policy needs. It
+// is a `fetch` handler on Web Crypto, so it runs wherever that does:
+// `Bun.serve({ fetch: authServer })`, or a Worker.
 
 import { isRecord } from "./chat";
-import {
-  isKeyId,
-  keyId,
-  publicKey,
-  sigBytes,
-  sign,
-  verify,
-  type Bytes,
-  type KeyId,
-} from "./crypto";
+import { RIGHTS, readGrant, verifyGrant, type Grant, type Right } from "./grant";
+import { base64url, isKeyId, keyId, sign, signedBy, type KeyId } from "./crypto";
 
 /** How long a token admits a connection after it is made. */
 export const TOKEN_AGE = 5 * 60_000;
@@ -34,14 +27,18 @@ export type JoinGrant = { session: KeyId; rights: "viewer"; sig: string };
 /** What a peer signs to connect: who it is, the session, and when, in milliseconds. */
 type ConnectionRequest = { peer: KeyId; session: KeyId; issuedAt: number };
 
+// A watch session's peer and source, and an edit session's peer with a grant and its owner.
 type Token =
   | { kind: "peer"; grant: JoinGrant; request: ConnectionRequest; sig: string }
-  | { kind: "source"; request: ConnectionRequest; sig: string; sessionSig: string };
+  | { kind: "source"; request: ConnectionRequest; sig: string; sessionSig: string }
+  | { kind: "editor"; grant: Grant; request: ConnectionRequest; sig: string }
+  | { kind: "owner"; request: ConnectionRequest; sig: string; sessionSig: string };
+
+// What the session key signs, besides the peer's own request, in each kind's token.
+const SESSION_PREFIX = { source: "snowy source v1", owner: "snowy owner v1" } as const;
 
 /** What the relay lets a connection do: moq-relay's grant, patterns relative to the dialed path. */
 export type RelayGrant = { publish: string[]; subscribe: string[] };
-
-const base64 = (bytes: Bytes) => bytes.toBase64({ alphabet: "base64url", omitPadding: true });
 
 // Each signed thing has its own prefix, so a signature over one can't pass for another.
 const grantBytes = (session: KeyId) =>
@@ -50,20 +47,20 @@ const grantBytes = (session: KeyId) =>
 const requestBytes = (prefix: string, { peer, session, issuedAt }: ConnectionRequest) =>
   encoder.encode(`${prefix}\n${JSON.stringify({ peer, session, issuedAt })}`);
 
-const encode = (token: Token) => base64(encoder.encode(JSON.stringify(token)));
+const encode = (token: Token) => base64url(encoder.encode(JSON.stringify(token)));
 
 /** The join grant for the session whose key pair this is. */
 export async function joinGrant(session: CryptoKeyPair): Promise<JoinGrant> {
   const id = await keyId(session.publicKey);
   const sig = await sign(session.privateKey, grantBytes(id));
-  return { session: id, rights: "viewer", sig: base64(sig) };
+  return { session: id, rights: "viewer", sig: base64url(sig) };
 }
 
 async function connectionRequest(peer: CryptoKeyPair, session: KeyId) {
   const id = await keyId(peer.publicKey);
   const request = { peer: id, session, issuedAt: Date.now() };
   const sig = await sign(peer.privateKey, requestBytes("snowy relay v1", request));
-  return { request, sig: base64(sig) };
+  return { request, sig: base64url(sig) };
 }
 
 /**
@@ -75,13 +72,34 @@ export async function peerToken(grant: JoinGrant, peer: CryptoKeyPair) {
   return encode({ kind: "peer", grant, request, sig });
 }
 
-/** The source's token for the relay, signed by both the session key and its own peer key. */
-export async function sourceToken(session: CryptoKeyPair, peer: CryptoKeyPair) {
+async function keyHolderToken(
+  kind: "source" | "owner",
+  session: CryptoKeyPair,
+  peer: CryptoKeyPair,
+) {
   const id = await keyId(session.publicKey);
   const { request, sig } = await connectionRequest(peer, id);
-  const sessionSig = await sign(session.privateKey, requestBytes("snowy source v1", request));
-  return encode({ kind: "source", request, sig, sessionSig: base64(sessionSig) });
+  const sessionSig = await sign(session.privateKey, requestBytes(SESSION_PREFIX[kind], request));
+  return encode({ kind, request, sig, sessionSig: base64url(sessionSig) });
 }
+
+/** The source's token for the relay, signed by both the session key and its own peer key. */
+export const sourceToken = (session: CryptoKeyPair, peer: CryptoKeyPair) =>
+  keyHolderToken("source", session, peer);
+
+/**
+ * A peer's token for an edit session's relay, from the grant it holds: one given to its key, an
+ * invite, or, for an agent, one its person passed on. Like `peerToken`'s, it admits for
+ * `TOKEN_AGE`.
+ */
+export async function editorToken(grant: Grant, peer: CryptoKeyPair) {
+  const { request, sig } = await connectionRequest(peer, grant.session);
+  return encode({ kind: "editor", grant, request, sig });
+}
+
+/** The project owner's token for an edit session's relay, signed by the project key and its peer key. */
+export const ownerToken = (project: CryptoKeyPair, peer: CryptoKeyPair) =>
+  keyHolderToken("owner", project, peer);
 
 // The session a dialed path is the root of: it ends in `snowy/<SessionId>`, under whatever path
 // the relay's URL has. Each prefix roots a separate tree, and a grant's patterns are relative to
@@ -123,31 +141,42 @@ function readToken(query: string | undefined): Token | undefined {
     return valid ? { kind, grant: { session, rights, sig: grantSig }, request, sig } : undefined;
   }
 
-  if (kind === "source" && typeof sessionSig === "string") {
+  if (kind === "editor") {
+    const editGrant = readGrant(grant);
+    return editGrant === undefined ? undefined : { kind, grant: editGrant, request, sig };
+  }
+
+  if ((kind === "source" || kind === "owner") && typeof sessionSig === "string") {
     return { kind, request, sig, sessionSig };
   }
 
   return undefined;
 }
 
-// Whether `sig` is the key's signature of `data`, in its one spelling.
-async function signed(key: KeyId, sig: string, data: Bytes) {
-  const bytes = sigBytes(sig);
-  if (bytes === undefined) return false;
-  const imported = await publicKey(key);
-  return verify(imported, bytes, data);
+// Whether a token's grant, or the session key's signature, admits its peer to `session`.
+function bySession(token: Token, session: KeyId) {
+  const { request } = token;
+
+  if (token.kind === "peer") {
+    return (
+      token.grant.session === session && signedBy(session, token.grant.sig, grantBytes(session))
+    );
+  }
+
+  if (token.kind === "editor") {
+    const { to } = token.grant;
+    return (to === undefined || to === request.peer) && verifyGrant(token.grant, session);
+  }
+
+  return signedBy(session, token.sessionSig, requestBytes(SESSION_PREFIX[token.kind], request));
 }
 
 // Whether every signature on a token checks out, by the keys of `session` and its peer.
 async function verified(token: Token, session: KeyId) {
   const { request } = token;
-  const bySession =
-    token.kind === "peer"
-      ? token.grant.session === session && signed(session, token.grant.sig, grantBytes(session))
-      : signed(session, token.sessionSig, requestBytes("snowy source v1", request));
   const checks = await Promise.all([
-    bySession,
-    signed(request.peer, token.sig, requestBytes("snowy relay v1", request)),
+    bySession(token, session),
+    signedBy(request.peer, token.sig, requestBytes("snowy relay v1", request)),
   ]);
   return checks.every(Boolean);
 }
@@ -177,8 +206,37 @@ async function checked(path: string, query: string | undefined, now: number, fre
   return ok ? token : undefined;
 }
 
-const grantOf = ({ kind, request }: Token) =>
-  kind === "source" ? sourceGrant(request.peer) : peerGrant(request.peer);
+// An edit session's peer may read everything but other peers' inboxes, and publish its own
+// broadcasts as its rights allow: batches and histories with `propose`, assets with `edit`.
+function editorGrant(peer: KeyId, rights: readonly Right[]): RelayGrant {
+  const proposes = rights.includes("propose");
+  return {
+    publish: [
+      `peer/${peer}`,
+      `inbox/*/${peer}`,
+      ...(proposes ? [`peer/${peer}/batches`, `peer/${peer}/history/*`] : []),
+      ...(rights.includes("edit") ? [`asset/${peer}`] : []),
+    ],
+    subscribe: ["source", "asset/*", "peer/**", `inbox/${peer}/*`],
+  };
+}
+
+// What a token's peer may do in its session: a watch session's rights are `view`, the owner's
+// every right.
+function rightsOf(token: Token): readonly Right[] {
+  if (token.kind === "editor") return token.grant.rights;
+  return token.kind === "owner" ? RIGHTS : ["view"];
+}
+
+function grantOf(token: Token): RelayGrant {
+  const { peer } = token.request;
+  if (token.kind === "source") return sourceGrant(peer);
+  if (token.kind === "peer") return peerGrant(peer);
+  const grant = editorGrant(peer, rightsOf(token));
+  if (token.kind === "editor") return grant;
+  grant.publish.unshift("source");
+  return { publish: grant.publish, subscribe: ["**"] };
+}
 
 /**
  * What a connection dialed at `path` with `query` may do, or undefined if its token admits
@@ -195,8 +253,29 @@ export async function authorize(
   return token === undefined ? undefined : grantOf(token);
 }
 
-/** A connection whose token checked out: the relay's id for it, its session, its peer and role. */
-export type Connection = { id: string; session: KeyId; peer: KeyId; role: "source" | "peer" };
+/**
+ * A connection whose token checked out: the relay's id for it, its session and peer, the token's
+ * kind (`source` and `peer` in a watch session, `owner` and `editor` in an edit session) and
+ * the rights it carries, `view` alone in a watch session. An editor's `grant` says who gave
+ * those rights: the project key, or in its `chain`, the person whose agent the peer is. An
+ * invite's grant names no one, so the app asks the peer itself who it is.
+ */
+export type Connection = {
+  id: string;
+  session: KeyId;
+  peer: KeyId;
+  role: "peer" | "source" | "editor" | "owner";
+  rights: readonly Right[];
+  grant?: Grant;
+};
+
+/**
+ * An admitted connection the relay closed: its id, why, and the bytes the relay counted to and
+ * from its peer over its whole life. The relay counts bytes only over QUIC, and reports zeros for
+ * a connection it closes as `refused`, `expired`, `invalid` or `dropped`, so those have no
+ * `bytes`.
+ */
+export type Ended = { id: string; reason?: string; bytes?: { toPeer: number; fromPeer: number } };
 
 /**
  * The app's say in who the relay admits, beyond what the keys allow (docs/architecture.md#admission).
@@ -205,11 +284,34 @@ export type Connection = { id: string; session: KeyId; peer: KeyId; role: "sourc
 export type Admission = {
   /** Whether to admit a connection whose token checked out, asked on `connect` and `revalidate`. */
   admit?: (connection: Connection) => boolean | Promise<boolean>;
-  /** The relay reports an admitted connection closed, by its id; one refused on `connect` has no end. */
-  end?: (id: string) => void | Promise<void>;
+  /** The relay reports an admitted connection closed; one refused on `connect` has no end. */
+  end?: (ended: Ended) => void | Promise<void>;
 };
 
 const status = (code: number) => new Response(null, { status: code });
+
+// The reasons moq-relay gives for closing a connection itself, which it reports with zero bytes
+// whatever the connection moved.
+const RELAY_CLOSED = new Set(["refused", "expired", "invalid", "dropped"]);
+
+// Why the relay says a connection ended, and its byte counts, `{ sent, received }` as the relay
+// sees them, when they are counts and the relay counted them. moq-relay reads them from QUIC
+// (WebTransport included) and reports zeros for its other transports, which a peer may choose.
+function endOf(id: string, { reason, transport, bytes }: Record<string, unknown>): Ended {
+  const ended: Ended = { id };
+  if (typeof reason === "string") ended.reason = reason;
+  const counts = bytesOf(bytes);
+  const counted = transport === "quic" && !RELAY_CLOSED.has(String(reason));
+  if (counted && counts !== undefined) ended.bytes = counts;
+  return ended;
+}
+
+function bytesOf(value: unknown): Ended["bytes"] {
+  if (!isRecord(value)) return undefined;
+  const { sent, received } = value;
+  const counts = [sent, received].every((n) => Number.isSafeInteger(n) && Number(n) >= 0);
+  return counts ? { toPeer: Number(sent), fromPeer: Number(received) } : undefined;
+}
 
 /**
  * The auth server, as a `fetch` handler for moq-relay's `--auth-url`: it answers each request
@@ -238,7 +340,7 @@ export function createAuthServer(admission: Admission = {}) {
 
     if (event === "end") {
       try {
-        await admission.end?.(id);
+        await admission.end?.(endOf(id, body));
       } catch {
         return status(500);
       }
@@ -259,15 +361,18 @@ export function createAuthServer(admission: Admission = {}) {
 
     if (token === undefined) return status(403);
     const { session, peer } = token.request;
+    const grant = grantOf(token);
+    const connection: Connection = { id, session, peer, role: token.kind, rights: rightsOf(token) };
+    if (token.kind === "editor") connection.grant = token.grant;
     let admitted: boolean | undefined;
 
     try {
-      admitted = await admission.admit?.({ id, session, peer, role: token.kind });
+      admitted = await admission.admit?.(connection);
     } catch {
       return status(500);
     }
 
-    return admitted === false ? status(403) : Response.json(grantOf(token));
+    return admitted === false ? status(403) : Response.json(grant);
   };
 }
 

@@ -20,6 +20,8 @@ import {
 import { joinGrant, peerToken, sourceToken, type JoinGrant } from "../../src/relay-auth";
 import { createSourceRecords, sealSourceRecord, type SourceRecord } from "../../src/source-records";
 import { rejection } from "./rejection";
+import { editRights } from "./relay-edit";
+import { watch } from "./watch";
 
 export type RelayConfig = { url: string; hash: string };
 export type Scenario = keyof typeof scenarios;
@@ -39,28 +41,6 @@ const dial = (config: RelayConfig, options: Omit<RelayOptions, "url">) =>
     serverCertificateHashes: [{ algorithm: "sha-256", value: Uint8Array.fromBase64(config.hash) }],
     ...options,
   });
-
-// Checks that resolve once they hold, looked at again on each `changed()`.
-function watch() {
-  const waiting: Array<{ check: () => boolean; resolve: () => void }> = [];
-
-  function changed() {
-    for (const wait of waiting.filter((w) => w.check())) {
-      waiting.splice(waiting.indexOf(wait), 1);
-      wait.resolve();
-    }
-  }
-
-  async function until(check: () => boolean) {
-    if (check()) return;
-
-    const { promise, resolve } = Promise.withResolvers<void>();
-    waiting.push({ check, resolve });
-    await promise;
-  }
-
-  return { changed, until };
-}
 
 async function peer(
   config: RelayConfig,
@@ -595,6 +575,7 @@ const scenarios = {
   admission,
   impostor,
   source: sourceRecords,
+  editRights,
 };
 
 async function run({ scenario, config }: { scenario: Scenario; config: RelayConfig }) {

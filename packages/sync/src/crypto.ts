@@ -70,6 +70,18 @@ export function sigBytes(sig: unknown) {
 export const publicKey = (id: KeyId) =>
   crypto.subtle.importKey("raw", keyBytes(id), { name: "Ed25519" }, true, ["verify"]);
 
+/** Bytes as unpadded base64url, the one spelling of key ids and signatures. */
+export const base64url = (bytes: Bytes) =>
+  bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+
+/** Whether `sig`, in its one spelling, is the signature by the key `key` names of `data`. */
+export async function signedBy(key: KeyId, sig: unknown, data: Bytes) {
+  const bytes = sigBytes(sig);
+  if (bytes === undefined) return false;
+  const imported = await publicKey(key);
+  return verify(imported, bytes, data);
+}
+
 export async function sign(privateKey: CryptoKey, data: Bytes) {
   const sig = await crypto.subtle.sign({ name: "Ed25519" }, privateKey, data);
   return new Uint8Array(sig);
