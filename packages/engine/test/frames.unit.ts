@@ -159,7 +159,6 @@ test("a stream is imported as is, or with Apple's gamma undone, only where that 
   expect(grid(coloured, (c) => c)).toBe("imported");
   // As macOS gives a hardware decoder's BT.709 frames: a pure 1.961 gamma, read as sRGB.
   expect(grid(coloured, (c) => srgbEncode(c ** 1.961))).toBe("apple");
-  expect(grid(coloured, (c) => c + 0.05)).toBe("read");
 });
 
 // R′G′B′ of `depth`-bit plane values `yuv` as `space` converts them, unclipped.
@@ -221,10 +220,20 @@ test("a stream Chromium takes for another matrix or range is imported, its conve
   expect(assumedGrid({}, { matrix: "bt709", fullRange: false }, appleEncode).via).toBe("apple");
 });
 
-test("a stream Chromium clips is never imported through another matrix", () => {
-  expect(assumedGrid({}, { matrix: "bt709", fullRange: false }, clipped).via).toBe("read");
-  // Nor one whose colours all fit, which shows no clip either way.
-  expect(assumedGrid({}, { matrix: "bt709", fullRange: false }, undefined, muted).via).toBe("read");
+test("a frame Chromium clips, or whose colours all fit, decides nothing", () => {
+  const hd = { matrix: "bt709", fullRange: false } as const;
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const shut = assumedGrid({}, hd, clipped);
+  const fits = assumedGrid({}, hd, undefined, muted);
+  expect([shut.via, fits.via]).toEqual([undefined, undefined]);
+  expect([[...shut.undo], [...fits.undo]]).toEqual([identity, identity]);
+  // A more saturated frame of the same stream after it decides.
+  expect(assumedGrid({}, hd).via).toBe("imported");
+});
+
+test("an unclipped frame that no matrix or range explains is read", () => {
+  // Chromium's conversion off by a twentieth everywhere, past 0 and 1 both.
+  expect(assumedGrid({}, {}, (c) => c + 0.05).via).toBe("read");
 });
 
 test("undoing a matrix takes Chromium's R′G′B′ back to the stream's", () => {
