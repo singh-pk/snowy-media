@@ -177,8 +177,8 @@ export async function play(
   await createAudioOutput(context, pcm, worklet);
   // No packets: the ring only gets the END record.
   const ring = createRing(64);
-  const audio = { stream, pcm, preroll: 0 };
-  await media.request({ type: "demux", ring, streams: [], from: 0, audio });
+  const audio = { stream, preroll: 0 };
+  await media.request({ type: "demux", ring, streams: [], from: 0, pcm, audio });
   const offsets: number[] = [];
 
   // Samples the clock, which only the audio thread moves, with rendering suspended at

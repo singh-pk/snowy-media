@@ -18,13 +18,13 @@ interface Hash {
   packetsSha256: string;
 }
 
-const expected: Record<string, { packetDts: boolean; video: Hash; audio: Hash }> = await Bun.file(
+const expected: Record<string, { packetDts: boolean; video: Hash; audio?: Hash }> = await Bun.file(
   new URL("fixtures/expected.json", import.meta.url),
 ).json();
 const fixtures = Object.entries(expected).map(([name, e]) => ({
   name,
   dts: e.packetDts,
-  streams: [e.video.id, e.audio.id],
+  streams: e.audio ? [e.video.id, e.audio.id] : [e.video.id],
 }));
 const server = await serveEngine("<!doctype html><title>test</title>");
 
@@ -68,7 +68,11 @@ for (const capacity of [1 << 18, 1 << 12]) {
         const got = hashes[file];
         if (typeof got !== "object") throw new Error(`${file}: ${String(got)}`);
         expect(got[video.id], `${file} video`).toEqual(want(video));
-        expect(got[audio.id], `${file} audio`).toEqual(want(audio));
+        // Without audio, nothing besides the video.
+        const other = audio?.id ?? Object.keys(got).find((id) => Number(id) !== video.id);
+        expect(other === undefined ? undefined : got[Number(other)], `${file} audio`).toEqual(
+          audio && want(audio),
+        );
       }
     } finally {
       await browser.close();

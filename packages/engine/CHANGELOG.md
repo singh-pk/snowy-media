@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - Video in the codecs WebCodecs does not decode, such as MPEG-2, MPEG-4 Part 2, ProRes, DNxHD and FFV1, plays: `@snowy-media/ffmpeg` decodes it in a worker of its own, loading its `video` module, or `video-ext` for rarer codecs, the first time a file needs it.
+- A file without audio plays, and video that outlasts its audio plays to its end, by up to as much as the 8 MiB packet ring holds: past the audio, the clock runs on through silence as far as the video's packets reach.
 
 ### Changed
 

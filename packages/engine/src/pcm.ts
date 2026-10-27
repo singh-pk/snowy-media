@@ -7,8 +7,10 @@
 // underrun, and it plays silence.
 //
 // The ring also carries the clock the worklet publishes: the media time of the next sample it
-// will play, the context time it plays at, and whether it is playing or underrun. It advances
-// only by samples played, so it cannot drift from the audio, and it stops on an underrun.
+// will play, the context time it plays at, and whether it is playing or stopped. It advances
+// only by frames played, so it cannot drift from the audio, and it stops on an underrun. Once
+// the audio is finished, or where there is none, it plays silence as far as the video's
+// packets reach, so the clock runs on to the end of the file and stops there.
 // The main thread adds the context's output timestamp, the one thing only it can read: which
 // context time is being heard at which moment, so any thread knows what is heard now.
 //
@@ -33,10 +35,12 @@ const PLAYING = 11;
 // frees room or closes while the producer waits, on this ring or its packet ring, so one wait
 // covers both rings and a wake-up is never lost (docs/architecture.md#audio-and-clock).
 const BELL = 12;
+// 1 once no more audio comes: all of it is in the ring, or there is none.
+const FINISHED = 13;
 // A Float64 word: the media time of the first frame. The ring is made with the time playing
 // starts from, and the producer sets it before the first frame. Plain, not atomic: the stores
-// of WRITE and SEQUENCE that follow publish it, so a reader sees it once the clock has played
-// a frame, and may see the time it was made with before.
+// of WRITE and SEQUENCE that follow publish it, or without audio those of REACH, so a reader
+// sees it once the clock has played a frame, and may see the time it was made with before.
 const START = 7;
 // The output timestamp, written by the main thread under a seqlock of its own, every word
 // with Atomics as for the clock: the context time being heard and when, in whole
@@ -46,6 +50,11 @@ const OUTPUT_SEQUENCE = 16;
 const OUTPUT_RUNNING = 17;
 const OUTPUT_TIME = 18;
 const OUTPUT_AT = 20;
+// How far the video's packets reach, the media time the last one demuxed ends at, in whole
+// microseconds as two 32-bit halves, under a seqlock of its own: the producer writes it as it
+// demuxes, and the worklet plays silence up to it once the audio is finished.
+const REACH_SEQUENCE = 22;
+const REACH = 23;
 const STOPPED = 0;
 const RUNNING = 1;
 const HELD = 2;
@@ -118,6 +127,10 @@ function ringBell(control: Int32Array) {
   Atomics.notify(control, BELL);
 }
 
+// The whole number in the two 32-bit halves of `control` from `at`, low first.
+const whole = (control: Int32Array, at: number) =>
+  Atomics.load(control, at + 1) * HALF + (Atomics.load(control, at) >>> 0);
+
 /**
  * The producer's side of `ring`, for a thread that may block; `blocking` runs before each
  * wait of `write` for room, after the flag that says so is raised. `write` is for a producer
@@ -130,6 +143,25 @@ export function createPcmProducer(ring: SharedArrayBuffer, blocking: () => void 
   /** Sets the media time, in seconds, of the first frame; before the first write. */
   function start(seconds: number) {
     times[START] = seconds;
+  }
+
+  /** Says no more audio comes, so the worklet plays silence as far as the video reaches. */
+  function finish() {
+    Atomics.store(control, FINISHED, 1);
+  }
+
+  /**
+   * Says the video's packets reach `seconds`, the media time the last one demuxed ends at, to
+   * the microsecond. It only ever grows.
+   */
+  function reach(seconds: number) {
+    const micros = Math.round(seconds * 1e6);
+    if (micros <= whole(control, REACH)) return;
+    const sequence = control[REACH_SEQUENCE] ?? 0;
+    Atomics.store(control, REACH_SEQUENCE, (sequence + 1) | 0);
+    Atomics.store(control, REACH, micros % HALF);
+    Atomics.store(control, REACH + 1, Math.floor(micros / HALF));
+    Atomics.store(control, REACH_SEQUENCE, (sequence + 2) | 0);
   }
 
   /**
@@ -192,16 +224,28 @@ export function createPcmProducer(ring: SharedArrayBuffer, blocking: () => void 
     return true;
   }
 
-  return { start, offer, bell, sleep, waitingForRoom, write };
+  return { start, finish, reach, offer, bell, sleep, waitingForRoom, write };
 }
 
 /** The AudioWorklet's side of `ring`: it never blocks. */
 export function createPcmConsumer(ring: SharedArrayBuffer) {
-  const { control, samples, channels, capacity } = views(ring);
+  const { control, times, samples, channels, capacity, rate } = views(ring);
   // Frames played since the start, exact in a double for millions of years at any rate.
   let played = 0;
   // The context frame after the last one played, which an underrun keeps.
   let end = 0;
+  // How far the video's packets reach, in microseconds, as last read whole.
+  const known = { reach: 0 };
+
+  // The reach, read once: the worklet never waits, so while the media worker is writing it, it
+  // keeps the one it read before, a quantum behind at most.
+  function reachNow() {
+    const sequence = Atomics.load(control, REACH_SEQUENCE);
+    const reach = whole(control, REACH);
+    const torn = sequence & 1 || Atomics.load(control, REACH_SEQUENCE) !== sequence;
+    if (!torn) known.reach = reach;
+    return known.reach;
+  }
 
   function publish(next: number, playing: boolean) {
     const sequence = control[SEQUENCE] ?? 0;
@@ -214,15 +258,26 @@ export function createPcmConsumer(ring: SharedArrayBuffer) {
     Atomics.store(control, SEQUENCE, (sequence + 2) | 0);
   }
 
+  // How many of `most` frames of silence, after `from` frames played, are as far as the video
+  // reaches: rounded up, so the clock reaches the last frame. In whole microseconds, so the one
+  // rounding is exact.
+  function silence(most: number, from: number) {
+    const span = reachNow() - Math.round((times[START] ?? 0) * 1e6);
+    const reach = Math.ceil((span * rate) / 1e6);
+    return Math.max(0, Math.min(most, reach - from));
+  }
+
   /**
    * Fills `output`, one array per channel, with the next frames, and silence where the ring
-   * runs out; `frame` is the context's frame of its first frame (`currentFrame`). Publishes
-   * the clock.
+   * runs out; `frame` is the context's frame of its first frame (`currentFrame`). Once the
+   * audio is finished, the silence after it counts as played as far as the video reaches.
+   * Publishes the clock.
    */
   function read(output: Float32Array[], frame: number) {
     const frames = output[0]?.length ?? 0;
     const at = control[READ] ?? 0;
-    const available = Atomics.load(control, CLOSED) ? 0 : (Atomics.load(control, WRITE) - at) | 0;
+    const open = !Atomics.load(control, CLOSED);
+    const available = open ? (Atomics.load(control, WRITE) - at) | 0 : 0;
     const n = Math.min(frames, available);
 
     // Indexed loops: an iterator would allocate on the audio thread every quantum.
@@ -240,9 +295,11 @@ export function createPcmConsumer(ring: SharedArrayBuffer) {
       if (Atomics.load(control, PRODUCER_WAITING)) ringBell(control);
     }
 
-    played += n;
-    if (n > 0) end = frame + n;
-    publish(end, n === frames && n > 0);
+    const finished = open && n < frames && Atomics.load(control, FINISHED) === 1;
+    const moved = n + (finished ? silence(frames - n, played + n) : 0);
+    played += moved;
+    if (moved > 0) end = frame + moved;
+    publish(end, moved === frames && moved > 0);
   }
 
   /** Whether the ring is closed: nothing will play from it again. */
@@ -257,16 +314,14 @@ export function createPcmConsumer(ring: SharedArrayBuffer) {
 export function createPcmControl(ring: SharedArrayBuffer) {
   const { control, times, rate } = views(ring);
   const clock: Clock = { pts: 0, time: 0, playing: false };
-  const whole = (at: number) =>
-    Atomics.load(control, at + 1) * HALF + (Atomics.load(control, at) >>> 0);
 
   /** The clock as last published; the object is reused. */
   function read() {
     for (;;) {
       const sequence = Atomics.load(control, SEQUENCE);
       if (sequence & 1) continue;
-      const played = whole(PLAYED);
-      const frame = whole(FRAME);
+      const played = whole(control, PLAYED);
+      const frame = whole(control, FRAME);
       const playing = Atomics.load(control, PLAYING) === 1;
       if (Atomics.load(control, SEQUENCE) !== sequence) continue;
       clock.pts = (times[START] ?? 0) + played / rate;
@@ -316,8 +371,8 @@ export function createPcmControl(ring: SharedArrayBuffer) {
     for (;;) {
       const sequence = Atomics.load(control, OUTPUT_SEQUENCE);
       if (sequence & 1) continue;
-      const time = whole(OUTPUT_TIME) / 1e6;
-      const when = whole(OUTPUT_AT) / 1e3;
+      const time = whole(control, OUTPUT_TIME) / 1e6;
+      const when = whole(control, OUTPUT_AT) / 1e3;
       const state = Atomics.load(control, OUTPUT_RUNNING);
       if (Atomics.load(control, OUTPUT_SEQUENCE) !== sequence) continue;
       if (state === HELD) return time;

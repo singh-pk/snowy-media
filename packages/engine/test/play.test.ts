@@ -8,7 +8,8 @@
 // (see the check). The canvas belongs to the render worker, so the
 // page reads what it shows by drawing it. It plays for SNOWY_SYNC_SECONDS (default 20); the
 // ten-minute run is `SNOWY_SYNC_SECONDS=600 bun test test/play.test.ts`. And play starts
-// where video or audio gets no further, and goes on after a pause, with the frame due shown.
+// where video or audio gets no further, and without audio, and goes on after a pause, with the
+// frame due shown, until the later of audio and video ends.
 // Usage: bun run test.
 
 import { afterAll, expect, test } from "bun:test";
@@ -26,14 +27,20 @@ interface Video {
 
 const FILE = "sync-10min.mp4";
 
-const expected: Record<string, { video: Video; audio: { resampled: { frames: number } } }> =
+const expected: Record<string, { video: Video; audio?: { resampled: { frames: number } } }> =
   await Bun.file(new URL("fixtures/expected.json", import.meta.url)).json();
 const video = expected[FILE]?.video ?? { timeBase: "1/1", width: 0, height: 0, pts: [] };
-// Where play starts as video waits for packets, where it starts at the end of the audio, where
-// it starts before the first frame, and the long one; each is played, paused and played on,
-// for WATCH seconds a play.
+// Where play starts as video waits for packets, where it starts at the end of the audio and
+// runs on to the end of the video, where it starts before the first frame, without audio, and
+// the long one; each is played, paused and played on, for WATCH seconds a play.
 const SPARSE = "sparse-h264-aac.mp4";
-const STARTS = [SPARSE, "short-audio-h264-aac.mp4", "late-video-h264-aac.mp4", FILE];
+const STARTS = [
+  SPARSE,
+  "short-audio-h264-aac.mp4",
+  "late-video-h264-aac.mp4",
+  "no-audio-h264.mp4",
+  FILE,
+];
 const WATCH = 2;
 // How far a play's clock at its last read may be from WATCH seconds on from where it started,
 // in seconds: play resolves, and the watch begins, under 0.15 s after the clock starts.
@@ -72,6 +79,19 @@ function offset(v: Video, id: number, time: number) {
   const next = ((v.pts[id + 1] ?? Infinity) * num) / den;
   if (time < due) return time - due;
   return time >= next ? time - next : 0;
+}
+
+// Where a play of `file` starts and ends, in seconds: from its audio's first sample, the start of
+// every fixture with audio, or without audio from its first frame; to the end of its audio or of
+// its last frame, whichever is later, the last frame lasting as long as the one before.
+function bounds(file: string) {
+  const { video: v, audio } = expected[file] ?? {};
+  if (!v) throw new Error(`no ${file}`);
+  const [num = 1, den = 1] = v.timeBase.split("/").map(Number);
+  const [first = 0, previous = 0, last = 0] = [v.pts[0], v.pts.at(-2), v.pts.at(-1)];
+  const videoEnd = ((2 * last - previous) * num) / den;
+  const audioEnd = audio ? audio.resampled.frames / PCM_RATE : 0;
+  return { start: audio ? 0 : (first * num) / den, end: Math.max(videoEnd, audioEnd) };
 }
 
 // Seconds as milliseconds to a tenth, for the log.
@@ -210,16 +230,17 @@ test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
   );
 
   for (const [i, file] of STARTS.entries()) {
-    const { video: v, audio } = expected[file] ?? {};
+    const v = expected[file]?.video;
     const play = got[i];
-    if (!v || !audio || !play) throw new Error(`no ${file}`);
-    const end = audio.resampled.frames / PCM_RATE;
+    if (!v || !play) throw new Error(`no ${file}`);
+    const { start, end } = bounds(file);
     const [[pausedAt, pausedId] = [0, 0]] = play.paused;
     console.log(`${file}: ${span(play.first)}; paused at ${pausedAt} s; ${span(play.second)}`);
     enough(play.first, WATCH, `${file} first`);
     enough(play.second, WATCH, `${file} second`);
-    // Started, and played from the start in real time, up to the end of the audio.
-    expect(Math.abs((play.first.at(-1)?.[0] ?? 0) - Math.min(end, WATCH))).toBeLessThan(realTime);
+    // Started, and played from the start in real time, up to the end.
+    const first = play.first.at(-1)?.[0] ?? 0;
+    expect(Math.abs(first - Math.min(end, start + WATCH)), `${file} first`).toBeLessThan(realTime);
     // Paused: one time, one frame.
     expect(new Set(play.paused.map(([time]) => time)).size).toBe(1);
     expect(new Set(play.paused.map(([, id]) => id)).size).toBe(1);
@@ -256,9 +277,9 @@ test(`starts, pauses and plays on ${STARTS.join(", ")}`, async () => {
 // The decoder lets out sparse video's last frames only once it is flushed, at the END
 // record, so the demuxer reads ahead of the audio to reach it before they are due.
 test(`plays ${SPARSE} to the end with each frame on time`, async () => {
-  const { video: v, audio } = expected[SPARSE] ?? {};
-  if (!v || !audio) throw new Error(`no ${SPARSE}`);
-  const end = audio.resampled.frames / PCM_RATE;
+  const v = expected[SPARSE]?.video;
+  if (!v) throw new Error(`no ${SPARSE}`);
+  const { end } = bounds(SPARSE);
   const reads = await inPage(
     server.url.href,
     (tab) =>

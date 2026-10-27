@@ -168,8 +168,8 @@ const benchmarks: Record<string, (tab: Page) => Promise<Timings>> = {
           const draining = drain();
           const start = performance.now();
           const ring = support.createRing(64);
-          const audio = { stream: 1, pcm, preroll: 0 };
-          await media.request({ type: "demux", ring, streams: [], from: 0, audio });
+          const audio = { stream: 1, preroll: 0 };
+          await media.request({ type: "demux", ring, streams: [], from: 0, pcm, audio });
           const ms = performance.now() - start;
           state.decoding = false;
           await draining;

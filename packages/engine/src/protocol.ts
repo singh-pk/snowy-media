@@ -88,9 +88,11 @@ export interface MediaInfo {
 // `id` pairs each reply with its request. A demux request writes the packets of `streams` into
 // `ring` (src/ring.ts) from the keyframe due at or before `from` (microseconds) on, and with
 // `audio` decodes that audio stream into the PCM ring `pcm` (src/pcm.ts), resampled to its
-// rate and channels. Unless it fails or the PCM ring closes
-// first, it says once, before it replies, that the audio is buffered (`buffered`): `preroll`
-// frames of it, a full ring, or all of it. It replies once it has written all the audio and the
+// rate and channels. A play's PCM ring keeps its clock, so it comes without `audio` too: the
+// media worker writes how far the packets reach into it, and that no audio comes. Unless it
+// fails or the PCM ring closes first, it says once, before it replies, that the audio is
+// buffered (`buffered`): `preroll` frames of it, a full ring, all of it, or at once without
+// audio. It replies once it has written all the audio and the
 // END record, or once a consumer has closed its ring. On an error it ends the ring with FAILED
 // and replies with the error, the only report of it.
 export type ToMedia =
@@ -101,8 +103,9 @@ export type ToMedia =
       ring: SharedArrayBuffer;
       streams: number[];
       from: number;
-      // Its audio before `from` is dropped.
-      audio?: { stream: number; pcm: SharedArrayBuffer; preroll: number };
+      pcm?: SharedArrayBuffer;
+      // Its audio before `from` is dropped. Needs `pcm`.
+      audio?: { stream: number; preroll: number };
     };
 
 export type FromMedia =

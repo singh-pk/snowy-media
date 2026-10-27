@@ -4,7 +4,8 @@
 // The PCM ring and its clock, in Chromium, one render quantum at a time as the AudioWorklet reads
 // it: samples arrive intact across the ring's end and from a producer thread that blocks for
 // room, the clock stops on an underrun and resumes with the audio, and closing the ring stops
-// the producer, also while it waits. Usage: bun run test
+// the producer, also while it waits. Once the audio is finished, or without any, the clock runs
+// through silence as far as the video reaches. Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import { createPcmConsumer, createPcmControl, createPcmProducer, createPcmRing } from "../src/pcm";
@@ -145,6 +146,75 @@ test("the clock stops on an underrun and resumes with the audio", () => {
   consumer.read(output, 384);
   expect(control.read()).toEqual({ pts: 10.378, time: 0.512, playing: true });
   expect(output[0]?.[0]).toBe(250);
+});
+
+test("once the audio is finished, the clock runs through silence as far as the video reaches", () => {
+  const ring = createPcmRing(1024, 2, RATE);
+  const producer = createPcmProducer(ring);
+  const consumer = createPcmConsumer(ring);
+  const control = createPcmControl(ring);
+  producer.start(10);
+  producer.write(frames(0, 100), 0, 100);
+  producer.finish();
+  // Video to 10.3 s: 300 frames from the start.
+  producer.reach(10.3);
+  const output = quantum();
+
+  // 100 frames of audio, then silence that counts as played.
+  consumer.read(output, 0);
+  expect(control.read()).toEqual({ pts: 10.128, time: 0.128, playing: true });
+  expect(output[0]?.[99]).toBe(99);
+  expect(output[0]?.subarray(100).every((v) => v === 0)).toBe(true);
+  consumer.read(output, 128);
+  expect(control.read()).toEqual({ pts: 10.256, time: 0.256, playing: true });
+
+  // 44 frames more reach 10.3 s, where the clock stops.
+  consumer.read(output, 256);
+  expect(control.read()).toEqual({ pts: 10.3, time: 0.3, playing: false });
+  consumer.read(output, 384);
+  expect(control.read()).toEqual({ pts: 10.3, time: 0.3, playing: false });
+
+  // Video demuxed further: the clock runs on from where it stopped.
+  producer.reach(10.5);
+  consumer.read(output, 512);
+  expect(control.read()).toEqual({ pts: 10.428, time: 0.64, playing: true });
+});
+
+test("without audio, the clock waits until it is finished, and for the video's packets", () => {
+  const ring = createPcmRing(1024, 2, RATE);
+  const producer = createPcmProducer(ring);
+  const consumer = createPcmConsumer(ring);
+  const control = createPcmControl(ring);
+  producer.start(10);
+  producer.reach(10.1);
+  const output = quantum();
+
+  // Not finished, an empty ring is an underrun, however far the video reaches.
+  consumer.read(output, 0);
+  expect(control.read()).toEqual({ pts: 10, time: 0, playing: false });
+
+  // Finished: as far as the video reaches, 100 frames, then stopped.
+  producer.finish();
+  consumer.read(output, 128);
+  expect(control.read()).toEqual({ pts: 10.1, time: 0.228, playing: false });
+  expect(output[1]?.every((v) => v === 0)).toBe(true);
+  // A reach behind the last one changes nothing.
+  producer.reach(10.05);
+  consumer.read(output, 256);
+  expect(control.read()).toEqual({ pts: 10.1, time: 0.228, playing: false });
+});
+
+test("a reach past 2^32 microseconds, in two halves, stops the clock where it says", () => {
+  const ring = createPcmRing(1024, 2, RATE);
+  const producer = createPcmProducer(ring);
+  const consumer = createPcmConsumer(ring);
+  const control = createPcmControl(ring);
+  // 4300 s is past 2^32 µs (4294.97 s), so the low half has wrapped.
+  producer.start(4300);
+  producer.finish();
+  producer.reach(4300.1);
+  consumer.read(quantum(), 0);
+  expect(control.read()).toEqual({ pts: 4300.1, time: 0.1, playing: false });
 });
 
 test("closing the ring stops the producer and silences the consumer", () => {
