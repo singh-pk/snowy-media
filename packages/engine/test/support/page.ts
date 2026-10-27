@@ -14,7 +14,15 @@ import { createCompositor } from "../../src/compositor";
 import { createRoute, type Route } from "../../src/measure";
 import { createPcmControl, createPcmRing } from "../../src/pcm";
 import type { FromMedia, ToMedia } from "../../src/protocol";
-import { createConsumer, createRing, END, FAILED, RING_CAPACITY } from "../../src/ring";
+import {
+  createConsumer,
+  createOutgoingPacket,
+  createProducer,
+  createRing,
+  END,
+  FAILED,
+  RING_CAPACITY,
+} from "../../src/ring";
 import { createVideoOutput } from "../../src/video";
 import { createWasmVideo } from "../../src/wasm-video";
 import type * as EngineModule from "../../src/index";
@@ -28,7 +36,7 @@ export {
   createPcmProducer,
   createPcmRing,
 } from "../../src/pcm";
-export { createRing, RING_CAPACITY } from "../../src/ring";
+export { createRing, PART, RING_CAPACITY } from "../../src/ring";
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -53,25 +61,46 @@ const wasm = createWasmVideo(startVideoWorker);
 export const startDecoders = (capacity: number) => createWasmVideo(startVideoWorker, capacity);
 
 /**
- * Hands a decoder of `decoders` for the stream with parameters `p` a packet twice the size of
- * their ring, and closes it partway. Whether the packet went in part, as it must.
+ * Hands a decoder of `decoders` for the stream with parameters `p` the pieces of a packet as
+ * large as its packet ring of `capacity` bytes that fit, and closes the decoder before the
+ * rest. The PART of each record handed, and whether any made a packet.
  */
-export function abandonPacket(
+export async function closePartway(
   decoders: ReturnType<typeof startDecoders>,
   p: VideoParams,
   capacity: number,
 ) {
+  // Each record taken out of the packet ring, which frees it.
+  const taken = { next: Promise.withResolvers<void>() };
   const events = {
     output: (f: { close(): void }) => f.close(),
-    dequeue: () => {},
-    error: () => {},
+    dequeue: () => taken.next.resolve(),
+    error: (e: Error) => taken.next.reject(e),
   };
-  const decoder = decoders.createDecoder(p, events);
-  const data = new Uint8Array(2 * capacity);
-  const packet = { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data };
-  const whole = decoder.decode(packet, 0n, 0, 0);
+  const ring = createRing(capacity);
+  const producer = createProducer(ring);
+  const packet = createOutgoingPacket(new Uint8Array(capacity));
+  packet.size = capacity;
+  // In pieces of a quarter of the ring, as many as fit.
+  if (producer.offer(packet)) throw new Error("the packet went whole");
+  const consumer = createConsumer(ring);
+  const decoder = decoders.createDecoder(p, events, ring);
+  const { place } = decoder;
+  if (!place) throw new Error(`${p.codec}: not decoded from where its packets are`);
+  const parts: number[] = [];
+  const made = { any: false };
+
+  for (let record = consumer.peekPlace(place); record; record = consumer.peekPlace(place)) {
+    parts.push(place.part);
+    if (decoder.decode(record, 0n, 0, 0)) made.any = true;
+    await taken.next.promise;
+    taken.next = Promise.withResolvers<void>();
+    consumer.release();
+  }
+
   decoder.close();
-  return !whole;
+  consumer.close();
+  return { parts, made: made.any };
 }
 
 const timestamp = (t: bigint) => (t === AV_NOPTS_VALUE ? "" : String(t));
@@ -423,22 +452,40 @@ export async function compareRoutes(
 
 /**
  * The error of a decoder the video decode worker fails to open: one of the stream with
- * parameters `p`, but with codec parameters FFmpeg cannot read.
+ * parameters `p`, but with codec parameters FFmpeg cannot read. With whether it still reads, and
+ * how many packets it has queued, once the packet handed to it meanwhile is answered.
  */
 export async function failInWorker(p: VideoParams) {
   const failed = Promise.withResolvers<Error>();
+  // Both answers to the packet: its record taken, and it decoded.
+  const answered = { count: 0, both: Promise.withResolvers<void>() };
   const events = {
     output: (f: { close(): void }) => f.close(),
-    dequeue() {},
+    dequeue() {
+      answered.count++;
+      if (answered.count === 2) answered.both.resolve();
+    },
     error: failed.resolve,
   };
-  const decoder = wasm.createDecoder({ ...p, params: new Uint8Array(64).fill(255) }, events);
-  const data = new Uint8Array(16);
-  const packet = { stream: 0, flags: AV_PKT_FLAG_KEY, pts: 0n, dts: 0n, duration: 1, data };
-  decoder.decode(packet, 0n, 0, 0);
+  const ring = createRing(1 << 12);
+  const params = { ...p, params: new Uint8Array(64).fill(255) };
+  const decoder = wasm.createDecoder(params, events, ring);
+  if (!decoder.place) throw new Error(`${p.codec}: not decoded from where its packets are`);
+  const packet = createOutgoingPacket(new Uint8Array(16));
+  packet.size = 16;
+  packet.flags = AV_PKT_FLAG_KEY;
+  createProducer(ring).write(packet);
+  const consumer = createConsumer(ring);
+  const record = consumer.peekPlace(decoder.place);
+  if (!record) throw new Error("no packet in the packet ring");
+  // Handed before the failure comes back, as a packet already on its way is.
+  decoder.decode(record, 0n, 0, 0);
   const error = await failed.promise;
+  await answered.both.promise;
+  const after = { reading: decoder.reading(), queued: decoder.queued() };
   decoder.close();
-  return error.message;
+  consumer.close();
+  return { message: error.message, ...after };
 }
 
 /**

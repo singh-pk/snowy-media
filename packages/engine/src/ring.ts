@@ -6,7 +6,9 @@
 // payload, padded to 32 bytes. A record may wrap around the end of the ring, so it fits without
 // wasting the space at the end. A packet larger than half the ring goes as pieces of a quarter
 // of it, which the consumer puts back together, so a packet of any size passes; one packet at a
-// time is in pieces, and other records may come between them. The producer blocks
+// time is in pieces, and other records may come between them. A consumer may hand a record on
+// unread instead (peekPlace), for another thread to copy its payload out of the ring
+// (createPlaceReader) before the consumer frees it. The producer blocks
 // (Atomics.wait) while the ring is full, except to fail, which takes no room; the consumer
 // never blocks, and waits (Atomics.waitAsync) for the producer to notify it when it writes to
 // an empty ring or fails. A consumer that watches is notified too when the producer's thread
@@ -31,12 +33,11 @@ const FAILURE = 7;
 const DATA = 64;
 // A header, and the alignment of every record, so a header never wraps.
 const HEADER = 32;
-// Bits of a record's size word: a piece of a packet, its last piece, and an empty piece that
-// gives up the packet. A record's size is below 2^29, as the capacity is.
+// Bits of a record's size word: a piece of a packet, and its last piece. A record's size is
+// below 2^29, as the capacity is.
 const PIECE = 1 << 31;
 const LAST = 1 << 30;
-const ABANDONED = 1 << 29;
-const SIZE = ABANDONED - 1;
+const SIZE = (1 << 29) - 1;
 
 /**
  * The engine's ring size: room for seconds of the highest bitrates a browser plays
@@ -67,6 +68,19 @@ export interface Packet {
   /** In the stream's time base, a 32-bit integer. */
   duration: number;
   data: Uint8Array;
+}
+
+/** Which part of its packet a record is: all of it, a piece, or its last piece. */
+export const PART = { whole: 0, piece: 1, last: 2 } as const;
+
+/**
+ * Where a record's payload is in its ring, `size` bytes from `start`, which may wrap, and which
+ * PART of its packet it is: what a consumer that hands the record on unread tells the reader.
+ */
+export interface Place {
+  start: number;
+  size: number;
+  part: number;
 }
 
 const padded = (size: number) => HEADER + ((size + HEADER - 1) & -HEADER);
@@ -152,9 +166,12 @@ function reserve({ capacity, control }: Views, need: number) {
   }
 }
 
-// Whether `need` bytes are free.
+// Whether `need` bytes are free and the ring open. CLOSED is read after READ, as a close moves
+// READ up to WRITE: the free bytes seen are never those a close frees, which a reader on another
+// thread may still be copying from (createPlaceReader).
 function fits({ capacity, control }: Views, need: number) {
-  return capacity - (((control[WRITE] ?? 0) - Atomics.load(control, READ)) | 0) >= need;
+  const free = capacity - (((control[WRITE] ?? 0) - Atomics.load(control, READ)) | 0) >= need;
+  return !Atomics.load(control, CLOSED) && free;
 }
 
 // Taken, so a busy ring makes no notify calls.
@@ -221,11 +238,6 @@ function producerSignals(control: Int32Array) {
     sleep(seen: number) {
       Atomics.wait(control, READ, seen);
     },
-    /** Resolves once the count moves from `seen`, for a producer that never blocks. */
-    async moved(seen: number) {
-      const { async, value } = Atomics.waitAsync(control, READ, seen);
-      if (async) await value;
-    },
   };
 }
 
@@ -236,12 +248,11 @@ export function createProducer(ring: SharedArrayBuffer) {
   // The packet in pieces, by its stream, timestamp and size, and its bytes written so far,
   // while its other pieces wait for room. One packet at a time is in pieces.
   const split = { sent: 0, stream: 0, pts: 0n, size: 0 };
-  // How the packet being put goes: waiting for room, or only with `spare` bytes left over.
-  const mode = { wait: true, spare: 0 };
+  // How the packet being put goes: waiting for room, or only if it has room.
+  const mode = { wait: true };
   const piece: Piece = { offset: 0, size: 0, mark: 0 };
   const ending = createOutgoingPacket(bytes);
   ending.stream = END;
-  const nothing = createOutgoingPacket(bytes);
 
   /**
    * Copies `packet` into a record, waiting for room. False once the consumer has closed the
@@ -249,24 +260,17 @@ export function createProducer(ring: SharedArrayBuffer) {
    */
   function write(packet: OutgoingPacket) {
     mode.wait = true;
-    mode.spare = 0;
     return put(packet);
   }
 
   /**
-   * Copies `packet` into a record if the ring has room for it with `spare` bytes left over,
-   * for a producer that waits on more than this ring. False if it has not, or once the
-   * consumer has closed the ring (`closed`).
+   * Copies `packet` into a record if the ring has room for it, for a producer that waits on
+   * more than this ring. False if it has not, or once the consumer has closed the ring
+   * (`closed`).
    */
-  function offer(packet: OutgoingPacket, spare = 0) {
+  function offer(packet: OutgoingPacket) {
     mode.wait = false;
-    mode.spare = spare;
     return put(packet);
-  }
-
-  // The payload bytes of the next record of a packet of `size` bytes.
-  function nextRecord(size: number) {
-    return padded(size) <= capacity / 2 ? size : Math.min(capacity / 4, size - split.sent);
   }
 
   // Writes a packet as `mode` says: a large one as pieces, each written once, so a caller that
@@ -285,7 +289,8 @@ export function createProducer(ring: SharedArrayBuffer) {
     split.size = size;
 
     while (split.sent < size) {
-      const n = nextRecord(size);
+      // A quarter of the ring, or what is left.
+      const n = Math.min(capacity / 4, size - split.sent);
       const mark = PIECE | (split.sent + n === size ? LAST : 0);
 
       if (!record(packet, offset + split.sent, n, mark)) {
@@ -304,9 +309,7 @@ export function createProducer(ring: SharedArrayBuffer) {
   // if `mode` lets it.
   function record(packet: OutgoingPacket, offset: number, size: number, mark: number) {
     const need = padded(size);
-    const room = mode.wait
-      ? reserve(v, need)
-      : !Atomics.load(control, CLOSED) && fits(v, need + mode.spare);
+    const room = mode.wait ? reserve(v, need) : fits(v, need);
     if (!room) return false;
     piece.offset = offset;
     piece.size = size;
@@ -315,29 +318,11 @@ export function createProducer(ring: SharedArrayBuffer) {
     return true;
   }
 
-  /**
-   * Gives up the packet whose pieces are partly written, for a producer that will not offer it
-   * again: the consumer drops what it has of it. False if the record that says so has no room.
-   */
-  function abandon() {
-    if (split.sent === 0) return true;
-    split.sent = 0;
-    mode.wait = false;
-    mode.spare = 0;
-    return record(nothing, 0, 0, PIECE | ABANDONED);
-  }
-
   return Object.assign(producerSignals(control), {
     /** A packet to fill and hand to `write` or `offer`, for a caller that keeps none of its own. */
     packet: createOutgoingPacket(),
     write,
     offer,
-    abandon,
-    /**
-     * Whether the next record of a packet of `size` bytes fits with `spare` bytes left over,
-     * for a producer that keeps room for records it must always be able to offer.
-     */
-    hasRoom: (size: number, spare: number) => fits(v, padded(nextRecord(size)) + spare),
     /** Writes the END record after the last packet, waiting for room, as the tests' producer does. */
     end: () => write(ending),
     /** Writes the END record if the ring has room for it, as `offer`. */
@@ -439,21 +424,62 @@ function consumerSignals(ring: SharedArrayBuffer, control: Int32Array, events: C
   };
 }
 
+// What copies `size` bytes from `start` in the ring of `v`, which may wrap, into `into` at `at`.
+function copier({ capacity, bytes }: Views) {
+  return (start: number, size: number, into: Uint8Array, at: number) => {
+    const first = Math.min(size, capacity - start);
+    into.set(bytes.subarray(start, start + first), at);
+    if (first < size) into.set(bytes.subarray(0, size - first), at + first);
+  };
+}
+
+// A packet's pieces put back together, `length` bytes of `data` so far.
+interface Pieces {
+  data: Uint8Array;
+  length: number;
+}
+
+// Adds the `size` bytes from `start` that `copy` copies to `pieces`, its buffer grown to the
+// largest packet so far.
+function addPiece(pieces: Pieces, copy: ReturnType<typeof copier>, start: number, size: number) {
+  const length = pieces.length + size;
+
+  if (pieces.data.length < length) {
+    const grown = new Uint8Array(Math.max(length, 2 * pieces.data.length));
+    // copy: the pieces so far, into a buffer that holds the next.
+    grown.set(pieces.data.subarray(0, pieces.length));
+    pieces.data = grown;
+  }
+
+  copy(start, size, pieces.data, pieces.length);
+  pieces.length = length;
+}
+
+/**
+ * Copies payloads out of `ring` where a consumer that hands records on unread found them
+ * (peekPlace), on any thread; the consumer frees a record only once this has copied it. `read`
+ * copies one into `into` at `at`, and `join` adds a piece to `pieces`, which its user empties.
+ */
+export function createPlaceReader(ring: SharedArrayBuffer) {
+  const copy = copier(views(ring));
+  const pieces: Pieces = { data: new Uint8Array(0), length: 0 };
+  return {
+    pieces,
+    read: ({ start, size }: Place, into: Uint8Array, at: number) => copy(start, size, into, at),
+    join: ({ start, size }: Place) => addPiece(pieces, copy, start, size),
+  };
+}
+
 // Puts back together what a consumer cannot read in place in the ring: a record that wraps, and
 // a packet in pieces.
-function createJoiner({ capacity, bytes }: Views) {
+function createJoiner(v: Views) {
+  const { capacity, bytes } = v;
+  const copy = copier(v);
   // Where a record that wraps is put back together; it grows to the largest such packet.
   const joined = { data: new Uint8Array(0) };
   // Where a packet's pieces are put back together, apart from `joined`, as other records may
   // come between them; `done` once its last piece is in, until it is released.
   const pieces = { data: new Uint8Array(0), length: 0, done: false };
-
-  // Copies `size` bytes from `start` in the ring, which may wrap, into `into` at `at`.
-  function copy(start: number, size: number, into: Uint8Array, at: number) {
-    const first = Math.min(size, capacity - start);
-    into.set(bytes.subarray(start, start + first), at);
-    if (first < size) into.set(bytes.subarray(0, size - first), at + first);
-  }
 
   // The `size` bytes of a whole record from `start`, put back together in `joined` if they wrap.
   function whole(start: number, size: number) {
@@ -471,20 +497,82 @@ function createJoiner({ capacity, bytes }: Views) {
   // is the last, read already and not released.
   function join(start: number, size: number, word: number) {
     if (pieces.done) return;
-    const length = pieces.length + size;
-
-    if (pieces.data.length < length) {
-      const grown = new Uint8Array(Math.max(length, 2 * pieces.data.length));
-      grown.set(pieces.data.subarray(0, pieces.length));
-      pieces.data = grown;
-    }
-
-    copy(start, size, pieces.data, pieces.length);
-    pieces.length = length;
+    addPiece(pieces, copy, start, size);
     pieces.done = (word & LAST) !== 0;
   }
 
   return { pieces, whole, join };
+}
+
+// The PART of its packet a record is, by its size word.
+function partOf(word: number) {
+  if (!(word & PIECE)) return PART.whole;
+  return word & LAST ? PART.last : PART.piece;
+}
+
+/**
+ * Reads the records of the ring of `v` into `packet`, a header at a time, for its consumer: where
+ * the next is, what a peek with none next returns, and the next unread.
+ */
+function createHeads(v: Views, packet: Packet) {
+  const { capacity, control, bytes, words, longs } = v;
+  const empty = bytes.subarray(0, 0);
+  // Whether the producer had failed when `next` found no record.
+  const ended = { failed: false };
+
+  // Reads the header of the record at `at` into `packet`.
+  function header(at: number) {
+    packet.stream = words[(at >> 2) + 1] ?? 0;
+    packet.flags = words[(at >> 2) + 2] ?? 0;
+    packet.duration = words[(at >> 2) + 3] ?? 0;
+    packet.pts = longs[(at >> 3) + 2] ?? 0n;
+    packet.dts = longs[(at >> 3) + 3] ?? 0n;
+  }
+
+  // Where the next record is, its header read into `packet`; undefined while there is none: the
+  // ring empty or closed, or the producer failed with every record read, which `ended` notes.
+  function next() {
+    const read = control[READ] ?? 0;
+    // Read before WRITE, so a failure seen comes after every record it sees.
+    const failed = Atomics.load(control, FAILURE) === 1;
+    ended.failed = false;
+    if (Atomics.load(control, CLOSED)) return undefined;
+
+    if (Atomics.load(control, WRITE) === read) {
+      ended.failed = failed;
+      return undefined;
+    }
+
+    header(read & (capacity - 1));
+    return read;
+  }
+
+  // What a peek with no record next returns: FAILED once the producer has failed, or undefined.
+  function none() {
+    if (!ended.failed) return undefined;
+    packet.stream = FAILED;
+    packet.data = empty;
+    return packet;
+  }
+
+  /**
+   * The next record as `peek` would, but unread, for a consumer that hands it to another thread
+   * to copy out of the ring (createPlaceReader): its packet's header, with no data, and where its
+   * payload is, in `place`. A packet in pieces comes a piece at a time, each one to release.
+   */
+  function peekPlace(place: Place): Packet | undefined {
+    const read = next();
+    if (read === undefined) return none();
+    const at = read & (capacity - 1);
+    const word = words[at >> 2] ?? 0;
+    place.start = (at + HEADER) & (capacity - 1);
+    place.size = word & SIZE;
+    place.part = partOf(word);
+    packet.data = empty;
+    return packet;
+  }
+
+  return { next, none, peekPlace };
 }
 
 /**
@@ -499,9 +587,10 @@ export function createConsumer(
   freed: () => void = () => {},
 ) {
   const v = views(ring);
-  const { capacity, control, bytes, words, longs } = v;
+  const { capacity, control, bytes, words } = v;
   const packet: Packet = { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data: bytes };
   const { pieces, whole, join } = createJoiner(v);
+  const { next, none, peekPlace } = createHeads(v, packet);
 
   // Frees the record of `size` bytes at `read`.
   function advance(read: number, size: number) {
@@ -513,48 +602,22 @@ export function createConsumer(
     }
   }
 
-  // Reads the header of the record at `at` into `packet`.
-  function header(at: number) {
-    packet.stream = words[(at >> 2) + 1] ?? 0;
-    packet.flags = words[(at >> 2) + 2] ?? 0;
-    packet.duration = words[(at >> 2) + 3] ?? 0;
-    packet.pts = longs[(at >> 3) + 2] ?? 0n;
-    packet.dts = longs[(at >> 3) + 3] ?? 0n;
-  }
-
   /**
    * The next packet, valid until `release`; undefined while the ring is empty or closed. Once
    * the producer has failed and every record is read, a FAILED packet, which `release` leaves.
    */
   function peek(): Packet | undefined {
     for (;;) {
-      const read = control[READ] ?? 0;
-      // Read before WRITE, so a failure seen comes after every record it sees.
-      const failed = Atomics.load(control, FAILURE) === 1;
-      if (Atomics.load(control, CLOSED)) return undefined;
-
-      if (Atomics.load(control, WRITE) === read) {
-        if (!failed) return undefined;
-        packet.stream = FAILED;
-        packet.data = bytes.subarray(0, 0);
-        return packet;
-      }
-
+      const read = next();
+      if (read === undefined) return none();
       const at = read & (capacity - 1);
       const word = words[at >> 2] ?? 0;
       const size = word & SIZE;
-      header(at);
       const start = (at + HEADER) & (capacity - 1);
 
       if (!(word & PIECE)) {
         packet.data = whole(start, size);
         return packet;
-      }
-
-      if (word & ABANDONED) {
-        pieces.length = 0;
-        advance(read, 0);
-        continue;
       }
 
       join(start, size, word);
@@ -569,7 +632,10 @@ export function createConsumer(
     }
   }
 
-  /** Frees the packet `peek` returned; nothing once the ring is closed, or for FAILED. */
+  /**
+   * Frees the record `peek` or `peekPlace` returned; nothing once the ring is closed, or for
+   * FAILED.
+   */
   function release() {
     const read = control[READ] ?? 0;
     if (Atomics.load(control, CLOSED) || Atomics.load(control, WRITE) === read) return;
@@ -583,5 +649,9 @@ export function createConsumer(
     advance(read, word & SIZE);
   }
 
-  return Object.assign(consumerSignals(ring, control, { blocked, freed }), { peek, release });
+  return Object.assign(consumerSignals(ring, control, { blocked, freed }), {
+    peek,
+    peekPlace,
+    release,
+  });
 }

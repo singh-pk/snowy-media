@@ -128,15 +128,18 @@ test("a decoder the video decode worker fails reports why, closes cleanly, and t
       async ({ page, worker, n }) => {
         const support: typeof PageSupport = await import(page);
         const { media, params } = await support.openVideo(worker, n, 0);
-        const message = await support.failInWorker(params);
+        const failure = await support.failInWorker(params);
         const size = { times: [0], width: params.width, height: params.height };
         const { shown } = await support.render(media, 0, params, size);
         media.stop();
-        return { message, shown };
+        return { failure, shown };
       },
       { page: PAGE, worker: MEDIA_WORKER, n: name },
     );
-    expect(got.message).toContain("decoder_open_params");
+    expect(got.failure.message).toContain("decoder_open_params");
+    // The packet handed to the failed decoder is still taken and counted decoded, so nothing
+    // waits on it.
+    expect([got.failure.reading, got.failure.queued]).toEqual([false, 0]);
     expect(got.shown).toEqual([{ drawn: true, id: 0 }]);
     expect(errors).toEqual([]);
   } finally {
@@ -191,11 +194,16 @@ test("a decoder closed partway through handing over a packet leaves the next dec
         const { media, params } = await support.openVideo(worker, n, 0);
         const capacity = 1 << 16;
         const decoders = support.startDecoders(capacity);
-        const partial = support.abandonPacket(decoders, params, capacity);
+        const partial = await support.closePartway(decoders, params, capacity);
         const rings = { packets: 1 << 12, decoders };
         const { shown } = await support.render(media, 0, params, { ...size, rings });
         media.stop();
-        return { partial, ids: shown.filter((s) => s.drawn).map((s) => s.id) };
+        // Pieces before the last, and no packet made of them.
+        const pieces = partial.parts.every((x) => x === support.PART.piece);
+        return {
+          partial: pieces && partial.parts.length > 0 && !partial.made,
+          ids: shown.filter((s) => s.drawn).map((s) => s.id),
+        };
       },
       {
         page: PAGE,
