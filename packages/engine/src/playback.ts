@@ -164,10 +164,9 @@ function createReadiness({ host, id, hasVideo, demux, output }: ReadinessOptions
 export async function startPlayback(options: PlaybackOptions): Promise<Playback> {
   const { host, context, id, opened, from } = options;
   const audio = opened.info.tracks.find((t) => t.kind === "audio");
-  // The clock is the audio's, so a file without audio has none.
-  if (!audio) throw new Error("play: a file without audio does not play yet");
   const video = opened.info.tracks.find((t) => t.kind === "video");
   const params = video && opened.video[video.id];
+  if (!audio && !params) throw new Error("play: the file has no video or audio to play");
   const frames = pcmFrames(context.sampleRate);
   const pcm = createPcmRing(frames, CHANNELS, context.sampleRate, from / 1e6);
   const clock = createPcmControl(pcm);
@@ -188,10 +187,11 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
   if (params)
     host.render.postMessage({ type: "play", id, ring, params, pcm, from } satisfies ToRender);
   const streams = video && params ? [video.id] : [];
-  const request = { stream: audio.id, pcm, preroll: PREROLL * context.sampleRate };
+  const message: DemuxMessage = { type: "demux", ring, streams, from, pcm };
+  if (audio) message.audio = { stream: audio.id, preroll: PREROLL * context.sampleRate };
   const demux = { buffered: false, done: false };
 
-  const demuxed = host.demux({ type: "demux", ring, streams, from, audio: request }, () => {
+  const demuxed = host.demux(message, () => {
     demux.buffered = true;
     host.changed();
   });

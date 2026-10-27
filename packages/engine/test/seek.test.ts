@@ -106,8 +106,8 @@ function targets(v: Video, duration: number, seed: number) {
 }
 
 const fixtures = Object.entries(expected).filter(
-  ([file, { video, audio }]) =>
-    video && audio && file !== LONG && video.shown[0] === width && video.shown[1] === height,
+  ([file, { video }]) =>
+    video && file !== LONG && video.shown[0] === width && video.shown[1] === height,
 );
 
 test(
@@ -155,9 +155,15 @@ test(
         `${file} at ${times.join(", ")} µs`,
       ).toEqual(frames);
 
+      // Without audio, the clock starts no earlier than the first frame.
+      const first = expected[file]?.audio ? 0 : seconds(v, v.pts[0] ?? 0);
+
       for (const [k, t] of times.entries()) {
         const clock = seen[k]?.[0] ?? Number.NaN;
-        expect(Math.abs(clock - t / 1e6), `${file}: clock at ${t} µs`).toBeLessThan(SAMPLE);
+        expect(
+          Math.abs(clock - Math.max(first, t / 1e6)),
+          `${file}: clock at ${t} µs`,
+        ).toBeLessThan(SAMPLE);
       }
     }
   },

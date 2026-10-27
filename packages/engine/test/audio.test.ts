@@ -21,7 +21,7 @@ interface Audio {
   resampled: { frames: number; probe: number[] };
 }
 
-const expected: Record<string, { audio: Audio }> = await Bun.file(
+const expected: Record<string, { audio?: Audio }> = await Bun.file(
   new URL("fixtures/expected.json", import.meta.url),
 ).json();
 const LONG = "sync-10min.mp4";
@@ -88,10 +88,12 @@ test("plays every fixture as ffmpeg -ar -ac resamples it", async () => {
     const tab = await browser.newPage();
     await tab.goto(server.url.href);
 
-    // The long fixture has its own test below.
-    const fixtures = Object.entries(expected).filter(([file]) => file !== LONG);
+    // The long fixture has its own test below; a file without audio is in test/play.test.ts.
+    const fixtures = Object.entries(expected).flatMap(([file, { audio }]) =>
+      file !== LONG && audio ? [{ file, audio }] : [],
+    );
 
-    for (const [file, { audio }] of fixtures) {
+    for (const { file, audio } of fixtures) {
       const played = await play(tab, file, audio, 2);
       checkClock(file, played, audio);
       const want = audio.resampled.probe;

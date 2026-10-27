@@ -58,6 +58,8 @@ export interface AudioOptions {
   /** The open file's demuxer. */
   ctx: number;
   request: AudioRequest;
+  /** The PCM ring it decodes into. */
+  pcm: SharedArrayBuffer;
   /** Microseconds: the audio before it is dropped. */
   from: number;
   /** Whether the demuxer moved to `from`, so silence fills to where the audio starts. */
@@ -154,9 +156,9 @@ function freeDecoder(core: CoreModule, decoder: Decoder) {
   if (decoder.dec) core._sny_decoder_close(decoder.dec);
 }
 
-function createState({ ffmpeg, ctx, request, from, sought, buffered }: AudioOptions) {
+function createState({ ffmpeg, ctx, request, pcm, from, sought, buffered }: AudioOptions) {
   const { core } = ffmpeg;
-  const { stream, pcm, preroll } = request;
+  const { stream, preroll } = request;
   const { channels, rate } = pcmFormat(pcm);
   const producer = createPcmProducer(pcm);
   const st = core._sny_stream(ctx, stream);
@@ -281,6 +283,7 @@ function feed(a: State) {
 
     if (phase.flushed) {
       phase.done = true;
+      a.producer.finish();
       tell(a);
       return true;
     }

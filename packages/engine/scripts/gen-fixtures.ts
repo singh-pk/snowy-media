@@ -83,8 +83,8 @@ const OPUS = ["-c:a", "libopus"];
 const OUT = ["-fflags", "+bitexact"];
 
 // name -> its length, the ffmpeg arguments after the inputs, and those for the video input;
-// and its frame rate and its audio's length, where they are not FPS and its length. Every
-// fixture has a frame for each frame period of it and a click for each second of its audio.
+// and its frame rate and its audio's length, where they are not FPS and its length, 0 for none.
+// Every fixture has a frame for each frame period of it and a click for each second of its audio.
 const fixtures: Record<
   string,
   {
@@ -139,6 +139,14 @@ const fixtures: Record<
     seconds: 3,
     audioSeconds: 3.5,
     args: [...H264, ...AAC],
+    input: ["-itsoffset", "0.5"],
+  },
+  // No audio, and video from half a second in: the clock runs on the video alone, from where it
+  // starts.
+  "no-audio-h264.mp4": {
+    seconds: 3,
+    audioSeconds: 0,
+    args: [...H264],
     input: ["-itsoffset", "0.5"],
   },
   "altref-vp8-opus.webm": { seconds: 3, args: [...VP8_ALTREF, ...OPUS], twoPass: true },
@@ -344,6 +352,34 @@ async function encode(file: string, inputs: string[], args: string[], twoPass = 
   }
 }
 
+// What fixture `name` in `file` should hold of audio stream `a`, after checking a click starts
+// each second of its `audioSeconds`; nothing without one.
+async function expectedAudio(
+  name: string,
+  file: string,
+  a: Stream | undefined,
+  { packets, dts, audioSeconds }: { packets: Packet[]; dts: boolean; audioSeconds: number },
+) {
+  if (!a) return undefined;
+  const onsets = await readClicks(file, a);
+  if (onsets.length !== Math.ceil(audioSeconds))
+    throw new Error(`${name}: ${onsets.length} clicks`);
+  const late = onsets.findIndex((t, k) => Math.abs(t - k) > CLICK_TOLERANCE);
+  if (late >= 0) throw new Error(`${name}: click ${late} starts at ${onsets[late]} s`);
+  // As the tests play it (test/support/audio.ts).
+  const resampled = await resample(file, a.index);
+
+  return {
+    id: a.index,
+    codec: a.codec_name,
+    sampleRate: Number(a.sample_rate),
+    channels: a.channels,
+    clicks: onsets.length,
+    ...hashPackets(packets, a.index, dts),
+    resampled,
+  };
+}
+
 // Makes the AVI `file`, its video encoded upside down, store it bottom row first: FFmpeg writes
 // its height negative, top row first, and a positive one turns it the right way up.
 async function bottomUp(file: string) {
@@ -365,7 +401,8 @@ for (const [name, fixture] of Object.entries(fixtures)) {
   const { seconds, args, source, input = [], fps = FPS, audioSeconds = seconds, twoPass } = fixture;
   const scale = fixture.scale ?? 1;
   const file = dir + name;
-  const inputs = [...input, ...video(seconds, source, fps, scale), ...clicks(audioSeconds)];
+  const audioInput = audioSeconds > 0 ? clicks(audioSeconds) : [];
+  const inputs = [...input, ...video(seconds, source, fps, scale), ...audioInput];
   await encode(file, inputs, args, twoPass);
   if (fixture.bottomUp) await bottomUp(file);
 
@@ -375,22 +412,17 @@ for (const [name, fixture] of Object.entries(fixtures)) {
   const packets: Packet[] = probe.packets;
   const v = streams.find((s) => s.codec_type === "video");
   const a = streams.find((s) => s.codec_type === "audio");
-  if (!v?.width || !v.height || !a) throw new Error(`${name}: needs a video and an audio stream`);
+  if (!v?.width || !v.height) throw new Error(`${name}: needs a video stream`);
+  if (Boolean(a) !== audioSeconds > 0) throw new Error(`${name}: audio stream ${a?.index}`);
   const { pts, ids } = await readVideo(file, v.index, v.width / scale, v.height / scale);
   if (ids.length !== seconds * fps) throw new Error(`${name}: ${ids.length} frames`);
   const wrong = ids.findIndex((id, i) => id !== i);
   if (wrong >= 0) throw new Error(`${name}: frame ${wrong} reads as ${ids[wrong]}`);
-  const onsets = await readClicks(file, a);
-  if (onsets.length !== Math.ceil(audioSeconds))
-    throw new Error(`${name}: ${onsets.length} clicks`);
-  const late = onsets.findIndex((t, k) => Math.abs(t - k) > CLICK_TOLERANCE);
-  if (late >= 0) throw new Error(`${name}: click ${late} starts at ${onsets[late]} s`);
-  const resampled = await resample(file, a.index);
+  const dts = name.endsWith(".mp4") || name.endsWith(".mov");
+  const audio = await expectedAudio(name, file, a, { packets, dts, audioSeconds });
   const codecString = await hlsCodec(file, v.index, v.codec_name);
   const keyframes = packets.filter((p) => p.codec_type === "video" && p.flags.startsWith("K"));
   const reference = await referenceGrid(file, v.index, v.width, v.height);
-
-  const dts = name.endsWith(".mp4") || name.endsWith(".mov");
 
   expected[name] = {
     format: probe.format.format_name,
@@ -420,18 +452,9 @@ for (const [name, fixture] of Object.entries(fixtures)) {
       ...(scale > 1 ? { scale } : {}),
       ...hashPackets(packets, v.index, dts),
     },
-    audio: {
-      id: a.index,
-      codec: a.codec_name,
-      sampleRate: Number(a.sample_rate),
-      channels: a.channels,
-      clicks: onsets.length,
-      ...hashPackets(packets, a.index, dts),
-      // As the tests play it (test/support/audio.ts).
-      resampled,
-    },
+    ...(audio ? { audio } : {}),
   };
-  console.log(name, `${pts.length} frames`, `${onsets.length} clicks`);
+  console.log(name, `${pts.length} frames`, `${audio?.clicks ?? 0} clicks`);
 }
 
 // One fixture a line: readable, and a regenerated fixture changes one line.

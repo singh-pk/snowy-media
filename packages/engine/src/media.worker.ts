@@ -23,6 +23,7 @@ import {
 import { type Audio, createAudio } from "./audio-decoder";
 import { colorSpace, type VideoParams, WEBCODECS } from "./codec";
 import { createFileSource } from "./io";
+import { createPcmProducer } from "./pcm";
 import { createProducer } from "./ring";
 import type { FromMedia, Opened, ToMedia, Track } from "./protocol";
 
@@ -43,8 +44,14 @@ type Media = ReturnType<typeof createState>;
 type Ring = ReturnType<typeof createProducer>;
 type DemuxRequest = Pick<
   Extract<ToMedia, { type: "demux" }>,
-  "ring" | "streams" | "from" | "audio"
+  "ring" | "streams" | "from" | "pcm" | "audio"
 >;
+
+// `ahead` runs before packet `pkt` of `stream` is offered, `placed` once it is in the ring.
+interface Reach {
+  ahead: (stream: number) => void;
+  placed: () => void;
+}
 
 function post(message: FromMedia) {
   self.postMessage(message);
@@ -251,13 +258,58 @@ function offer({ core, pkt }: Media, ring: Ring, stream: number) {
   return ring.offer(packet);
 }
 
+// What a pump does besides placing packets: decode `audio`, and tell `reach` of each packet
+// offered to the packet ring.
+interface Pumped {
+  audio?: Audio | undefined;
+  reach?: Reach | undefined;
+}
+
+// What tells the clock in PCM ring `pcm` how far the packets placed reach, so it runs on past
+// the audio, or without any, to the end of the video. Without audio it also says so, and
+// starts the clock at the first packet where that is after `from` (seconds), the time the ring
+// was made with: a file whose video starts late, as an MPEG-TS file's may start hours in,
+// starts there, played from the start or sought to before it, as audio starts it at its first
+// sample. It starts the clock before the packet is offered, so the render worker never sees
+// one before the start.
+// A packet of unknown duration reaches only to its pts.
+function createReach(
+  { core, ctx, pkt }: Media,
+  pcm: ReturnType<typeof createPcmProducer>,
+  { audio, from }: { audio: boolean; from: number },
+): Reach {
+  if (!audio) pcm.finish();
+  // `end`: how far the packet being offered reaches, in seconds, or -1 without a timestamp.
+  const at = { pending: !audio, end: -1 };
+
+  function ahead(stream: number) {
+    const [pts, dts] = [core._sny_packet_pts(pkt), core._sny_packet_dts(pkt)];
+    const time = pts === AV_NOPTS_VALUE ? dts : pts;
+    at.end = -1;
+    if (time === AV_NOPTS_VALUE) return;
+    const st = core._sny_stream(ctx, stream);
+    const num = core._sny_stream_tb_num(st);
+    const den = core._sny_stream_tb_den(st);
+    const seconds = (Number(time) * num) / den;
+    if (at.pending && seconds > from) pcm.start(seconds);
+    at.pending = false;
+    at.end = seconds + (Number(core._sny_packet_duration(pkt)) * num) / den;
+  }
+
+  function placed() {
+    if (at.end >= 0) pcm.reach(at.end);
+  }
+
+  return { ahead, placed };
+}
+
 // Writes the packets of `streams` into `ring` and queues those of `audio`, decoding them into
 // its PCM ring as that has room, from where the demuxer is to the end of the file. The END
 // record follows the last packet as soon as it is read, and the audio drains after. Returns
 // early once the packet ring's consumer closes it; once the PCM ring's does, the audio stops
 // and the packets go on. It waits only when neither ring has room for what comes next: on the
 // PCM ring's doorbell, which both rings' consumers ring, or with no audio on the packet ring.
-function pump(m: Media, ring: Ring, streams: number[], audio?: Audio) {
+function pump(m: Media, ring: Ring, streams: number[], { audio, reach }: Pumped) {
   const { core, check, pkt } = m;
   const ctx = demuxer(m, streams);
   const selected = new Uint8Array(core._sny_nb_streams(ctx));
@@ -298,7 +350,10 @@ function pump(m: Media, ring: Ring, streams: number[], audio?: Audio) {
         at.held = true;
       }
 
-      const placed = at.stream === audio?.stream ? audio.queue(pkt) : offer(m, ring, at.stream);
+      const video = at.stream !== audio?.stream;
+      if (video) reach?.ahead(at.stream);
+      const placed = video ? offer(m, ring, at.stream) : audio.queue(pkt);
+      if (placed && video) reach?.placed();
 
       if (!placed) {
         if (ring.closed()) return arm(false);
@@ -380,7 +435,8 @@ function firstPacket({ core, ctx, check, pkt }: Media, stream: number) {
 
 // pump, and on an error fails the ring, so the thread reading it stops too; the
 // error itself goes to whoever asked. `buffered` runs once the audio is buffered ahead.
-function demux(m: Media, { ring, streams, from, audio }: DemuxRequest, buffered: () => void) {
+function demux(m: Media, request: DemuxRequest, buffered: () => void) {
+  const { ring, streams, from, pcm, audio } = request;
   const producer = createProducer(ring);
   let decoder: Audio | undefined;
 
@@ -395,12 +451,23 @@ function demux(m: Media, { ring, streams, from, audio }: DemuxRequest, buffered:
     const sought = first !== undefined && seek(m, first, from);
     m.read = true;
 
-    if (audio) {
+    if (audio && !pcm)
+      throw new RangeError(`demux: audio stream ${audio.stream} without a PCM ring`);
+
+    if (audio && pcm) {
       const ctx = audioDemuxer(m, audio.stream);
-      decoder = createAudio({ ffmpeg: m, ctx, request: audio, from, sought, buffered });
+      decoder = createAudio({ ffmpeg: m, ctx, request: audio, pcm, from, sought, buffered });
     }
 
-    pump(m, producer, streams, decoder);
+    const reach =
+      pcm &&
+      createReach(m, createPcmProducer(pcm), {
+        audio: Boolean(audio),
+        from: from / 1e6,
+      });
+    // Without audio, there is none to buffer.
+    if (pcm && !audio) buffered();
+    pump(m, producer, streams, { audio: decoder, reach });
   } catch (e) {
     producer.fail();
     throw e;

@@ -17,7 +17,7 @@ interface Expected {
   format: string;
   duration: number;
   video: { id: number; codec: string; width: number; height: number };
-  audio: { id: number; codec: string; sampleRate: number; channels: number };
+  audio?: { id: number; codec: string; sampleRate: number; channels: number };
 }
 
 const expected: Record<string, Expected> = await Bun.file(
@@ -81,17 +81,13 @@ test("opens every fixture", async () => {
       // ffprobe prints the duration to the microsecond, the unit FFmpeg keeps it in.
       expect(info.duration, file).toBeCloseTo(e.duration, 6);
       const { id, codec, width, height } = e.video;
-      const audio = e.audio;
-      const tracks: Track[] = [
-        { id, kind: "video", codec, width, height },
-        {
-          id: audio.id,
-          kind: "audio",
-          codec: audio.codec,
-          sampleRate: audio.sampleRate,
-          channels: audio.channels,
-        },
-      ];
+      const tracks: Track[] = [{ id, kind: "video", codec, width, height }];
+
+      if (e.audio) {
+        const { id: audio, codec: name, sampleRate, channels } = e.audio;
+        tracks.push({ id: audio, kind: "audio", codec: name, sampleRate, channels });
+      }
+
       expect(info.tracks, file).toEqual(tracks.toSorted((a, b) => a.id - b.id));
     }
 
