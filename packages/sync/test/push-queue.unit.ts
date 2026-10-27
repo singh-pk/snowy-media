@@ -57,6 +57,15 @@ test("ahead of the playhead, each index goes subtitles, selected audio, then vid
   expect(drain(q)).toEqual([]);
 });
 
+test("before the first chunk is cut, nothing goes, whatever the playhead or seek target", () => {
+  const { q } = queue(0);
+  q.seek(5 * SECOND);
+  q.playhead(SECOND);
+  expect(drain(q)).toEqual([]);
+  cut(q, 0);
+  expect(drain(q)).toEqual(["3:0", "1:0", "0:0"]);
+});
+
 test("nothing goes past the push horizon, which moves with the playhead", () => {
   const count = PUSH_HORIZON_US / (2 * SECOND) + 10;
   const { q } = queue(count);

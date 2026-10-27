@@ -90,6 +90,25 @@ test("a malformed record is refused before it is signed", async () => {
   const fromSetups = setups.map(async (s) => rejection(encodeSetup(pair, s)));
   const errors = await Promise.all([...fromCatalogs, ...fromSetups]);
   expect(errors.every((e) => e instanceof InvalidRecordError)).toBe(true);
+
+  const shapes = [
+    { ...catalog, tracks: "none" },
+    { ...catalog, tracks: [1] },
+    { ...catalog, tracks: [{ ...first, language: "" }] },
+    { ...catalog, tracks: [{ ...first, title: 7 }] },
+    [catalog],
+  ];
+  const refused = await Promise.all(
+    shapes.map(async (c) => rejection(encodeCatalog(pair, untyped(c)))),
+  );
+  const reasons = [
+    "bad tracks",
+    "a track isn't an object",
+    "bad language",
+    "bad title",
+    "not an object",
+  ];
+  expect(refused).toEqual(reasons.map((reason) => new InvalidRecordError(reason)));
 });
 
 test("a record signed by another session is rejected", async () => {
@@ -125,18 +144,21 @@ test("an altered record, or one with a field nobody signed, is rejected", async 
   ]);
 });
 
-test("a codec setup with a field nobody signed, or a description that isn't text, is rejected", async () => {
+test("a codec setup with a field nobody signed, or a description that isn't base64url text, is rejected", async () => {
   const { key, bytes } = await encodeSetup(pair, video);
-  const [added, numeric] = await Promise.all([
+  const [added, numeric, garbled] = await Promise.all([
     resigned(bytes, "snowy init v1", (record) => (record.profile = "high")),
     resigned(bytes, "snowy init v1", (record) => (record.description = 7)),
+    resigned(bytes, "snowy init v1", (record) => (record.description = "not base64!")),
   ]);
   const errors = await Promise.all([
     rejection(decodeSetup(pair.publicKey, key, added)),
     rejection(decodeSetup(pair.publicKey, key, numeric)),
+    rejection(decodeSetup(pair.publicKey, key, garbled)),
   ]);
   expect(errors).toEqual([
     new InvalidRecordError("unknown field profile"),
+    new InvalidRecordError("bad description"),
     new InvalidRecordError("bad description"),
   ]);
 });

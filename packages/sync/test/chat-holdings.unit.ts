@@ -42,6 +42,7 @@ test("one checkpoint is kept per run of consecutive seqs", async () => {
   for (const b of batches) await holdings.add(b);
   expect(holdings.checkpoints(alice.id).map((cp) => cp.seq)).toEqual([5, 9]);
   expect(holdings.newest(alice.id)).toBe(9);
+  expect(holdings.checkpoints(bob.id)).toEqual([]);
 });
 
 test("when a gap fills, the lower run's checkpoint goes", async () => {
@@ -129,6 +130,14 @@ test("a restore keeps one checkpoint per run, and leaves out messages past the n
   expect(holdings.repair(alice.id, 8)).toBeUndefined();
   const proven = await delivered(holdings.repair(alice.id, 1)!);
   expect(proven.messages).toEqual(seqs(1, 7));
+});
+
+test("a restored run without a checkpoint of its own answers no repair", async () => {
+  const holdings = createChatHoldings();
+  const checkpoint = await signCheckpoint(alice.pair, seqs(7, 7)[0]!);
+  await holdings.restore(alice.id, [...seqs(1, 3), ...seqs(5, 7)], [checkpoint]);
+  expect(holdings.repair(alice.id, 1)).toBeUndefined();
+  expect(span(holdings.repair(alice.id, 5))).toEqual([5, 7]);
 });
 
 test("a run doesn't join a message that doesn't chain to it, so both stay proven", async () => {

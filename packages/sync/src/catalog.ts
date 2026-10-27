@@ -125,8 +125,7 @@ function checkCatalog(value: unknown): Catalog {
 const COUNTS = ["codedWidth", "codedHeight", "sampleRate", "numberOfChannels"] as const;
 
 // A codec setup as signed, in canonical shape with its description as base64url, and as read.
-function checkSetup(value: unknown) {
-  if (!isRecord(value)) throw new InvalidRecordError("not an object");
+function checkSetup(value: Record<string, unknown>) {
   onlyFields(value, SETUP_FIELDS);
 
   const { track, codec, description } = value;

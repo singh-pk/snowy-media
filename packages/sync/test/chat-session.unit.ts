@@ -5,8 +5,9 @@
 // peer writes is shown at once and reaches others through its track; a gap is repaired over a
 // link, moving on past a peer that answers chat-gone or whose link closes, and still over one
 // link to a peer whose other link closed; a reconnecting peer catches up from one version
-// vector; after a reload, the log is back and unsent messages go with the first batch; and a
-// chat closed with a batch on its way opens again, and takes no more messages.
+// vector, which moves on to the next peer if the first one's link closes; a batch that doesn't
+// open changes nothing; after a reload, the log is back and unsent messages go with the first
+// batch; and a chat closed with a batch on its way opens again, and takes no more messages.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -77,6 +78,21 @@ function join(network: ReturnType<typeof createNetwork>, a: Member, b: Member) {
   return fromA;
 }
 
+// Alice says `lines`, which Carol and Dave hold; Bob, who holds none, is linked to both.
+async function twoHolders(...lines: string[]) {
+  const network = createNetwork();
+  const [alice, bob, carol, dave] = await Promise.all([member(), member(), member(), member()]);
+  await say(alice, ...lines);
+
+  for (const holder of [carol, dave]) {
+    for (const { key, bytes } of alice.published) await holder.chat.received(key, bytes);
+  }
+
+  const toCarol = join(network, bob, carol);
+  const toDave = join(network, bob, dave);
+  return { network, alice, bob, carol, dave, toCarol, toDave };
+}
+
 test("a message is shown at once, and reaches others through the author's track", async () => {
   const alice = await member();
   const bob = await member();
@@ -111,16 +127,11 @@ test("a gap is repaired over a link from a peer that holds it", async () => {
 });
 
 test("an ask moves to the next peer when its link closes", async () => {
-  const network = createNetwork();
-  const [alice, bob, carol, dave] = await Promise.all([member(), member(), member(), member()]);
-  await say(alice, "one", "two", "three");
-
-  for (const holder of [carol, dave]) {
-    for (const { key, bytes } of alice.published) await holder.chat.received(key, bytes);
-  }
-
-  const toCarol = join(network, bob, carol);
-  const toDave = join(network, bob, dave);
+  const { network, alice, bob, carol, dave, toCarol, toDave } = await twoHolders(
+    "one",
+    "two",
+    "three",
+  );
   const [first] = await rank([carol.chat.id, dave.chat.id], alice.chat.id, 2);
   const [one, , three] = alice.published;
   await bob.chat.received(one!.key, one!.bytes);
@@ -145,6 +156,30 @@ test("a reconnecting peer catches up from one version vector", async () => {
   await network.settle();
   expect(texts(bob).toSorted()).toEqual(["one", "three", "two"]);
   await Promise.all([alice, bob, carol].map((m) => m.chat.close()));
+});
+
+test("the version vector moves to the next peer when the first one's link closes before it answers", async () => {
+  const { network, alice, bob, carol, dave, toCarol, toDave } = await twoHolders("one", "two");
+  // Ranked as `reconnected` ranks: closing the other link would leave nothing to move on from.
+  const [first] = await rank([carol.chat.id, dave.chat.id], bob.chat.id, "chat-versions");
+  await bob.chat.reconnected();
+  // The vector is on its way to the first-ranked peer; its link closes before it arrives.
+  (first === carol.chat.id ? toCarol : toDave).close();
+  await network.settle();
+  expect(texts(bob)).toEqual(["one", "two"]);
+  await Promise.all([alice, bob, carol, dave].map((m) => m.chat.close()));
+});
+
+test("a batch that doesn't open changes nothing", async () => {
+  const [alice, bob] = await Promise.all([member(), member()]);
+  await say(alice, "one");
+  const changes = { count: 0 };
+  // A batch taken, even one adding nothing, reports a change; a refused one doesn't.
+  bob.onChange(() => changes.count++);
+  await bob.chat.received(alice.published[0]!.key, new Uint8Array([1, 2, 3]));
+  expect(texts(bob)).toEqual([]);
+  expect(changes.count).toBe(0);
+  await Promise.all([alice, bob].map((m) => m.chat.close()));
 });
 
 test("after a reload the log is back, and unsent messages go with the first batch", async () => {
@@ -223,4 +258,47 @@ test("a closed chat takes no more messages, and one closed mid-batch opens again
 
   expect(texts(bob)).toEqual(["hi"]);
   await Promise.all([again.chat.close(), bob.chat.close()]);
+});
+
+test("an object that isn't chat, from the peer sent the version vector, doesn't end the catch-up", async () => {
+  const network = createNetwork();
+  const [alice, bob, x, y] = await Promise.all([member(), member(), member(), member()]);
+  await say(alice, "one", "two");
+  const [firstId] = await rank([x.chat.id, y.chat.id], bob.chat.id, "chat-versions");
+  // The first-ranked peer holds nothing, so only the next one can catch Bob up.
+  const [first, second] = firstId === x.chat.id ? [x, y] : [y, x];
+  for (const { key, bytes } of alice.published) await second.chat.received(key, bytes);
+  const fromFirst = join(network, first, bob);
+  join(network, second, bob);
+  await bob.chat.reconnected();
+  // A link carries the watch session's objects too: one of those leaves the vector waiting.
+  fromFirst.deliver("catalog@1", alice.published[0]!.bytes);
+  await network.settle();
+  expect(texts(bob)).toEqual([]);
+
+  fromFirst.close();
+  await network.settle();
+  expect(texts(bob)).toEqual(["one", "two"]);
+  await Promise.all([alice, bob, x, y].map((m) => m.chat.close()));
+});
+
+test("a batch that comes after close changes nothing", async () => {
+  const [alice, bob] = await Promise.all([member(), member()]);
+  await say(alice, "one");
+  await bob.chat.close();
+  await bob.chat.received(alice.published[0]!.key, alice.published[0]!.bytes);
+  expect(texts(bob)).toEqual([]);
+  await alice.chat.close();
+});
+
+test("a reconnect with no peer linked sends no version vector, then or once one links", async () => {
+  const network = createNetwork();
+  const [alice, bob, carol] = await Promise.all([member(), member(), member()]);
+  await say(alice, "one");
+  for (const { key, bytes } of alice.published) await carol.chat.received(key, bytes);
+  await bob.chat.reconnected();
+  join(network, bob, carol);
+  await network.settle();
+  expect(texts(bob)).toEqual([]);
+  await Promise.all([alice, bob, carol].map((m) => m.chat.close()));
 });

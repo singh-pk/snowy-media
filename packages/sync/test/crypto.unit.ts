@@ -10,6 +10,7 @@ import { expect, test } from "../../../tooling/unit";
 import {
   contentKey,
   generateKeyPair,
+  isKeyId,
   keyBytes,
   keyId,
   publicKey,
@@ -37,6 +38,7 @@ test("a key id is the 32-byte public key as unpadded base64url", async () => {
 test("anything but a 32-byte key id is refused", () => {
   expect(() => keyBytes("abc")).toThrow(RangeError);
   expect(() => keyBytes("A".repeat(44))).toThrow(RangeError);
+  expect([7, "abc"].map(isKeyId)).toEqual([false, false]);
 });
 
 test("a private key can't be exported", async () => {

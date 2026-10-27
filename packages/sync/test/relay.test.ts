@@ -92,9 +92,16 @@ test("a peer that leaves and comes back with the same key opens a new link", asy
   });
 }, 60_000);
 
-test("the relay refuses a subscription to a track nobody publishes", async () => {
+test("the relay refuses a subscription to a track nobody publishes, and a closed connection any", async () => {
   const result = await scenario("refused");
-  expect(result).toEqual({ refused: true });
+  expect(result).toEqual({
+    refused: true,
+    notPublished: [
+      "have isn't one of this peer's tracks",
+      "catalog isn't one of the source's tracks",
+    ],
+    closed: [true, true],
+  });
 }, 60_000);
 
 test("the relay admits a peer only with a token for its session, signed by its key", async () => {
