@@ -3,18 +3,24 @@
 //
 // Relay authorization (src/relay-auth.ts), in Chromium: a peer's token admits it to its own
 // namespaces in its own session, the source's to `source` too, and anything forged, stale,
-// misplaced or malformed admits nothing; the auth server answers moq-relay's requests to match,
-// and asks the app's `admit` only about connections whose token checked out.
+// misplaced or malformed admits nothing; in an edit session a grant's rights decide what a peer
+// publishes, and the owner's token admits it to `source`; the auth server answers moq-relay's
+// requests to match, asks the app's `admit` only about connections whose token checked out, and
+// tells its `end` why each one closed.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import { generateKeyPair, keyId, sign } from "../src/crypto";
+import { signGrant, type Right } from "../src/grant";
 import {
   authorize,
   authServer,
   createAuthServer,
   type Connection,
+  type Ended,
+  editorToken,
   joinGrant,
+  ownerToken,
   peerToken,
   sourceToken,
   TOKEN_AGE,
@@ -45,7 +51,7 @@ const post = (body: unknown) => authServer(relayPost(body));
 
 type TokenJson = {
   kind: string;
-  grant: { rights: string; sig: string };
+  grant: { rights: unknown; sig: string };
   request: { peer: string; session: string; issuedAt: unknown };
   sig: string;
   sessionSig?: string;
@@ -249,9 +255,9 @@ test("`admit` is asked about each connection whose token checks out, and decides
   expect(responses.map((r) => r.status)).toEqual([200, 200, 403, 403]);
   const byId = asked.toSorted((a, b) => a.id.localeCompare(b.id));
   expect(byId).toEqual([
-    { id: "00", session: sessionId, peer: peerId, role: "peer" },
-    { id: "01", session: sessionId, peer: peerId, role: "source" },
-    { id: "02", session: sessionId, peer: peerId, role: "peer" },
+    { id: "00", session: sessionId, peer: peerId, role: "peer", rights: ["view"] },
+    { id: "01", session: sessionId, peer: peerId, role: "source", rights: ["view"] },
+    { id: "02", session: sessionId, peer: peerId, role: "peer", rights: ["view"] },
   ]);
   const [body, expected] = await Promise.all([
     responses[1]?.json(),
@@ -288,13 +294,196 @@ test("a failing `admit` or `end` answers 500, never a refusal", async () => {
   expect(responses.map((r) => r.status)).toEqual([500, 500, 500]);
 });
 
-test("`end` is told the id of each connection the relay closes", async () => {
+test("`end` is told each connection the relay closes, why, and the bytes it counted", async () => {
   const { path } = await setup();
-  const ended: string[] = [];
-  const server = createAuthServer({ end: (id) => void ended.push(id) });
-  const responses = await Promise.all(
-    ["00", "01"].map((id) => server(relayPost({ id, event: "end", path, reason: "closed" }))),
+  const ended: Ended[] = [];
+  const server = createAuthServer({ end: (closed) => void ended.push(closed) });
+  // As moq-relay 0.17 posts an end, and with its counts missing or malformed. The relay reports
+  // zeros rather than what a connection moved when it closes the connection itself, and for any
+  // transport but QUIC, which alone counts bytes.
+  const zeros = { sent: 0, received: 0 };
+  const end = { event: "end", path, transport: "quic" };
+  const bodies = [
+    { ...end, id: "00", reason: "no error", bytes: { sent: 3429, received: 4191 } },
+    { ...end, id: "01", reason: "closed" },
+    { ...end, id: "02", bytes: { sent: -1, received: 2 } },
+    { ...end, id: "03", reason: 7, bytes: { sent: "3", received: 2 } },
+    { ...end, id: "04", reason: "no error", transport: "websocket", bytes: zeros },
+    { id: "05", event: "end", path, reason: "no error", bytes: { sent: 3, received: 2 } },
+    ...["refused", "expired", "invalid", "dropped"].map((reason, i) => ({
+      event: "end",
+      path,
+      transport: "quic",
+      id: `1${i}`,
+      reason,
+      bytes: zeros,
+    })),
+  ];
+  const responses = await Promise.all(bodies.map((body) => server(relayPost(body))));
+  expect(responses.map((r) => r.status)).toEqual(bodies.map(() => 204));
+  expect(ended.toSorted((a, b) => a.id.localeCompare(b.id))).toEqual([
+    { id: "00", reason: "no error", bytes: { toPeer: 3429, fromPeer: 4191 } },
+    { id: "01", reason: "closed" },
+    { id: "02" },
+    { id: "03" },
+    { id: "04", reason: "no error" },
+    { id: "05", reason: "no error" },
+    { id: "10", reason: "refused" },
+    { id: "11", reason: "expired" },
+    { id: "12", reason: "invalid" },
+    { id: "13", reason: "dropped" },
+  ]);
+});
+
+// An edit session's grant of `rights` from the project key to `peer`, and its token.
+async function editor(project: CryptoKeyPair, peer: CryptoKeyPair, rights: Right[]) {
+  const [session, to] = await Promise.all([keyId(project.publicKey), keyId(peer.publicKey)]);
+  const grant = await signGrant(project, { session, rights, to });
+  return editorToken(grant, peer);
+}
+
+test("in an edit session, a peer publishes batches with `propose` and assets with `edit`", async () => {
+  const { session, peer, peerId, path } = await setup();
+  const tokens = await Promise.all([
+    editor(session, peer, ["view"]),
+    editor(session, peer, ["view", "propose"]),
+    editor(session, peer, ["view", "propose", "edit"]),
+  ]);
+  const grants = await Promise.all(tokens.map((t) => authorize(path, query(t), Date.now())));
+  const own = [`peer/${peerId}`, `inbox/*/${peerId}`];
+  const batches = [`peer/${peerId}/batches`, `peer/${peerId}/history/*`];
+  const subscribe = ["source", "asset/*", "peer/**", `inbox/${peerId}/*`];
+  expect(grants).toEqual([
+    { publish: own, subscribe },
+    { publish: [...own, ...batches], subscribe },
+    { publish: [...own, ...batches, `asset/${peerId}`], subscribe },
+  ]);
+});
+
+test("the owner's token admits it to `source` and every right; a watch source's doesn't", async () => {
+  const { session, peer, peerId, path } = await setup();
+  const [owner, source] = await Promise.all([
+    ownerToken(session, peer),
+    sourceToken(session, peer),
+  ]);
+  const forged = altered(source, (json) => (json.kind = "owner"));
+  const asSource = altered(owner, (json) => (json.kind = "source"));
+  const [granted, fromSource, fromOwner] = await Promise.all(
+    [owner, forged, asSource].map((t) => authorize(path, query(t), Date.now())),
   );
-  expect(responses.map((r) => r.status)).toEqual([204, 204]);
-  expect(ended.toSorted()).toEqual(["00", "01"]);
+  expect(fromOwner).toBeUndefined();
+  expect(granted).toEqual({
+    publish: [
+      "source",
+      `peer/${peerId}`,
+      `inbox/*/${peerId}`,
+      `peer/${peerId}/batches`,
+      `peer/${peerId}/history/*`,
+      `asset/${peerId}`,
+    ],
+    subscribe: ["**"],
+  });
+  expect(fromSource).toBeUndefined();
+});
+
+test("an invite admits whoever holds it, a grant to a key only that key, and an agent its own", async () => {
+  const { session, peer, sessionId, peerId, path } = await setup();
+  const [holder, agent] = await Promise.all([generateKeyPair(), generateKeyPair()]);
+  const agentId = await keyId(agent.publicKey);
+  const [invite, toPeer] = await Promise.all([
+    signGrant(session, { session: sessionId, rights: ["view", "propose"] }),
+    signGrant(session, { session: sessionId, rights: ["view", "propose", "edit"], to: peerId }),
+  ]);
+  const toAgent = await signGrant(peer, {
+    session: sessionId,
+    rights: ["view"],
+    to: agentId,
+    chain: toPeer,
+  });
+  const tokens = await Promise.all([
+    editorToken(invite, holder),
+    editorToken(toPeer, holder),
+    editorToken(toAgent, agent),
+    editorToken(toAgent, peer),
+  ]);
+  const grants = await Promise.all(tokens.map((t) => authorize(path, query(t), Date.now())));
+  expect(grants.map((g) => g === undefined)).toEqual([false, true, false, true]);
+  expect(grants[2]?.publish).toEqual([`peer/${agentId}`, `inbox/*/${agentId}`]);
+});
+
+test("a grant from another project, or with rights it wasn't signed with, admits nothing", async () => {
+  const { session, peer, peerId, path } = await setup();
+  const other = await setup();
+  const [viewer, otherGrant] = await Promise.all([
+    editor(session, peer, ["view"]),
+    signGrant(other.session, {
+      session: other.sessionId,
+      rights: ["view", "propose", "edit"],
+      to: peerId,
+    }),
+  ]);
+  // The peer's request for this session, signed and fresh, carrying the other project's grant.
+  const elsewhere = altered(viewer, (json) => (json.grant = otherGrant));
+  const widened = altered(viewer, (json) => (json.grant.rights = ["view", "propose", "edit"]));
+  const granted = await Promise.all(
+    [elsewhere, widened].map((t) => authorize(path, query(t), Date.now())),
+  );
+  expect(granted).toEqual([undefined, undefined]);
+});
+
+test("`admit` is told an edit session's role, rights and grant, so an agent leads to its person", async () => {
+  const { session, peer, sessionId, peerId, path } = await setup();
+  const agent = await generateKeyPair();
+  const agentId = await keyId(agent.publicKey);
+  const asked: Connection[] = [];
+  const server = createAuthServer({ admit: (connection) => asked.push(connection) > 0 });
+  const own = await signGrant(session, {
+    session: sessionId,
+    rights: ["view", "propose"],
+    to: peerId,
+  });
+  const toAgent = await signGrant(peer, {
+    session: sessionId,
+    rights: ["view"],
+    to: agentId,
+    chain: own,
+  });
+  const [token, owner, agentToken] = await Promise.all([
+    editorToken(own, peer),
+    ownerToken(session, peer),
+    editorToken(toAgent, agent),
+  ]);
+  const responses = await Promise.all([
+    server(relayPost({ id: "00", event: "connect", path, query: query(token) })),
+    server(relayPost({ id: "01", event: "connect", path, query: query(owner) })),
+    server(relayPost({ id: "02", event: "connect", path, query: query(agentToken) })),
+  ]);
+  expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+  const byId = asked.toSorted((a, b) => a.id.localeCompare(b.id));
+  expect(byId.map((c) => c.grant?.by)).toEqual([sessionId, undefined, peerId]);
+  expect(byId).toEqual([
+    {
+      id: "00",
+      session: sessionId,
+      peer: peerId,
+      role: "editor",
+      rights: ["view", "propose"],
+      grant: own,
+    },
+    {
+      id: "01",
+      session: sessionId,
+      peer: peerId,
+      role: "owner",
+      rights: ["view", "propose", "edit"],
+    },
+    {
+      id: "02",
+      session: sessionId,
+      peer: agentId,
+      role: "editor",
+      rights: ["view"],
+      grant: toAgent,
+    },
+  ]);
 });
