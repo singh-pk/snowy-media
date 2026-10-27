@@ -233,9 +233,9 @@ function grantOf(token: Token): RelayGrant {
   if (token.kind === "source") return sourceGrant(peer);
   if (token.kind === "peer") return peerGrant(peer);
   const grant = editorGrant(peer, rightsOf(token));
-  return token.kind === "owner"
-    ? { publish: ["source", ...grant.publish], subscribe: ["**"] }
-    : grant;
+  if (token.kind === "editor") return grant;
+  grant.publish.unshift("source");
+  return { publish: grant.publish, subscribe: ["**"] };
 }
 
 /**
@@ -297,17 +297,20 @@ const RELAY_CLOSED = new Set(["refused", "expired", "invalid", "dropped"]);
 // Why the relay says a connection ended, and its byte counts, `{ sent, received }` as the relay
 // sees them, when they are counts and the relay counted them. moq-relay reads them from QUIC
 // (WebTransport included) and reports zeros for its other transports, which a peer may choose.
-function endOf({ reason, transport, bytes }: Record<string, unknown>): Omit<Ended, "id"> {
-  const why = typeof reason === "string" ? { reason } : {};
+function endOf(id: string, { reason, transport, bytes }: Record<string, unknown>): Ended {
+  const ended: Ended = { id };
+  if (typeof reason === "string") ended.reason = reason;
+  const counts = bytesOf(bytes);
   const counted = transport === "quic" && !RELAY_CLOSED.has(String(reason));
-  return counted ? { ...why, ...bytesOf(bytes) } : why;
+  if (counted && counts !== undefined) ended.bytes = counts;
+  return ended;
 }
 
-function bytesOf(value: unknown): Pick<Ended, "bytes"> {
-  if (!isRecord(value)) return {};
+function bytesOf(value: unknown): Ended["bytes"] {
+  if (!isRecord(value)) return undefined;
   const { sent, received } = value;
   const counts = [sent, received].every((n) => Number.isSafeInteger(n) && Number(n) >= 0);
-  return counts ? { bytes: { toPeer: Number(sent), fromPeer: Number(received) } } : {};
+  return counts ? { toPeer: Number(sent), fromPeer: Number(received) } : undefined;
 }
 
 /**
@@ -337,7 +340,7 @@ export function createAuthServer(admission: Admission = {}) {
 
     if (event === "end") {
       try {
-        await admission.end?.({ id, ...endOf(body) });
+        await admission.end?.(endOf(id, body));
       } catch {
         return status(500);
       }
@@ -359,17 +362,12 @@ export function createAuthServer(admission: Admission = {}) {
     if (token === undefined) return status(403);
     const { session, peer } = token.request;
     const grant = grantOf(token);
+    const connection: Connection = { id, session, peer, role: token.kind, rights: rightsOf(token) };
+    if (token.kind === "editor") connection.grant = token.grant;
     let admitted: boolean | undefined;
 
     try {
-      admitted = await admission.admit?.({
-        id,
-        session,
-        peer,
-        role: token.kind,
-        rights: [...rightsOf(token)],
-        ...(token.kind === "editor" ? { grant: token.grant } : {}),
-      });
+      admitted = await admission.admit?.(connection);
     } catch {
       return status(500);
     }

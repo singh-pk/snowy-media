@@ -29,23 +29,29 @@ export type Grant = {
 
 const encoder = new TextEncoder();
 
-// A grant's fields in order, without `to` or `chain` when it has none.
-const ordered = (
-  session: KeyId,
-  rights: Right[],
-  to: KeyId | undefined,
-  by: KeyId,
-  chain: Grant | undefined,
-): Omit<Grant, "sig"> => ({
-  session,
-  rights,
-  ...(to === undefined ? {} : { to }),
-  by,
-  ...(chain === undefined ? {} : { chain }),
-});
+// A grant's fields as they are put together, where `to` and `chain` may be undefined.
+type Fields = {
+  session: KeyId;
+  rights: Right[];
+  to?: KeyId | undefined;
+  by: KeyId;
+  chain?: Grant | undefined;
+  sig: string;
+};
+
+// A grant with its fields in order, without `to` or `chain` when it has none.
+function ordered({ session, rights, to, by, chain, sig }: Fields): Grant {
+  if (to === undefined) {
+    return chain === undefined ? { session, rights, by, sig } : { session, rights, by, chain, sig };
+  }
+
+  return chain === undefined
+    ? { session, rights, to, by, sig }
+    : { session, rights, to, by, chain, sig };
+}
 
 // The bytes a grant's signature covers: its canonical JSON without `sig`, fields in order.
-const grantBytes = ({ session, rights, to, by, chain }: Omit<Grant, "sig">) =>
+const grantBytes = ({ session, rights, to, by, chain }: Omit<Fields, "sig">) =>
   encoder.encode(`snowy grant v1\n${JSON.stringify({ session, rights, to, by, chain })}`);
 
 /**
@@ -64,16 +70,17 @@ export async function signGrant(
   const chain = fields.chain === undefined ? undefined : readGrant(fields.chain);
   if (fields.chain !== undefined && chain === undefined)
     throw new TypeError("the chain isn't a grant");
+  const { session, to } = fields;
   const by = await keyId(signer.publicKey);
-  const grant = ordered(fields.session, rights, fields.to, by, chain);
-  const sig = await sign(signer.privateKey, grantBytes(grant));
-  return { ...grant, sig: base64url(sig) };
+  const sig = await sign(signer.privateKey, grantBytes({ session, rights, to, by, chain }));
+  return ordered({ session, rights, to, by, chain, sig: base64url(sig) });
 }
 
 // Rights in their one spelling: the first of RIGHTS and any after it, each needing the one
 // before, so `view` alone, then with `propose`, then with `edit`.
 function readRights(value: unknown): Right[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > RIGHTS.length) return undefined;
+  // copy: the grant's own rights, neither the caller's array nor the frozen RIGHTS.
   const rights = RIGHTS.slice(0, value.length);
   return rights.every((r, i) => value[i] === r) ? rights : undefined;
 }
@@ -95,7 +102,7 @@ function readGrantAt(value: unknown, depth: number): Grant | undefined {
   const chained = value.chain === undefined || chain !== undefined;
   const keys = isKeyId(session) && isKeyId(by) && (to === undefined || isKeyId(to));
   const valid = keys && rights !== undefined && chained && typeof sig === "string";
-  return valid ? { ...ordered(session, rights, to, by, chain), sig } : undefined;
+  return valid ? ordered({ session, rights, to, by, chain, sig }) : undefined;
 }
 
 const grantSigned = (grant: Grant) => signedBy(grant.by, grant.sig, grantBytes(grant));

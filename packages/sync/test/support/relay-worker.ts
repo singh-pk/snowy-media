@@ -6,7 +6,6 @@
 // back what they saw; the test asserts on it. Waiting is on events: each peer's `until` resolves
 // once a check holds after something it watches has changed.
 
-import * as Moq from "@moq/net";
 import { openChat } from "../../src/chat-session";
 import { openChunk, sealChunk } from "../../src/chunk";
 import { contentKey, generateKeyPair, keyId, type Bytes, type KeyId } from "../../src/crypto";
@@ -18,17 +17,11 @@ import {
   unframe,
   type RelayOptions,
 } from "../../src/relay";
-import { signGrant, type Right } from "../../src/grant";
-import {
-  editorToken,
-  joinGrant,
-  ownerToken,
-  peerToken,
-  sourceToken,
-  type JoinGrant,
-} from "../../src/relay-auth";
+import { joinGrant, peerToken, sourceToken, type JoinGrant } from "../../src/relay-auth";
 import { createSourceRecords, sealSourceRecord, type SourceRecord } from "../../src/source-records";
 import { rejection } from "./rejection";
+import { editRights } from "./relay-edit";
+import { watch } from "./watch";
 
 export type RelayConfig = { url: string; hash: string };
 export type Scenario = keyof typeof scenarios;
@@ -48,28 +41,6 @@ const dial = (config: RelayConfig, options: Omit<RelayOptions, "url">) =>
     serverCertificateHashes: [{ algorithm: "sha-256", value: Uint8Array.fromBase64(config.hash) }],
     ...options,
   });
-
-// Checks that resolve once they hold, looked at again on each `changed()`.
-function watch() {
-  const waiting: Array<{ check: () => boolean; resolve: () => void }> = [];
-
-  function changed() {
-    for (const wait of waiting.filter((w) => w.check())) {
-      waiting.splice(waiting.indexOf(wait), 1);
-      wait.resolve();
-    }
-  }
-
-  async function until(check: () => boolean) {
-    if (check()) return;
-
-    const { promise, resolve } = Promise.withResolvers<void>();
-    waiting.push({ check, resolve });
-    await promise;
-  }
-
-  return { changed, until };
-}
 
 async function peer(
   config: RelayConfig,
@@ -593,124 +564,6 @@ async function sourceRecords(config: RelayConfig) {
     // Objects may arrive in any order.
     chunks: chunks.toSorted((a, b) => a.index - b.index),
   };
-}
-
-// A bare connection that announces `paths`, in order, beside what `connectRelay` publishes, and
-// hands `seen` every broadcast path the relay announces to it.
-async function bare(
-  config: RelayConfig,
-  session: KeyId,
-  token: string,
-  paths: string[],
-  seen: (path: string) => void = () => undefined,
-) {
-  const local = new Moq.Origin.Producer();
-  const remote = new Moq.Origin.Producer();
-  for (const path of paths) local.createBroadcast(Moq.Path.from(...path.split("/"))).announce();
-  const url = new URL(`${config.url.replace(/\/$/, "")}/snowy/${session}`);
-  url.searchParams.set("token", token);
-  const connection = await Moq.Connection.connect({
-    url,
-    webtransport: {
-      serverCertificateHashes: [
-        { algorithm: "sha-256", value: Uint8Array.fromBase64(config.hash) },
-      ],
-    },
-    websocket: { enabled: false },
-    publish: local.consume(),
-    consume: remote,
-  });
-
-  void (async () => {
-    for await (const update of remote.announced(Moq.Path.Pattern.parse("**"))) {
-      if (Moq.Announce.isActive(update.kind)) seen(String(update.prefix));
-    }
-  })();
-
-  return connection;
-}
-
-// Edit-session rights at the relay: a peer with `view` alone can't publish batches, histories,
-// assets or `source`, which is the owner's; one with `propose` publishes batches but not assets;
-// one with `edit` publishes assets. The watcher holds `view` and publishes nothing, so whatever
-// it sees came from the others. The relay may announce one connection's broadcasts in any order,
-// so once everything allowed is seen a last peer connects, and the watcher looks once it has seen
-// that one. Then the owner announces `source`, to show the watcher would have seen a leaked one.
-async function editRights(config: RelayConfig) {
-  const project = await generateKeyPair();
-  const [owner, watcherPair, viewer, proposer, editor, last] = await Promise.all([
-    generateKeyPair(),
-    generateKeyPair(),
-    generateKeyPair(),
-    generateKeyPair(),
-    generateKeyPair(),
-    generateKeyPair(),
-  ]);
-  const [session, watcherId, viewerId, proposerId, editorId, lastId] = await Promise.all([
-    keyId(project.publicKey),
-    keyId(watcherPair.publicKey),
-    keyId(viewer.publicKey),
-    keyId(proposer.publicKey),
-    keyId(editor.publicKey),
-    keyId(last.publicKey),
-  ]);
-
-  const token = async (pair: CryptoKeyPair, to: KeyId, rights: Right[]) => {
-    const grant = await signGrant(project, { session, rights, to });
-    return editorToken(grant, pair);
-  };
-
-  const [watcherTok, viewerTok, proposerTok, editorTok] = await Promise.all([
-    token(watcherPair, watcherId, ["view"]),
-    token(viewer, viewerId, ["view"]),
-    token(proposer, proposerId, ["view", "propose"]),
-    token(editor, editorId, ["view", "propose", "edit"]),
-  ]);
-  const seen = new Set<string>();
-  const watching = watch();
-  const watcher = await bare(config, session, watcherTok, [], (path) => {
-    seen.add(path);
-    watching.changed();
-  });
-  const others = await Promise.all([
-    bare(config, session, viewerTok, [
-      `peer/${viewerId}/batches`,
-      `peer/${viewerId}/history/main`,
-      `asset/${viewerId}`,
-      "source",
-      `peer/${viewerId}`,
-    ]),
-    bare(config, session, proposerTok, [
-      `asset/${proposerId}`,
-      `peer/${proposerId}/batches`,
-      `peer/${proposerId}/history/main`,
-      `peer/${proposerId}`,
-    ]),
-    bare(config, session, editorTok, [`asset/${editorId}`, `peer/${editorId}`]),
-  ]);
-  const allowed = [
-    `peer/${viewerId}`,
-    `peer/${proposerId}`,
-    `peer/${proposerId}/batches`,
-    `peer/${proposerId}/history/main`,
-    `asset/${editorId}`,
-    `peer/${editorId}`,
-  ];
-  await watching.until(() => allowed.every((p) => seen.has(p)));
-  const lastTok = await token(last, lastId, ["view"]);
-  const lastPeer = await bare(config, session, lastTok, [`peer/${lastId}`]);
-  await watching.until(() => seen.has(`peer/${lastId}`));
-  const published = [...seen]
-    .filter((path) => path !== `peer/${lastId}`)
-    .map((path) =>
-      path.replaceAll(viewerId, "V").replaceAll(proposerId, "P").replaceAll(editorId, "E"),
-    )
-    .toSorted();
-  const ownerTok = await ownerToken(project, owner);
-  const ownerPeer = await bare(config, session, ownerTok, ["source"]);
-  await watching.until(() => seen.has("source"));
-  for (const connection of [watcher, ...others, lastPeer, ownerPeer]) connection.close();
-  return published;
 }
 
 const scenarios = {
