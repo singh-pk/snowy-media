@@ -178,6 +178,8 @@ test("a missing or malformed token admits nothing", async () => {
     query(altered(token, (json) => Object.assign(json, { request: "peer" }))),
     query(altered(token, (json) => (json.grant.rights = "editor"))),
     query(altered(token, (json) => (json.sig = `${json.sig}A`))),
+    query(altered(token, (json) => (json.kind = "viewer"))),
+    // A watch session's join grant isn't an edit session's grant.
     query(altered(token, (json) => (json.kind = "editor"))),
   ];
   const results = await Promise.all(queries.map((q) => authorize(path, q, now)));

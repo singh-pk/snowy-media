@@ -160,7 +160,8 @@ test("a reconnecting peer catches up from one version vector", async () => {
 
 test("the version vector moves to the next peer when the first one's link closes before it answers", async () => {
   const { network, alice, bob, carol, dave, toCarol, toDave } = await twoHolders("one", "two");
-  // Ranked as `reconnected` ranks: closing the other link would leave nothing to move on from.
+  // Ranked as `reconnected` ranks: closing the other link would let the first peer answer, and the
+  // test would pass without the vector moving on.
   const [first] = await rank([carol.chat.id, dave.chat.id], bob.chat.id, "chat-versions");
   await bob.chat.reconnected();
   // The vector is on its way to the first-ranked peer; its link closes before it arrives.
