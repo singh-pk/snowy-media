@@ -56,15 +56,25 @@ export type ChunkServerOptions = {
   read(slot: ChunkSlot): Promise<Bytes | undefined>;
   /** Sends a message to a peer over its link. */
   send(peer: KeyId, message: ChunkBusy | ChunkGone): void;
-  /** Sends a chunk to a peer on its `data` channel. Resolves once it has all gone out. */
-  deliver(peer: KeyId, key: string, bytes: Bytes): Promise<unknown>;
+  /**
+   * Sends a chunk to a peer on its `data` channel, stopping between pieces once `signal` aborts.
+   * Settles once it has all gone out, or stopped.
+   */
+  deliver(peer: KeyId, key: string, bytes: Bytes, signal: AbortSignal): Promise<unknown>;
 };
 
 type Queued = { slot: ChunkSlot; priority: FetchPriority };
 
-// One asker's requests: those waiting, in the order first asked, and the key of the one on the
-// wire.
-type Asker = { waiting: Map<string, Queued>; sending: string | undefined };
+// One asker's requests: those waiting, in the order first asked, and the one on the wire, which
+// a `cancel` stops.
+type Asker = {
+  waiting: Map<string, Queued>;
+  sending: { key: string; stop: AbortController } | undefined;
+};
+
+// The key of the chunk an asker has on the wire and still wants.
+const onWire = (asker: Asker) =>
+  asker.sending?.stop.signal.aborted === false ? asker.sending.key : undefined;
 
 // The request to send next: the most urgent, then the oldest asked, which comes first in the map.
 function first(waiting: Map<string, Queued>) {
@@ -90,26 +100,29 @@ export function createChunkServer(options: ChunkServerOptions) {
   }
 
   // Sends a chunk, settling either way: a link that fails to send closes, which drops the rest.
-  async function delivered(peer: KeyId, key: string, bytes: Bytes) {
+  async function delivered(peer: KeyId, key: string, bytes: Bytes, signal: AbortSignal) {
     try {
-      await options.deliver(peer, key, bytes);
+      await options.deliver(peer, key, bytes, signal);
     } catch {
       // The link's close event follows.
     }
   }
 
   // Sends `peer`'s requests one at a time, each chunk or `gone` if it can't be read, until none
-  // waits or its link closes.
+  // waits or its link closes. A chunk cancelled while it was read isn't sent.
   async function drain(peer: KeyId, asker: Asker) {
     for (let next = first(asker.waiting); next !== undefined; next = first(asker.waiting)) {
+      if (askers.get(peer) !== asker) return;
       const [key, { slot }] = next;
+      const stop = new AbortController();
+      asker.sending = { key, stop };
       asker.waiting.delete(key);
-      asker.sending = key;
       const bytes = await readable(slot);
       if (askers.get(peer) !== asker) return;
-      if (bytes === undefined)
+      const { aborted } = stop.signal;
+      if (!aborted && bytes === undefined)
         options.send(peer, { type: "gone", track: slot.track, index: slot.index });
-      else await delivered(peer, key, bytes);
+      if (!aborted && bytes !== undefined) await delivered(peer, key, bytes, stop.signal);
       // In the same turn as the last answer, so a request it prompts finds the room free.
       if (asker.waiting.size === 0) asker.sending = undefined;
     }
@@ -118,11 +131,11 @@ export function createChunkServer(options: ChunkServerOptions) {
   function request(peer: KeyId, { track, index, priority }: ChunkRequest) {
     const slot = { track, index };
     const key = chunkKey(slot);
-    const asker = askers.get(peer) ?? { waiting: new Map(), sending: undefined };
+    const asker: Asker = askers.get(peer) ?? { waiting: new Map(), sending: undefined };
     askers.set(peer, asker);
     const queued = asker.waiting.get(key);
     // The chunk on the wire is already being sent.
-    if (asker.sending === key) return;
+    if (onWire(asker) === key) return;
 
     // The same request, with the newer priority; it keeps its place in the map.
     if (queued !== undefined) {
@@ -135,7 +148,8 @@ export function createChunkServer(options: ChunkServerOptions) {
       return;
     }
 
-    if (asker.waiting.size + (asker.sending === undefined ? 0 : 1) >= options.room(peer)) {
+    // A cancelled chunk still settling takes no room: the asker counts it ended.
+    if (asker.waiting.size + (onWire(asker) === undefined ? 0 : 1) >= options.room(peer)) {
       options.send(peer, { type: "busy", track: slot.track, index: slot.index });
       return;
     }
@@ -147,8 +161,15 @@ export function createChunkServer(options: ChunkServerOptions) {
   /** Answers a `request` or `cancel` from `peer`; any other message is ignored. */
   function requested(peer: KeyId, message: ChunkControl) {
     if (message.type === "request") request(peer, message);
-    // A chunk already on the wire goes out whole: the link sends it as one delivery.
-    if (message.type === "cancel") askers.get(peer)?.waiting.delete(chunkKey(message));
+    if (message.type === "cancel") cancel(peer, chunkKey(message));
+  }
+
+  // Drops a waiting request, or stops the chunk on the wire.
+  function cancel(peer: KeyId, key: string) {
+    const asker = askers.get(peer);
+    if (asker === undefined) return;
+    if (onWire(asker) === key) asker.sending!.stop.abort();
+    else asker.waiting.delete(key);
   }
 
   /** The link to `peer` closed: its requests are dropped. */

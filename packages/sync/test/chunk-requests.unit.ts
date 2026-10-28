@@ -17,9 +17,10 @@ import { checkChunkControl, createChunkServer, type ChunkControl } from "../src/
 function forwarder(held: number[], room: Record<string, number>) {
   const events: string[] = [];
   const waiters: { count: number; resolve: () => void }[] = [];
-  // Each delivery on the wire, by key, to finish or fail.
-  const wire = new Map<string, PromiseWithResolvers<void>>();
-  const at = { unreadable: new Set<number>(), broken: new Set<number>() };
+  // Each delivery on the wire, by key, to finish or fail, and the signal that stops it.
+  const wire = new Map<string, PromiseWithResolvers<void> & { signal: AbortSignal }>();
+  // Chunks that read back as evicted or throw, and each index read, in order.
+  const at = { unreadable: new Set<number>(), broken: new Set<number>(), reads: [] as number[] };
 
   function record(event: string) {
     events.push(event);
@@ -30,13 +31,14 @@ function forwarder(held: number[], room: Record<string, number>) {
     room: (peer) => room[peer] ?? 0,
     holds: (slot) => slot.track === 0 && held.includes(slot.index),
     read: async ({ index }) => {
+      at.reads.push(index);
       if (at.broken.has(index)) throw new DOMException("unreadable", "NotReadableError");
       return at.unreadable.has(index) ? undefined : new Uint8Array([index]);
     },
     send: (peer, message) => record(`${message.type} ${peer} ${message.track}:${message.index}`),
-    deliver: (peer, key) => {
+    deliver: (peer, key, _bytes, signal) => {
       const delivery = Promise.withResolvers<void>();
-      wire.set(key, delivery);
+      wire.set(key, { ...delivery, signal });
       record(`deliver ${peer} ${key}`);
       return delivery.promise;
     },
@@ -184,18 +186,68 @@ test("a chunk not held, evicted before its turn, or unreadable is answered gone"
   expect(f.events).toEqual(["gone a 0:5", "deliver a media/0/0", "gone a 0:1", "gone a 0:2"]);
 });
 
-test("cancel drops a waiting request, and a failed delivery moves on to the next", async () => {
+test("cancel drops a waiting request, and stops the chunk on the wire", async () => {
   const f = forwarder([0, 1, 2], { a: 10 });
   f.ask("a", 0, "urgent");
   f.ask("a", 1, "urgent");
   f.ask("a", 2, "urgent");
   f.server.requested("a", { type: "cancel", track: 0, index: 1 });
-  // Chunk 0 is on the wire and goes out whole.
+  await f.until(1);
+  const delivery = f.wire.get("media/0/0")!;
+  expect(delivery.signal.aborted).toBe(false);
   f.server.requested("a", { type: "cancel", track: 0, index: 0 });
+  expect(delivery.signal.aborted).toBe(true);
+  // The delivery settles once it stops, and the next goes.
+  delivery.resolve();
+  await f.until(2);
+  expect(f.events).toEqual(["deliver a media/0/0", "deliver a media/0/2"]);
+});
+
+test("a chunk cancelled while it is read is never sent, and takes no room", async () => {
+  const f = forwarder([0, 1], { a: 1 });
+  f.ask("a", 0, "urgent");
+  f.server.requested("a", { type: "cancel", track: 0, index: 0 });
+  // With room for one, the next request is taken while chunk 0's read settles; 0 asked again
+  // once 1 is on the wire is beyond that room.
+  f.ask("a", 1, "urgent");
+  await f.until(1);
+  f.ask("a", 0, "urgent");
+  f.wire.get("media/0/1")!.resolve();
+  await f.until(2);
+  expect(f.events).toEqual(["deliver a media/0/1", "busy a 0:0"]);
+  expect(f.at.reads).toEqual([0, 1]);
+});
+
+test("a chunk asked again after it was cancelled on the wire is sent again", async () => {
+  const f = forwarder([0], { a: 2 });
+  f.ask("a", 0, "urgent");
+  f.server.requested("a", { type: "cancel", track: 0, index: 0 });
+  f.ask("a", 0, "urgent");
+  await f.until(1);
+  expect(f.events).toEqual(["deliver a media/0/0"]);
+  expect(f.at.reads).toEqual([0, 0]);
+});
+
+test("a failed delivery moves on to the next", async () => {
+  const f = forwarder([0, 1], { a: 10 });
+  f.ask("a", 0, "urgent");
+  f.ask("a", 1, "urgent");
   await f.until(1);
   f.wire.get("media/0/0")!.reject(new Error("send failed"));
   await f.until(2);
-  expect(f.events).toEqual(["deliver a media/0/0", "deliver a media/0/2"]);
+  expect(f.events).toEqual(["deliver a media/0/0", "deliver a media/0/1"]);
+});
+
+test("a repeat request on a full link isn't answered busy", async () => {
+  const f = forwarder([0, 1], { a: 2 });
+  f.ask("a", 0, "ahead");
+  f.ask("a", 1, "ahead");
+  f.ask("a", 1, "urgent");
+  f.ask("a", 0, "urgent");
+  await f.until(1);
+  f.wire.get("media/0/0")!.resolve();
+  await f.until(2);
+  expect(f.events).toEqual(["deliver a media/0/0", "deliver a media/0/1"]);
 });
 
 test("a closed link drops its requests, and a later one starts afresh", async () => {
@@ -211,4 +263,6 @@ test("a closed link drops its requests, and a later one starts afresh", async ()
   f.ask("a", 2, "urgent");
   await f.until(3);
   expect(f.events).toEqual(["deliver a media/0/0", "deliver b media/0/2", "deliver a media/0/2"]);
+  // a's chunk 1 was never read once its link closed.
+  expect(f.at.reads).toEqual([0, 2, 2]);
 });
