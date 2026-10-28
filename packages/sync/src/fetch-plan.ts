@@ -123,28 +123,44 @@ function* ordered(
   }
 }
 
-// The interests stated, each with the index span it covers as of the last pass.
-function createWants(options: FetchPlanOptions, stale: () => void) {
+// The chunk index as last read, kept until a new page arrives: joining it copies every page.
+function createListing(options: FetchPlanOptions) {
+  const state: { held?: { index: JoinedIndex; ended: boolean } } = {};
+
+  function read() {
+    state.held ??= { index: options.index(), ended: options.ended() };
+    return state.held;
+  }
+
+  return { read, drop: () => delete state.held };
+}
+
+type Listing = ReturnType<typeof createListing>;
+
+// The interests stated, each with the index span it covers as of the last pass. `changed` is
+// called when what they cover may have changed.
+function createWants(listing: Listing, changed: () => void) {
   const wants = new Set<{ want: Want; span: Span | undefined }>();
 
   function want(interest: Want) {
     // copy: the interest's own range, which `move` changes and the caller's object doesn't.
     const held = { want: { ...interest }, span: undefined as Span | undefined };
     wants.add(held);
-    stale();
+    changed();
 
     return {
       /** Moves the interest to a new range: nothing to do if it covers the same chunks. */
       move(fromUs: number, toUs: number) {
         held.want.fromUs = fromUs;
         held.want.toUs = toUs;
-        const span = spanOf(held.want, options.index().bounds, options.ended());
-        if (span?.[0] !== held.span?.[0] || span?.[1] !== held.span?.[1]) stale();
+        const { index, ended } = listing.read();
+        const span = spanOf(held.want, index.bounds, ended);
+        if (span?.[0] !== held.span?.[0] || span?.[1] !== held.span?.[1]) changed();
       },
       /** Ends the interest: what only it covered is asked for no more. */
       release() {
         wants.delete(held);
-        stale();
+        changed();
       },
     };
   }
@@ -346,6 +362,8 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
     return sourceTakes || forwarders().some((peer) => room.takes(peer, priority));
   }
 
+  // Asks for a chunk by the tree. Returns false when a link the tree allows for it has no room,
+  // so the chunks after it wait their turn; true when it was asked, or is left out to wait.
   function place(slot: ChunkSlot, priority: FetchPriority, bytes: number) {
     const key = chunkKey(slot);
     const links = options.links();
@@ -363,19 +381,20 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
 
     if (holding.length > 0) {
       const peer = room.fastest(holding, own);
-      if (peer === undefined) return;
+      if (peer === undefined) return false;
       const victim = room.room(peer) ? undefined : room.victim(peer);
       if (victim) requests.cancel(victim[0], victim[1]);
       requests.ask(slot, peer, priority, bytes);
-      return;
+      return true;
     }
 
-    if (priority === "ahead" || requests.refuses(key, options.source) || !room.room(options.source))
-      return;
+    if (priority === "ahead" || requests.refuses(key, options.source)) return true;
+    if (!room.room(options.source)) return false;
     requests.ask(slot, options.source, priority, bytes);
+    return true;
   }
 
-  // Places the chunks wanted at `priority` until no link takes more.
+  // Places the chunks wanted at `priority`, in order, until one finds no room.
   function scan(priority: FetchPriority, index: JoinedIndex, playhead: number) {
     // Only a forwarder can bring a chunk ahead, or any chunk while the source is offline.
     const onlyAdvertised = priority === "ahead" || !options.links().has(options.source);
@@ -391,7 +410,8 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
     for (const slot of ordered(wants.spans(priority), playhead, next)) {
       if (!open(priority)) return;
       if (requests.out.has(chunkKey(slot))) continue;
-      place(slot, priority, Math.ceil(index.bytes[slot.index]! * options.ratio(slot.track)));
+      const bytes = Math.ceil(index.bytes[slot.index]! * options.ratio(slot.track));
+      if (!place(slot, priority, bytes)) return;
     }
   }
 
@@ -400,7 +420,12 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
 
 // The playhead, the deadlines it gives the chunks ahead, and the urgent requests that would
 // miss theirs.
-function createClock(options: FetchPlanOptions, requests: Requests, room: Room) {
+function createClock(
+  options: FetchPlanOptions,
+  listing: Listing,
+  plan: { requests: Requests; room: Room; stale: () => void },
+) {
+  const { requests, room } = plan;
   const state = { us: 0, at: 0, playing: false };
 
   const playheadAt = (now: number) => state.us + (state.playing ? (now - state.at) * 1000 : 0);
@@ -408,7 +433,7 @@ function createClock(options: FetchPlanOptions, requests: Requests, room: Room) 
   // When a chunk must have arrived, in milliseconds: none while paused, or for a chunk that ends
   // at or before the playhead, and now for the one holding it.
   function deadline(index: number, now: number) {
-    const { bounds } = options.index();
+    const { bounds } = listing.read().index;
     const atUs = playheadAt(now);
     if (!state.playing || bounds[index + 1]! <= atUs) return undefined;
     return now + Math.max(0, bounds[index]! - atUs) / 1000;
@@ -447,6 +472,8 @@ function createClock(options: FetchPlanOptions, requests: Requests, room: Room) 
       const [key, request] = entry;
       requests.cancel(key, request);
       requests.ask(request.slot, options.source, "urgent", request.bytes);
+      // The forwarder's link has room again.
+      plan.stale();
     }
   }
 
@@ -457,9 +484,14 @@ export function createFetchPlan(options: FetchPlanOptions) {
   const state = { stale: false, full: false };
   const requests = createRequests(options);
   const room = createRoom(options, requests.out);
-  const wants = createWants(options, stale);
+  const listing = createListing(options);
+  // An interest change ends a wait on full storage too.
+  const wants = createWants(listing, () => {
+    state.full = false;
+    stale();
+  });
   const placer = createPlacer(options, requests, room, wants);
-  const clock = createClock(options, requests, room);
+  const clock = createClock(options, listing, { requests, room, stale });
 
   function stale() {
     if (state.stale) return;
@@ -469,8 +501,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
 
   function pass() {
     state.stale = false;
-    const index = options.index();
-    const ended = options.ended();
+    const { index, ended } = listing.read();
     wants.refresh(index.bounds, ended);
     requests.settle(wants.priorityOf);
     if (state.full) return;
@@ -484,8 +515,11 @@ export function createFetchPlan(options: FetchPlanOptions) {
 
   return {
     want: wants.want,
-    /** A new page of the chunk index arrived. */
-    indexed: stale,
+    /** A new page of the chunk index arrived, or the last was listed. */
+    indexed() {
+      listing.drop();
+      stale();
+    },
     playhead: clock.playhead,
     /** A piece of `bytes` of a chunk arrived from `peer`. */
     piece(slot: ChunkSlot, peer: KeyId, bytes: number) {
@@ -537,7 +571,10 @@ export function createFetchPlan(options: FetchPlanOptions) {
       requests.forgive(options.source);
       stale();
     },
-    /** Storage filled, or freed: nothing more is placed while it is full. */
+    /**
+     * Storage filled, or freed by an eviction or a drop: nothing more is placed while it is full,
+     * or until an interest changes.
+     */
     storage(full: boolean) {
       state.full = full;
       if (!full) stale();

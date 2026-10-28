@@ -377,10 +377,11 @@ test("a chunk no interest covers, or that came another way, is cancelled", async
   const interest = plan.want(video(0, 4, "ahead"));
   await sends(at, ["ask a 0:0 ahead", "ask a 0:1 ahead"]);
 
-  at.reads = 0;
+  at.misses = 0;
   interest.move(SECOND, 3 * SECOND);
   await sends(at, []);
-  // The move read the index once, to find it covers the same chunks, and no pass ran.
+  // The move covers the same chunks: no pass ran, and the index wasn't read again.
+  expect(at.misses).toBe(0);
   expect(at.reads).toBe(1);
 
   interest.move(4 * SECOND, 8 * SECOND);
@@ -401,11 +402,16 @@ test("a chunk no interest covers, or that came another way, is cancelled", async
 test("nothing is placed while storage is full", async () => {
   const { plan, at } = world(10);
   at.links.set("source", FAST);
-  plan.storage(true);
   plan.want(video(0, 2, "urgent"));
+  plan.storage(true);
   await sends(at, []);
   plan.storage(false);
   await sends(at, ["ask source 0:0 urgent"]);
+
+  plan.storage(true);
+  plan.want(video(2, 4, "urgent"));
+  // A new interest ends the wait, as a chunk evicted would.
+  await sends(at, ["ask source 0:1 urgent"]);
 });
 
 test("events in one task are planned in one pass", async () => {
@@ -443,4 +449,56 @@ test("a pass stops once no link has room", async () => {
   await sends(at, ["ask source 0:0 background", "ask source 0:1 background"]);
   // One look at each chunk taken, and one at the next, which finds the link full.
   expect(at.misses).toBeLessThan(4);
+});
+
+test("a chunk whose links are full holds back the chunks after it", async () => {
+  const { plan, at } = world(10_000);
+  at.links.set("source", FAST);
+  forwarder(at, "a", SLOW, []);
+  for (let index = 0; index < 9000; index++) at.haves.get("a")!.add(`0:${index}`);
+  plan.want(video(0, 20_000, "background"));
+  // a takes chunks 0 and 1, and chunk 2 waits for it: chunk 9000 isn't asked of the source.
+  await sends(at, ["ask a 0:0 background", "ask a 0:1 background"]);
+  expect(at.misses).toBeLessThan(5);
+
+  at.held.add("0:0");
+  plan.stored({ track: 0, index: 0 }, "a");
+  await sends(at, ["ask a 0:2 background"]);
+  expect(at.misses).toBeLessThan(10);
+});
+
+test("a chunk waiting on the full source holds back a later one a forwarder holds", async () => {
+  const { plan, at } = world(10);
+  at.links.set("source", FAST);
+  forwarder(at, "b", FAST, [5]);
+  plan.want(video(0, 12, "urgent"));
+  await sends(at, ["ask source 0:0 urgent", "ask source 0:1 urgent"]);
+});
+
+test("the index is read again only once a new page arrives", async () => {
+  const { plan, at } = world(10);
+  at.links.set("source", FAST);
+  forwarder(at, "a", SLOW, [0]);
+  plan.playhead(0, 0, true);
+  plan.want(video(0, 2, "urgent"));
+  await sends(at, ["ask a 0:0 urgent"]);
+  plan.progress();
+  await sends(at, ["cancel a 0:0 urgent", "ask source 0:0 urgent"]);
+  expect(at.reads).toBe(1);
+  plan.indexed();
+  await sends(at, []);
+  expect(at.reads).toBe(2);
+});
+
+test("a request moved to the source frees its forwarder for the next chunk", async () => {
+  const { plan, at } = world(10);
+  forwarder(at, "a", SLOW, [0, 1, 2]);
+  at.links.set("source", { rttMs: 20, bytesPerMs: 10_000 });
+  plan.playhead(0, 0, true);
+  plan.want(video(0, 2, "urgent"));
+  plan.want(video(2, 6, "ahead"));
+  await sends(at, ["ask a 0:0 urgent", "ask a 0:1 ahead"]);
+  plan.progress();
+  // Chunk 0 is due now: the source's 25 ms beats a's 510, and a takes chunk 2 in its place.
+  await sends(at, ["cancel a 0:0 urgent", "ask source 0:0 urgent", "ask a 0:2 ahead"]);
 });
