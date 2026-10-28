@@ -4,10 +4,26 @@
 // The public API of @snowy-media/engine.
 
 import type { VideoParams } from "./codec";
+import { type Clip, clipOf, type Composition } from "./composition";
 import { checkMainThread, UnsupportedPlatformError } from "./platform";
-import { type Playback, type PlaybackHost, startPlayback, type VideoReport } from "./playback";
+import {
+  type Playback,
+  type PlaybackHost,
+  type Played,
+  startPlayback,
+  type VideoReport,
+} from "./playback";
 import type { FromMedia, FromRender, MediaInfo, ToMedia, ToRender } from "./protocol";
 
+export type {
+  Composition,
+  Plan,
+  PlanAudioLayer,
+  PlanLayer,
+  PlanSegment,
+  PlanVideoLayer,
+  Ratio,
+} from "./composition";
 export { UnsupportedPlatformError } from "./platform";
 export type { MediaInfo, PlatformFeature, Track } from "./protocol";
 
@@ -27,8 +43,23 @@ export interface Engine {
    */
   open(handle: FileSystemFileHandle): Promise<MediaInfo>;
   /**
-   * Plays the open file's first video and first audio track from where it is, once the
-   * browser allows audio to start (after a user gesture), unless a pause comes first: once
+   * Opens `composition` in place of what is open, as `open` does, and resolves once the file it
+   * plays is open: one clip of one file, its video and its audio in step, at any place on the
+   * composition, with black and silence before and after it, and the clock running on to its
+   * end. Its plan is read from start to end. Rejects with a NotSupportedError naming what the
+   * plan asks for that the engine does not play, such as a second layer, a transition, an
+   * effect or a speed; and as `open` does.
+   */
+  compose(composition: Composition): Promise<void>;
+  /**
+   * Reads the open composition's plan and duration again, after an edit: a clip that has not
+   * changed plays on; otherwise it opens again and goes on from the time it was at, playing if
+   * it was, unless a seek or a pause came while it opened.
+   */
+  changed(): Promise<void>;
+  /**
+   * Plays the open file's first video and first audio track, or the open composition with its
+   * clip's, from where it is, once the browser allows audio to start (after a user gesture), unless a pause comes first: once
    * video is decoded and audio buffered ahead, it starts the audio, and resolves once
    * it is heard. Rejects if playing has failed, or with an AbortError if an open stops it
    * while it starts.
@@ -53,7 +84,7 @@ export interface Engine {
    * the page is shown. Playing, it is `seek`.
    */
   fastSeek(time: number): Promise<void>;
-  /** The media time, in seconds, of what is being heard and seen now. */
+  /** The time, in seconds, of what is being heard and seen now: the file's or the composition's. */
   readonly currentTime: number;
   /** Stops the engine's workers. */
   close(): void;
@@ -173,6 +204,15 @@ function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>
     waits,
     changed,
     opened: undefined as { info: MediaInfo; video: Record<number, VideoParams> } | undefined,
+    // What plays of the open file, and, for a composition, its clip, how much later than the
+    // file's its times are (microseconds), and its length (seconds).
+    streams: { video: undefined, audio: undefined } as Played,
+    composition: undefined as Composition | undefined,
+    clip: undefined as Clip | undefined,
+    offset: 0,
+    duration: undefined as number | undefined,
+    // Whether a file or a composition is open.
+    ready: false,
     // Made on the first play, and kept: a page may only start so many.
     context: undefined as AudioContext | undefined,
     // Set at once, so a second play while the first starts joins it.
@@ -251,11 +291,12 @@ function playbackHost(p: Player): PlaybackHost {
   };
 }
 
-// Starts the open file playing into `context` from `p.from`, as play `id`.
+// Starts what is open playing into `context` from `p.from`, as play `id`, in the file's time.
 async function startPlay(p: Player, context: AudioContext, id: number) {
-  const opened = p.opened;
-  if (!opened) throw new Error("play: no file is open");
-  return startPlayback({ host: playbackHost(p), context, id, opened, from: p.from });
+  if (!p.ready) throw new Error("play: no file is open");
+  const { opened, streams: played } = p;
+  const from = p.from - p.offset;
+  return startPlayback({ host: playbackHost(p), context, id, opened, played, from });
 }
 
 async function stopStarted(playback: Promise<Playback>) {
@@ -275,27 +316,109 @@ function stop(p: Player) {
   p.changed();
 }
 
-async function open(p: Player, handle: FileSystemFileHandle) {
-  const id = ++p.opens;
-  const replaced = () => id !== p.opens;
-  const file = await handle.getFile();
-  if (replaced()) throw new DOMException("open: replaced", "AbortError");
+// Stops what plays, clears the canvas and forgets what was open, for an open of `id`.
+function reset(p: Player, id: number) {
+  if (id !== p.opens) throw new DOMException("open: replaced", "AbortError");
   stop(p);
   p.render.postMessage({ type: "clear" } satisfies ToRender);
   p.failure = undefined;
   p.playing = false;
   p.opened = undefined;
+  p.streams = { video: undefined, audio: undefined };
+  p.composition = undefined;
+  p.clip = undefined;
+  p.offset = 0;
+  p.ready = false;
   p.from = 0;
   p.moved = false;
   p.played = false;
+}
+
+// Opens the file behind `handle` in the media worker, for the open of `id`, and resolves with
+// what it holds, once a later open has not replaced it.
+async function load(p: Player, handle: FileSystemFileHandle, id: number) {
+  const file = await handle.getFile();
+  reset(p, id);
   const reply = await p.media.send({ type: "open", file });
   if (reply.type !== "opened") throw new Error(`open: unexpected ${reply.type}`);
   // The later open has stopped this one, and its file is the one the media worker has open.
-  if (replaced()) throw new DOMException("open: replaced", "AbortError");
+  if (id !== p.opens) throw new DOMException("open: replaced", "AbortError");
   p.opened = { info: reply.info, video: reply.video };
-  const video = reply.info.tracks.find((t) => t.kind === "video");
-  p.index = (video && reply.index[video.id]) ?? { keyframes: [], end: -Infinity };
+  return reply;
+}
+
+// What a play of `stream` uses to scrub: its keyframes, as far as its index goes.
+function indexOf(reply: Extract<FromMedia, { type: "opened" }>, stream: number | undefined) {
+  return (stream !== undefined && reply.index[stream]) || { keyframes: [], end: -Infinity };
+}
+
+async function open(p: Player, handle: FileSystemFileHandle) {
+  const id = ++p.opens;
+  const reply = await load(p, handle, id);
+  const video = reply.info.tracks.find((t) => t.kind === "video")?.id;
+  const audio = reply.info.tracks.find((t) => t.kind === "audio")?.id;
+  p.streams = { video, audio };
+  p.index = indexOf(reply, video);
+  p.duration = reply.info.duration;
+  p.ready = true;
   return reply.info;
+}
+
+// Throws unless `stream` of what is open is of `kind`.
+function checkStream(p: Player, stream: number | undefined, kind: "video" | "audio") {
+  if (stream === undefined) return;
+  const track = p.opened?.info.tracks.find((t) => t.id === stream);
+  if (track?.kind !== kind) throw new RangeError(`compose: stream ${stream} is not ${kind}`);
+}
+
+async function compose(p: Player, composition: Composition) {
+  const { duration } = composition;
+  if (!Number.isSafeInteger(duration) || duration <= 0)
+    throw new RangeError(`compose: a duration of ${duration} µs`);
+  const clip = clipOf(composition.plan(0, duration), duration);
+  // Only once the composition is known to play, so a refused one leaves what opens alone.
+  const id = ++p.opens;
+  // Without a clip, nothing is read, and the clock runs on to the end.
+  const played: Played = { video: clip?.video, audio: clip?.audio };
+  const end = duration - (clip?.offset ?? 0);
+  played.clip = clip ? { in: clip.in, out: clip.out, end } : { in: 0, out: 0, end };
+
+  if (clip) {
+    const handle = await composition.source(clip.asset);
+    const reply = await load(p, handle, id);
+    checkStream(p, clip.video, "video");
+    checkStream(p, clip.audio, "audio");
+    p.index = indexOf(reply, clip.video);
+  } else {
+    reset(p, id);
+  }
+
+  Object.assign(p, { streams: played, composition, clip, offset: clip?.offset ?? 0 });
+  p.duration = duration / 1e6;
+  p.ready = true;
+}
+
+// Whether clips `a` and `b` play the same.
+function same(a: Clip | undefined, b: Clip | undefined) {
+  if (!a || !b) return a === b;
+  const { clip, asset, video, audio, offset } = a;
+  const place = a.in === b.in && a.out === b.out && offset === b.offset;
+  return place && clip === b.clip && asset === b.asset && video === b.video && audio === b.audio;
+}
+
+async function recompose(p: Player) {
+  const { composition } = p;
+  if (!composition) throw new Error("changed: no composition is open");
+  const { duration } = composition;
+  const kept = duration / 1e6 === p.duration;
+  if (kept && same(clipOf(composition.plan(0, duration), duration), p.clip)) return;
+  const { playing, seeks, pauses } = p;
+  const time = currentTime(p);
+  await compose(p, composition);
+  // A seek or a pause the app made meanwhile has the last word.
+  if (p.seeks !== seeks || p.pauses !== pauses) return;
+  await seek(p, Math.min(time, duration / 1e6));
+  if (playing) await play(p);
 }
 
 // What plays, started from `p.from` unless something does, and its context.
@@ -411,8 +534,8 @@ async function pause(p: Player) {
 // `time` in seconds as a start in microseconds, at most the duration; or what is wrong.
 function target(p: Player, time: number) {
   if (p.failure) throw p.failure;
-  const duration = p.opened?.info.duration;
-  if (!p.opened) throw new Error("seek: no file is open");
+  const duration = p.duration;
+  if (!p.ready) throw new Error("seek: no file is open");
   if (!Number.isFinite(time) || time < 0) throw new RangeError(`seek: ${time} s`);
   return Math.min(Math.round(Math.min(time, duration ?? time) * 1e6), Number.MAX_SAFE_INTEGER);
 }
@@ -447,11 +570,14 @@ async function scrub(p: Player) {
 // up is the one due at `from`, `to` is ahead of it, and the index says no keyframe comes up to
 // it, which starting again would decode from instead.
 function movable(p: Player, to: number) {
-  const { started, from } = p;
+  const { started, offset, clip } = p;
   if (p.played || !started?.drawn() || p.video.id !== started.id) return false;
+  // In the file's time, where the index is; outside the clip, there is nothing to decode.
+  const [from, there] = [p.from - offset, to - offset];
+  if (clip && (from < clip.in || there >= clip.out)) return false;
   const { keyframes, end } = p.index;
-  if (to < from || to > end) return false;
-  return !keyframes.some((k) => k > from && k <= to);
+  if (there < from || there > end) return false;
+  return !keyframes.some((k) => k > from && k <= there);
 }
 
 // Moves the paused play on to `to` (microseconds); resolves once its frame is up.
@@ -463,8 +589,9 @@ async function move(p: Player, to: number) {
   if (!p.moved) p.started?.clock.close();
   p.from = to;
   p.moved = true;
-  p.render.postMessage({ type: "scrub", id, to } satisfies ToRender);
-  await until(p, () => p.current !== id || (p.video.id === id && p.video.reached === to));
+  const there = to - p.offset;
+  p.render.postMessage({ type: "scrub", id, to: there } satisfies ToRender);
+  await until(p, () => p.current !== id || (p.video.id === id && p.video.reached === there));
   // Stopped: by a seek or a play, which take over, or else by an open or a failure.
   if (p.current === id || (p.seeks !== seeks && !p.failure)) return;
   throw p.failure ?? new DOMException("seek: stopped", "AbortError");
@@ -499,6 +626,13 @@ async function go(p: Player, from: number) {
   }
 }
 
+// The time heard now, in seconds: the file's, or the composition's.
+function currentTime(p: Player) {
+  const now = performance.timeOrigin + performance.now();
+  if (p.moved || !p.started) return p.from / 1e6;
+  return p.started.clock.heard(now) + p.offset / 1e6;
+}
+
 function closePlayer(p: Player) {
   if (p.closed) return;
   p.closed = true;
@@ -528,10 +662,10 @@ function createPlayer(render: Worker, media: ReturnType<typeof createMedia>): En
     pause: () => pause(p),
     seek: (time) => seek(p, time),
     fastSeek: (time) => fastSeek(p, time),
+    compose: (composition) => compose(p, composition),
+    changed: () => recompose(p),
     get currentTime() {
-      const now = performance.timeOrigin + performance.now();
-      if (p.moved || !p.started) return p.from / 1e6;
-      return p.started.clock.heard(now);
+      return currentTime(p);
     },
     close: () => closePlayer(p),
   };

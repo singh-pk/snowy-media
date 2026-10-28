@@ -21,7 +21,8 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 
 | Path | What it holds |
 | --- | --- |
-| `src/index.ts` | the public API, and the player on the main thread: open, play, pause, seek and scrub |
+| `src/index.ts` | the public API, and the player on the main thread: open, compose, play, pause, seek and scrub |
+| `src/composition.ts` | what a composition is to the engine: the shape of the plan it reads, and the one clip of a plan it plays, checked |
 | `src/playback.ts` | one play on the main thread: its rings and audio output, the output timestamp it publishes, and whether it may start and is heard |
 | `src/platform.ts` | the platform check on the main thread, and `UnsupportedPlatformError` |
 | `src/media.worker.ts` | the media worker: reads and demuxes the file, and decodes and resamples its audio, with the FFmpeg core |

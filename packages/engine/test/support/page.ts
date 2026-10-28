@@ -152,7 +152,8 @@ export async function hashRing(ring: SharedArrayBuffer, dts: boolean) {
  * starts, so it underruns only at the end. Returns the media time of the first frame; the
  * clock's media time less its context time, every SAMPLE_FRAMES frames while it runs; the
  * clock at the end; when channel 0 clicks, in context time; and, in stereo, the probe of what
- * played (test/support/audio.ts).
+ * played (test/support/audio.ts). A clip (`clip`, src/protocol.ts) is read from `from`, its clock
+ * starting at `start`.
  */
 export async function play(
   media: ReturnType<typeof startMedia>,
@@ -162,11 +163,14 @@ export async function play(
     seconds,
     channels,
     frames,
+    clip,
   }: Record<"seconds" | "channels" | "frames", number> & {
     worklet: string;
+    clip?: { from: number; start: number; until: number; end: number };
   },
 ) {
-  const pcm = createPcmRing(2 ** Math.ceil(Math.log2(frames)), channels, PCM_RATE);
+  const start = (clip?.start ?? 0) / 1e6;
+  const pcm = createPcmRing(2 ** Math.ceil(Math.log2(frames)), channels, PCM_RATE, start);
   const control = createPcmControl(pcm);
   const length = seconds * PCM_RATE;
   const context = new OfflineAudioContext({
@@ -178,7 +182,10 @@ export async function play(
   // No packets: the ring only gets the END record.
   const ring = createRing(64);
   const audio = { stream, preroll: 0 };
-  await media.request({ type: "demux", ring, streams: [], from: 0, pcm, audio });
+  const from = clip?.from ?? 0;
+  const until = clip && { start: clip.start, until: clip.until, end: clip.end };
+  const request = { type: "demux" as const, ring, streams: [], from, pcm, audio };
+  await media.request(until ? { ...request, clip: until } : request);
   const offsets: number[] = [];
 
   // Samples the clock, which only the audio thread moves, with rendering suspended at
@@ -732,13 +739,29 @@ export function frameOnScreen(
 }
 
 /**
+ * Whether `canvas`, drawn into `reader` by frameOnScreen, is black: no pixel of its middle row is
+ * bright, where every test video has some, as testsrc2 has in every row.
+ */
+export function blackOnScreen(
+  canvas: HTMLCanvasElement,
+  reader: OffscreenCanvasRenderingContext2D,
+) {
+  const { data } = reader.getImageData(0, canvas.height >> 1, canvas.width, 1);
+  return data.every((v, i) => i % 4 === 3 || v < BLACK);
+}
+
+// The brightest a channel of a black canvas may read; the compositor clears to 0.
+const BLACK = 16;
+
+/**
  * On each animation frame for `ms` milliseconds, the media time of engine `player` and the
- * number of the frame on `canvas` (frameOnScreen).
+ * number of the frame on `canvas` (frameOnScreen), or, with `black`, -1 while it is black.
  */
 export async function watchScreen(
   player: { readonly currentTime: number },
   canvas: HTMLCanvasElement,
   ms: number,
+  { black = false } = {},
 ) {
   const reader = new OffscreenCanvas(canvas.width, canvas.height).getContext("2d");
   if (!reader) throw new Error("no 2D context");
@@ -747,7 +770,8 @@ export async function watchScreen(
 
   while (performance.now() < until) {
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    seen.push([player.currentTime, frameOnScreen(canvas, reader)]);
+    const id = frameOnScreen(canvas, reader);
+    seen.push([player.currentTime, black && blackOnScreen(canvas, reader) ? -1 : id]);
   }
 
   return seen;

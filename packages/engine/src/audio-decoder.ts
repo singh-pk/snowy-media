@@ -29,7 +29,10 @@ const SILENCE = 1024;
 // An audio stream being decoded into a PCM ring, from a queue of its compressed packets.
 export interface Audio {
   stream: number;
-  /** Moves a packet of the stream out of `pkt` into the queue; false while the queue is full. */
+  /**
+   * Moves a packet of the stream out of `pkt` into the queue, or drops it once decoding is over,
+   * as at a clip's end; false while the queue is full.
+   */
   queue(pkt: Ptr): boolean;
   /** Decodes into the PCM ring as far as it has room; whether anything moved. */
   feed(): boolean;
@@ -62,8 +65,13 @@ export interface AudioOptions {
   pcm: SharedArrayBuffer;
   /** Microseconds: the audio before it is dropped. */
   from: number;
-  /** Whether the demuxer moved to `from`, so silence fills to where the audio starts. */
-  sought: boolean;
+  /**
+   * Microseconds: where the clock starts, with silence up to where the audio starts, as after a
+   * seek or in a gap before a clip; or undefined to start it at the first frame kept.
+   */
+  start: number | undefined;
+  /** Microseconds: the audio from here on is dropped. */
+  until: number;
   /** Runs once the ring holds the preroll, is full, or has all the audio. */
   buffered: () => void;
 }
@@ -156,7 +164,8 @@ function freeDecoder(core: CoreModule, decoder: Decoder) {
   if (decoder.dec) core._sny_decoder_close(decoder.dec);
 }
 
-function createState({ ffmpeg, ctx, request, pcm, from, sought, buffered }: AudioOptions) {
+function createState(options: AudioOptions) {
+  const { ffmpeg, ctx, request, pcm, from, start, until, buffered } = options;
   const { core } = ffmpeg;
   const { stream, preroll } = request;
   const { channels, rate } = pcmFormat(pcm);
@@ -167,7 +176,8 @@ function createState({ ffmpeg, ctx, request, pcm, from, sought, buffered }: Audi
   return {
     ffmpeg,
     from,
-    sought,
+    start,
+    until,
     buffered,
     preroll,
     channels,
@@ -176,7 +186,8 @@ function createState({ ffmpeg, ctx, request, pcm, from, sought, buffered }: Audi
     timeBase,
     decoder,
     queue: createPacketQueue(core),
-    told: { buffered: false, written: 0 },
+    // Frames written, silence included; and how many may be, up to `until`, once started.
+    told: { buffered: false, written: 0, most: Infinity },
     // The resampled frames not yet in the ring: `left` frames from index `at` of HEAPF32; how
     // many more to drop, as they come before `from`; and the frames of silence before them.
     pending: { at: 0, left: 0, skip: 0, silence: 0 },
@@ -226,11 +237,21 @@ function resample(a: State, input: Ptr) {
 // more, more than any preroll.
 function write(a: State) {
   const { pending, producer } = a;
+
+  // At `until`: what is left is dropped, and no more is decoded.
+  if (a.told.written >= a.told.most) {
+    pending.silence = 0;
+    pending.left = 0;
+    a.phase.flushed = true;
+    return true;
+  }
+
   const silent = pending.silence > 0;
   // HEAPF32 is read for each write: the heap's buffer changes when memory grows.
+  const room = a.told.most - a.told.written;
   const n = silent
-    ? producer.offer(a.zeros, 0, Math.min(pending.silence, SILENCE))
-    : producer.offer(a.ffmpeg.core.HEAPF32, pending.at, pending.left);
+    ? producer.offer(a.zeros, 0, Math.min(pending.silence, SILENCE, room))
+    : producer.offer(a.ffmpeg.core.HEAPF32, pending.at, Math.min(pending.left, room));
 
   if (n < 0) {
     a.phase.closed = true;
@@ -254,18 +275,21 @@ function write(a: State) {
   return true;
 }
 
-// Starts the clock at the first decoded frame: the audio before `from` is dropped; after a seek,
-// silence fills from `from` to where the audio starts, so the clock starts at the target: Opus,
-// for one, drops its first frames after a seek.
-function start(a: State) {
-  const { from, sought, rate, pending, timeBase } = a;
+// Starts the clock at the first decoded frame: the audio before `from` is dropped; given a
+// start, silence fills from it to where the audio starts, so the clock starts there: after a
+// seek, where Opus, for one, drops its first frames, and in a gap before a clip.
+function startClock(a: State) {
+  const { from, rate, pending, timeBase } = a;
   const pts = a.ffmpeg.core._sny_frame_pts(a.decoder.frame);
   const first = pts === AV_NOPTS_VALUE ? 0 : (Number(pts) * timeBase.num) / timeBase.den;
   const late = (first - from / 1e6) * rate;
   // Rounded down: the clock starts no later than `from`, so it shows no frame due after.
   pending.skip = Math.max(0, Math.floor(-late));
-  pending.silence = sought ? Math.max(0, Math.round(late)) : 0;
-  a.producer.start(sought && late > 0 ? from / 1e6 : first + pending.skip / rate);
+  const kept = first + pending.skip / rate;
+  const clock = a.start === undefined ? kept : Math.min(kept, a.start / 1e6);
+  pending.silence = Math.max(0, Math.round((kept - clock) * rate));
+  a.told.most = Math.max(0, Math.round((a.until / 1e6 - clock) * rate));
+  a.producer.start(clock);
   a.phase.started = true;
 }
 
@@ -298,7 +322,7 @@ function feed(a: State) {
       moved = true;
     } else {
       check(ret, "decoder_receive");
-      if (!phase.started) start(a);
+      if (!phase.started) startClock(a);
       resample(a, decoder.frame);
     }
   }
@@ -324,7 +348,7 @@ export function createAudio(options: AudioOptions): Audio {
 
   return {
     stream: options.request.stream,
-    queue: (pkt) => phase.closed || a.queue.put(pkt),
+    queue: (pkt) => phase.closed || phase.done || a.queue.put(pkt),
     feed: () => feed(a),
     end: () => {
       phase.ended = true;

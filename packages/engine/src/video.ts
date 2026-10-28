@@ -69,6 +69,8 @@ export interface VideoOutputOptions {
 function createState(from: number) {
   return {
     shown: undefined as Picture | undefined,
+    // Whether the canvas is black, outside a clip, with no picture shown.
+    blank: false,
     ended: false,
     // Waiting for a packet, the ring being empty.
     waiting: false,
@@ -345,6 +347,7 @@ function present(o: Output, time: number) {
     const replaced = state.shown;
     // Owned before drawing, so a draw that throws leaves it for close.
     state.shown = picture;
+    state.blank = false;
 
     try {
       o.compositor.draw(picture, o.p.matrix);
@@ -356,6 +359,16 @@ function present(o: Output, time: number) {
   // Then the frames to go up next.
   void prepare(o, time);
   return picture !== undefined;
+}
+
+// Clears the canvas to black, outside a clip, closing the picture shown, unless it is black.
+function blank(o: Output) {
+  const { state } = o;
+  if (state.blank) return;
+  o.compositor.clear();
+  state.shown?.close();
+  state.shown = undefined;
+  state.blank = true;
 }
 
 // Stops decoding and closes every frame.
@@ -412,6 +425,8 @@ export function createVideoOutput(
   return {
     done,
     present: (time: number) => present(o, time),
+    /** Shows black, outside a clip; the next frame `present` takes goes up as usual. */
+    blank: () => blank(o),
     // Goes on to `to` (microseconds), later than where it plays from: the frames before it are
     // dropped as from a seek, and the latest due up to it goes up as it is decoded.
     moveTo(to: number) {
