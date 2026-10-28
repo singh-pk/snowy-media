@@ -46,7 +46,7 @@ FFmpeg, Emscripten, dav1d, zlib and bzip2 are pinned in [packages/ffmpeg/Dockerf
 
 ## Commits and pull requests
 
-Pull requests are squash-merged, and the title becomes the commit on `main`, so it must be a [Conventional Commit](https://www.conventionalcommits.org): `type(scope): summary` in lowercase imperative, for example `fix(core): keep pts when seeking raw H.264`. Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`. CI checks the title.
+Pull requests are squash-merged, and the title becomes the commit on `main`, so it must be a [Conventional Commit](https://www.conventionalcommits.org): `type(scope): summary` in lowercase imperative, for example `fix(core): keep pts when seeking raw H.264`. Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`. CI checks the title. Dependabot's titles start with a capital `Bump`, which it cannot be set to lower, so CI allows that one word from it.
 
 Fill in the pull request template. Every pull request needs green CI and a review from a code owner.
 
