@@ -258,7 +258,7 @@ test("refuses what it does not play, follows edits that change nothing or only t
         await player.seek(1);
         const empty = await support.watchScreen(player, canvas, 100, { black: true });
         player.close();
-        const last = { unchanged: unchanged.at(-1), empty: empty.at(-1) };
+        const last = { unchanged: unchanged.at(-1), reads: unchanged, empty: empty.at(-1) };
         return { refused, meanwhile, opened, lengthened, ...last };
       },
       {
@@ -276,7 +276,8 @@ test("refuses what it does not play, follows edits that change nothing or only t
   expect(got.refused).toEqual(["NotSupportedError", "RangeError", "RangeError"]);
   expect([got.meanwhile, got.opened]).toEqual(["NotSupportedError", "composed"]);
   expect(Math.abs(got.lengthened - 4.5)).toBeLessThan(SAMPLE);
-  expect(got.unchanged?.[1]).toBe(frameAt(1.7 - OFFSET));
+  const reads = got.reads.map(([t, id]) => `${t.toFixed(3)}:${id}`).join(" ");
+  expect(got.unchanged?.[1], `reads ${reads}`).toBe(frameAt(1.7 - OFFSET));
   expect(Math.abs((got.empty?.[0] ?? Number.NaN) - 1)).toBeLessThan(SAMPLE);
   expect(got.empty?.[1]).toBe(-1);
 }, 60_000);
