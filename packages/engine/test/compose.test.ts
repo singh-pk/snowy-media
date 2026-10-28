@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // engine.compose in Chromium, through the public API alone: a composition of one clip of
-// h264-aac.mp4, read from 0.5 s and placed from 1 s to 2.5 s of 3.5 s. Played, the canvas is
+// h264-aac.mp4, read from 0.5 s and placed from 1 s to 3 s of 4 s. Played, the canvas is
 // black before and after the clip and shows, within it, the frame due at the composition's
 // time less the clip's offset, by native FFmpeg's timestamps, and the clock runs on to the end;
 // paused, a seek lands on black or on that frame, with the clock at the target; an edit that
@@ -28,15 +28,17 @@ const { video, audio } = expected[FILE] ?? { video: { id: 0, timeBase: "1/1", pt
 if (!audio) throw new Error(`no ${FILE} in expected.json`);
 const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
 // The clip, in seconds: read from IN, placed from START to END of DURATION.
-const [IN, START, END, DURATION] = [0.5, 1, 2.5, 3.5];
+const [IN, START, END, DURATION] = [0.5, 1, 3, 4];
 const OFFSET = START - IN;
 // How late a frame may be, and how far the clock may be from where it should be, in seconds,
 // as test/play.test.ts measured them: Chromium draws slower than real time on CI's macOS
 // runners (SLOW_DRAWING) and in software on its Linux and Windows ones (SOFTWARE_GPU).
 const LATE = SLOW_DRAWING ? 1 : SOFTWARE_GPU ? 0.05 : 0.02;
+// How early a frame may be drawn, in seconds, by the same measures.
+const EARLY = 0.02;
 const REAL_TIME = SLOW_DRAWING ? 1 : 0.25;
 // Seeks: in the gap before the clip, in it, and in the gap after it.
-const SEEKS = [0.5, 1.7, 3];
+const SEEKS = [0.5, 1.7, 3.5];
 // How far the clock may be from a seek's target, in seconds: the audio starts on a whole sample.
 const SAMPLE = 1e-4;
 // The fewest reads a second of watching may give (test/play.test.ts).
@@ -96,8 +98,10 @@ function shownAt(t: number) {
   return Array.from({ length: last - first + 1 }, (_, i) => first + i);
 }
 
-// Whether a read at `t` is far enough from the clip's edges to say which it shows.
-const clearOfEdges = (t: number) => Math.abs(t - START) > LATE && Math.abs(t - END) > LATE;
+// Whether a read at `t` is far enough from the clip's edges to say which it shows: up to EARLY
+// before an edge, a read may show what comes after it, and up to LATE after, what came before.
+const clearOfEdges = (t: number) =>
+  t < START - EARLY || (t >= START + LATE && t < END - EARLY) || t >= END + LATE;
 
 // The plan with a second video layer over the clip, which the engine does not play.
 function twoLayers(): Engine.Plan {
