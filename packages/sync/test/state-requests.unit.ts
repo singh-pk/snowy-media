@@ -4,9 +4,9 @@
 // Getting the session's state on join (src/state-requests.ts), in Chromium, over links in memory:
 // a joiner asks the source first when it's online, otherwise peers by rank, moving on when a peer
 // answers `state-gone`, delivers a record that doesn't check out, delivers too little, or closes
-// its link; a peer that comes online during an ask is asked in its turn; it asks no more once it
-// holds the whole state, however the records came; and an ask that runs out of peers can start
-// again.
+// its link; it takes the chunk index with the rest; a peer that comes online during an ask is
+// asked in its turn; it asks no more once it holds the whole state, however the records came; and
+// an ask that runs out of peers can start again.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -156,6 +156,21 @@ test("a joiner asks the source first when it's online, and no one else", async (
   expect(j.asked).toEqual([source]);
   expect(j.records.complete()).toBe(true);
   expect(j.records.objects()).toEqual(objects);
+});
+
+test("a joiner takes the chunk index with the rest of the state", async () => {
+  const [source = ""] = await ids(1);
+  const indexed = await holding(4);
+  const page = await sealSourceRecord(session, content, {
+    kind: "index",
+    page: { page: 0, bounds: [0, 2_000_000, 4_500_000] },
+  });
+  await indexed.receive(page);
+  const j = await joining([{ id: source, records: indexed }]);
+  await j.ask.start([source], source);
+  await j.network.settle();
+  expect(j.records.bounds()).toEqual([0, 2_000_000, 4_500_000]);
+  expect(j.records.objects()).toEqual([...objects, page]);
 });
 
 test("without the source, a joiner asks peers by rank, past those that don't hold the whole state", async () => {

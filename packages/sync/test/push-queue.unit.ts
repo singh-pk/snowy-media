@@ -6,8 +6,9 @@
 // horizon; what isn't cut waits; a seek target's chunks go first, then chunks peers asked for,
 // then the rest ahead, and background requests only when nothing else can go; an audio track
 // selected late joins from the playhead, and one deselected stops; chunks of any length are found
-// by time; and requests are cancelled, dropped with their peer, queued once, refused when they
-// name no chunk, and handed back for `gone` once the last chunk comes before them.
+// by time, each with a length and starting where the last ended; and requests are cancelled,
+// dropped with their peer, queued once, refused when they name no chunk, and handed back for
+// `gone` once the last chunk comes before them.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -210,4 +211,11 @@ test("ending answers the requests queued past the last chunk", () => {
     { peer: "dave", slot: { track: 1, index: 3 } },
   ]);
   expect(drain(q)).toEqual(["carol>0:1"]);
+});
+
+test("a chunk with no length, or that doesn't start where the last one ended, isn't cut", () => {
+  const { q } = queue(2);
+  expect(() => q.cut(5 * SECOND, 7 * SECOND)).toThrow(RangeError);
+  expect(() => q.cut(4 * SECOND, 4 * SECOND)).toThrow(RangeError);
+  expect(drain(q)).toEqual(["3:0", "1:0", "0:0", "3:1", "1:1", "0:1"]);
 });

@@ -15,6 +15,7 @@
 
 import type { Catalog } from "./catalog";
 import type { ChunkSlot } from "./chunk";
+import { chunkAt } from "./chunk-index";
 import type { KeyId } from "./crypto";
 
 /** How far ahead of the playhead chunks are pushed live: 15 minutes. */
@@ -57,39 +58,24 @@ const toPeer = (r: Request): Send => ({ to: "peer", peer: r.peer, slot: r.slot }
 
 // The chunks cut so far, in index order, found by time.
 function createCuts() {
-  const state = { starts: [] as number[], ends: [] as number[], ended: false };
-
-  // The index of the chunk covering a moment, or undefined while it isn't cut. A moment before
-  // the first chunk is covered by it, and one past the last, once every chunk is cut, by the last.
-  function covering(us: number) {
-    const { starts, ends } = state;
-    let low = 0;
-    let high = starts.length;
-
-    // The first index starting after `us`.
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if ((starts[middle] ?? 0) <= us) low = middle + 1;
-      else high = middle;
-    }
-
-    const index = Math.max(0, low - 1);
-    if (index >= starts.length) return undefined;
-    if (us < (ends[index] ?? 0) || state.ended) return index;
-    return undefined;
-  }
+  // Each chunk ends where the next begins, as in the chunk index.
+  const state = { bounds: [] as number[], ended: false };
+  const count = () => Math.max(0, state.bounds.length - 1);
 
   function add(startUs: number, endUs: number) {
-    state.starts.push(startUs);
-    state.ends.push(endUs);
+    const last = state.bounds.at(-1);
+    const placed = endUs > startUs && (last === undefined || startUs === last);
+    if (!placed) throw new RangeError("a chunk has a length and starts where the last ends");
+    if (last === undefined) state.bounds.push(startUs);
+    state.bounds.push(endUs);
   }
 
   return {
-    covering,
+    covering: (us: number) => chunkAt(state.bounds, us, state.ended),
     add,
-    has: (index: number) => index < state.starts.length,
-    startOf: (index: number) => state.starts[index] ?? 0,
-    count: () => state.starts.length,
+    has: (index: number) => index < count(),
+    startOf: (index: number) => state.bounds[index]!,
+    count,
     end: () => (state.ended = true),
     ended: () => state.ended,
   };
@@ -250,7 +236,10 @@ export function createPushQueue(options: PushQueueOptions) {
     return send;
   }
 
-  /** The next index is cut, covering `[startUs, endUs)`. */
+  /**
+   * The next index is cut, covering `[startUs, endUs)`. Throws a `RangeError` unless it has a
+   * length and starts where the last one ended.
+   */
   function cut(startUs: number, endUs: number) {
     cuts.add(startUs, endUs);
     changed();

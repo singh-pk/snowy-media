@@ -43,7 +43,7 @@ Everything up to [Edit sessions](#edit-sessions) describes watch sessions. Edit 
 | **Local-first** | Every peer keeps its own copy of what its interests cover; the source reads from its file. The interface reads only from local data, never from the network. Losing the network loses nothing that was already received. |
 | **One writer per object** | Each object has exactly one author: the source writes media, control and the catalog, and each peer writes its own chat and records. In an edit session, each asset's source writes that asset's media, each author writes their own timeline batches, and the active sequencer writes a branch's history. Two peers never write the same object, so nothing needs merging. |
 | **Event-driven** | Snowy's code has no timers and polls nothing. Every action responds to an event from the transport, the engine, the store or the user. The only clocks are the transports' keepalives and the engine's media clock, and both reach Snowy as events. |
-| **Each byte crosses each link once** | No peer receives the same object twice. The source pushes each chunk to the relay once. It sends a chunk again only to a peer that asks for one no connected forwarder holds. |
+| **Each byte crosses each link once** | No peer receives the same object twice. The source pushes each chunk to the relay once. It sends a chunk again only to a peer that asks for one no connected forwarder holds. The page of the [chunk index](#chunk-index) still filling is the one record sent again as it grows, at most 64 chunks' worth. |
 | **Metadata goes only to those who need it** | What a forwarder holds goes to its group, and a receiver's capability record goes to the source. Records are sent when they change, never repeated. |
 | **A stateless relay** | The relay forwards objects and forgets them. It stores nothing and runs no timers. Peers are the only storage. |
 | **One code path** | Every peer runs the same logic. Roles come from measured values and user settings, never from browser or device detection. |
@@ -107,7 +107,7 @@ type Link = {
 | Key | Type | Held by | Purpose |
 | --- | --- | --- | --- |
 | **Peer key** | Ed25519 key pair, one per device per session | Every peer, the source included | Identifies the peer and signs its capability records, chat checkpoints and relay requests. `PeerId` is the base64url public key. |
-| **Session key** | Ed25519 key pair | The source | Signs the catalog, chunk headers, control records and join grants, and authenticates the source to the relay. `SessionId` is the base64url public key. In an edit session it is the project key, held by the owner, and signs only grants and the project record ([Edit sessions](#edit-sessions)). |
+| **Session key** | Ed25519 key pair | The source | Signs the catalog, the chunk index, chunk headers, control records and join grants, and authenticates the source to the relay. `SessionId` is the base64url public key. In an edit session it is the project key, held by the owner, and signs only grants and the project record ([Edit sessions](#edit-sessions)). |
 | **Session secret** | 32 random bytes | Everyone with the invite | HKDF derives the content encryption key from it |
 
 Private keys are generated non-extractable and kept in IndexedDB ([Local store](#local-store)).
@@ -145,7 +145,7 @@ A token is the unpadded base64url of its JSON (`{ kind: "peer", grant, request, 
 
 | Role | Who | Uploads |
 | --- | --- | --- |
-| **Source** | The peer with the file. A watch session has exactly one; in an edit session, each asset has one ([Asset sources](#asset-sources)). It reads chunks from its [file](#the-sources-file) and stores none. | Every chunk once to the relay; control; the catalog; chunks asked for when no forwarder holds them |
+| **Source** | The peer with the file. A watch session has exactly one; in an edit session, each asset has one ([Asset sources](#asset-sources)). It reads chunks from its [file](#the-sources-file) and stores none. | Every chunk once to the relay; control; the catalog and chunk index; chunks asked for when no forwarder holds them |
 | **Forwarder** | A peer that meets every rule for becoming a forwarder (below) | Chunks to the peers in its group |
 | **Receiver** | Every other peer | No media. Its own chat and records only. |
 
@@ -218,6 +218,7 @@ Every name sits under the namespace `snowy/<SessionId>`. The relay enforces who 
 | `source` / `catalog` | Source | All | [Catalog](#catalog) |
 | `source` / `control` | Source | All | [Control record](#control-record) |
 | `source` / `init/<track>` | Source | All | Codec setup for one media track |
+| `source` / `index` | Source | All | [Chunk index](#chunk-index) |
 | `source` / `media/<track>` | Source | Forwarders and receivers without a forwarder | Media chunks for video, audio and subtitle tracks |
 | `peer/<PeerId>` / `caps` | The source and forwarders | All | Capability record |
 | `peer/<PeerId>` / `chat` | That peer | All | Chat messages and checkpoints |
@@ -230,13 +231,13 @@ Every name sits under the namespace `snowy/<SessionId>`. The relay enforces who 
 
 - One media chunk is one MoQ group with one object, sent on its own QUIC stream.
 - One chat message, or one batch of messages, is one group with one object.
-- `catalog`, `control` and `caps` publish a new group for every new version. A subscriber keeps only the newest.
-- Priorities, highest first: `control`, then `inbox`, then `chat`, then `catalog`, `caps` and `have`, then `init`, then `media` (subtitle, then audio, then video), then `probe`.
+- `catalog`, `control`, `index` and `caps` publish a new group for every new version. A subscriber keeps only the newest; for `index`, the newest of each page.
+- Priorities, highest first: `control`, then `inbox`, then `chat`, then `catalog`, `index`, `caps` and `have`, then `init`, then `media` (subtitle, then audio, then video), then `probe`.
 - **The client is [`@moq/net`](https://www.npmjs.com/package/@moq/net)**, pinned to an exact release. At setup it negotiates either moq-lite or an IETF MoQ Transport draft (14 to 22) with the relay, though telling a refused subscription apart relies on moq-lite's track information; the relay this package is tested against is moq-dev's [`moq-relay`](https://github.com/moq-dev/moq), the same project's, which picks moq-lite. A peer connects to the session's root, `snowy/<SessionId>`, under the relay's URL, so every path below is relative to it, and a relay can authorize a connection by the path it dialed.
 - **A peer serves its own tracks.** It announces a broadcast (MoQ Transport's namespace) and answers the subscriptions the relay forwards to it; nothing is pushed with `PUBLISH`, which moq-relay doesn't accept.
 - **Each sender has a broadcast of its own** under `inbox/<recipient>`, so every broadcast has exactly one publisher, and a relay never has to choose between two.
 - **Every object is a group of its own**, inbox messages included, so one lost or slow object never holds up another. Objects on the relay may therefore arrive in any order: everything sent through it is either self-proving (batches, chunks) or answered whatever order it comes in (repair messages).
-- **An object's key travels with it** on `chat`, `deliver`, `catalog`, `control`, `init/<track>` and `media/<track>`, framed as a 2-byte big-endian key length, the key in UTF-8, then the sealed bytes. A message on `ctl` is JSON.
+- **An object's key travels with it** on `chat`, `deliver`, `catalog`, `control`, `init/<track>`, `index` and `media/<track>`, framed as a 2-byte big-endian key length, the key in UTF-8, then the sealed bytes. A message on `ctl` is JSON.
 - **Presence** is a watch of the announcements under `peer/*` (`SUBSCRIBE_NAMESPACE` in MoQ Transport): a peer is online while its `peer/<PeerId>` broadcast is announced, and the relay reports the announcements and withdrawals.
 - **A broadcast's tracks exist before it is announced**, so a peer that subscribes on seeing a broadcast finds every track in it. A peer creates its own tracks before announcing `peer/<PeerId>`, so they are fixed when it connects, and the source announces `source` before that, so a peer that sees the source online finds `source` too.
 - **No group is skipped for its age.** `@moq/net` skips a group once a newer one is further ahead in time than the subscriber allows, which suits live media; every frame here carries the same timestamp, so none ever is.
@@ -250,6 +251,7 @@ Every name sits under the namespace `snowy/<SessionId>`. The relay enforces who 
 | Catalog | `catalog@version` | Source | About 1 KB | Session-key signature |
 | Control record | `control@epoch` | Source | About 100 B | Session-key signature |
 | Codec setup | `init/<track>` | Source | Under 1 KB | Session-key signature |
+| Chunk index page | `index/<page>@n` | Source | Up to about 870 B: 64 chunks | Session-key signature |
 | Media chunk | `media/<track>/<index>` | Source | One GOP: typically 1–5 MB for video, tens of KB for audio and text subtitles, up to a few MB for bitmap subtitles | Signed chunk header |
 | Chat batch | `chat/<author>/<firstSeq>-<lastSeq>` | Author | About 150 B per message | Hash chain plus a signed checkpoint |
 | Capability record | `caps/<peer>@version` | That peer | About 150 B | Peer-key signature |
@@ -299,7 +301,7 @@ type CodecSetup = {              // init/<track>: what the track's decoder is co
 - **A peer checks every field** and refuses a record with a field nobody signed, a `description` in another base64url spelling, or two tracks with one `id`. Track ids are 0 to 65535, as in chunk headers.
 - **The object key names what it holds:** a catalog is `catalog@<version>` and a codec setup `init/<track>`, and a peer refuses one whose content doesn't match its key. As the key is the encryption's associated data, a sealed catalog can't be passed off as another version either.
 - Versions count up from 1, and a peer keeps the catalog with the highest. The tracks, and each one's codec setup, are fixed for the session: a later version only adds `chunkCount`. Every record is signed, so a peer can take one from anyone.
-- **A peer holds each record sealed as it came:** the newest catalog, the newest control record and each track's codec setup, which it passes on unchanged to a joiner. As a track's setup is fixed, a peer keeps the first and ignores any later one. The source holds its own records the same way, taking each one it publishes.
+- **A peer holds each record sealed as it came:** the newest catalog, the newest control record, each track's codec setup and each page of the [chunk index](#chunk-index), which it passes on unchanged to a joiner. As a track's setup is fixed, a peer keeps the first and ignores any later one. The source holds its own records the same way, taking each one it publishes.
 
 ### Media chunk
 
@@ -331,6 +333,22 @@ Body
 - **On the wire,** a chunk is sealed under its object key, in a watch session `media/<track>/<index>` (an edit session's are in [Media keys](#media-keys)), spelled in decimal without leading zeros, which travels with it. A peer opens it under that key, then checks that the header names the same slot, so a chunk can't be passed off as another, sealed again or not.
 - A peer stores a chunk only once the signature and `bodyHash` both check out. It throws away anything that fails without storing it.
 
+### Chunk index
+
+```ts
+type IndexPage = {
+  page: number;                  // lists chunks from page × 64
+  bounds: number[];              // the page's chunk i is [bounds[i], bounds[i + 1]), in microseconds
+};
+```
+
+- **Why it exists:** interests are time ranges, but chunks are asked for and advertised by index, and a chunk is as long as the file's keyframes make it. A peer learns a chunk's times from its header only once it holds the chunk, so without the index a joiner or a seek couldn't tell which chunk covers a moment.
+- **One list for every track,** since an index is the same time range in each. Each chunk ends where the next begins, so `n` chunks take `n + 1` numbers, increasing; a moment before the first chunk counts as covered by it.
+- **It comes in pages of 64 chunks,** each a signed record like the catalog, under the prefix `snowy index v1`, keyed `index/<page>@<n>` for the `n` chunks it lists. The page number is signed with the bounds, so a page can't be passed off as another. A page only grows as the source cuts, until it is full, so a peer keeps the one listing the most of each, and the source keeps no counter: it builds each page from the chunk headers it already keeps.
+- **Pages join from the first:** a peer reads the index as page 0, then each next page that starts where the one before ends, up to the first that isn't full. Whether every chunk is cut is the catalog's `chunkCount`: once it is set and the index lists that many, a moment past the last chunk counts as covered by the last.
+- **The source publishes the page still filling as it cuts,** when its stream will accept more, so a burst of cuts becomes one update, as with [have ranges](#have-ranges). A full page never goes again. That page is the one record that repeats bytes a peer already has, and pages bound it: an update is at most about 870 bytes, and at one update per cut the index costs about 520 bytes a chunk in all, sealed and framed, so some 2 MB for a two-hour film in 2-second chunks.
+- **A peer holds each page sealed as it came** and passes them on to a joiner with the other records. What isn't listed yet waits for the next page. A session has no index before its first chunk is cut, so the [whole state](#presence-and-membership) needs none, but it does need every page before the last one held: a full page never goes again, so a peer holding page `p` whose pages don't join up to it missed one, doesn't hold the whole state, and asks for it again, as a joiner does. A joiner that has the state before any page places its interests once one arrives on `index`.
+
 ## Local store
 
 ```text
@@ -338,6 +356,7 @@ OPFS  snowy/<SessionId>/
         catalog            newest catalog
         control            newest control record
         init/<track>
+        chunk-index/<page> each page of the chunk index listing the most chunks
         media/<track>/<index>
         chat/<author>      append-only log: one record per message, and the checkpoints that prove them
         peers/<PeerId>     newest caps record of each known peer
@@ -413,7 +432,7 @@ Players and editors can be in the same session: interests belong to each peer.
 
 ### Where a joiner starts
 
-- A joiner reads `control`, finds the chunk containing the current position, and places its interests there.
+- A joiner reads `control`, finds the chunk containing the current position in the [chunk index](#chunk-index), and places its interests there.
 - A player never fetches what was played before it joined, unless the viewer seeks back. Its window starts at the playhead and grows back to 2 min behind as playback goes on.
 - An editor fetches from the playhead onwards first, then fills the rest of the film at background priority: from the playhead to the end, then from the start.
 
@@ -472,7 +491,7 @@ The source sends the next chunk as soon as the relay stream will accept more dat
 
 ### Choosing where each chunk comes from
 
-The scheduler runs on events (`progress`, `have`, `stored`, `close`, `busy`, `gone`, interest changes) and nothing else. For every chunk an interest covers that the peer doesn't yet hold, highest interest priority first:
+The scheduler runs on events (`progress`, `have`, `stored`, `close`, `busy`, `gone`, interest changes) and nothing else. For every chunk an interest covers that the peer doesn't yet hold, found by time in the [chunk index](#chunk-index), highest interest priority first:
 
 ```text
 covered by a live subscription?              → wait for it to arrive
@@ -691,8 +710,8 @@ Message text is rendered with `textContent` only.
 
 - **Joining:** a peer is online once its `peer/<PeerId>` namespace is announced on the relay. Peers learn of it through their namespace subscription.
 - **Leaving:** the namespace's withdrawal, or the link's `close` event, marks a peer offline. There are no heartbeats.
-- **Getting current state on join** (the relay holds none): the joiner asks for `catalog`, `control`, `init/*` and the forwarders' capability records from the source if it's online. Otherwise it asks the online peer with the lowest `SHA-256(peer ‖ "state")`. Every record is signed, so it can come from any peer.
-  - It sends `{ type: "state-request", ask }` on `ctl`, where `ask` counts up with each request and the answer names it. A peer that holds the whole state (a catalog, a control record and the setup of every track in that catalog) delivers each record unchanged on `deliver`, with the capability records it holds, then answers `{ type: "state-sent", ask, count }`, where `count` counts the source's records only. A peer that doesn't answers `{ type: "state-gone", ask }`.
+- **Getting current state on join** (the relay holds none): the joiner asks for `catalog`, `control`, `init/*`, `index` and the forwarders' capability records from the source if it's online. Otherwise it asks the online peer with the lowest `SHA-256(peer ‖ "state")`. Every record is signed, so it can come from any peer.
+  - It sends `{ type: "state-request", ask }` on `ctl`, where `ask` counts up with each request and the answer names it. A peer that holds the whole state (a catalog, a control record, the setup of every track in that catalog, and every page of the [chunk index](#chunk-index) before the last it holds) delivers each record it holds unchanged on `deliver`, pages of the index included, with the capability records it holds, then answers `{ type: "state-sent", ask, count }`, where `count` counts the source's records only. A peer that doesn't answers `{ type: "state-gone", ask }`.
   - The joiner asks the next peer on `state-gone`, on a record that doesn't check out, once `count` records have come and the state is still short, and when the asked peer's link closes. `ctl` and `deliver` are separate tracks, so `state-sent` may come before the records: the joiner counts them as they come.
   - The joiner asks no more once it holds the whole state, from whatever path the records came.
   - A peer that comes online during an ask is asked in its turn, and the source next. An ask that runs out of peers ends, and starts again when another peer comes online, asking again peers that failed before, since they may hold more by now.
@@ -705,7 +724,7 @@ An edit session is a live connection to one `@snowy-media/timeline` project. A p
 | | Watch session | Edit session |
 | --- | --- | --- |
 | Session key | Made by the source | The project key, held by the project's owner. `SessionId` is the `ProjectId`. |
-| What the session key signs | The catalog, chunk headers, control records and join grants | Grants and the project record only. Everything else is signed by the peer key of whoever publishes it. |
+| What the session key signs | The catalog, the chunk index, chunk headers, control records and join grants | Grants and the project record only. Everything else is signed by the peer key of whoever publishes it. |
 | Media | One file, from the source | Every asset in the project, each from any editor that has its file |
 | Media delivery | Pushed ahead, through forwarders and peer groups | Asked for, through the relay ([Asset sources](#asset-sources)) |
 | Rights | `viewer` | `view`, `propose`, `edit` ([Rights and grants](#rights-and-grants)) |
@@ -742,14 +761,14 @@ type Grant = {
 ### Asset sources
 
 - **Any peer with `edit` whose file matches an asset is a source of it.** It reads the asset from its own `FileSystemFileHandle`, cuts chunks exactly as [Media at the source](#media-at-the-source) describes, and serves them under its own namespace: `asset/<source PeerId>/<AssetId>`. The relay keeps no state, so it can't remember who published an asset first; with the source in the name, the relay can enforce who publishes from the token alone, and two sources of one asset never write the same object.
-- An asset's `catalog`, `init/<track>` and `media/<track>` objects have the formats of a watch session's, **signed by the source's peer key** instead of the session key. A chunk header in an edit session is version 2 ([Media chunk](#media-chunk)).
+- An asset's `catalog`, `index`, `init/<track>` and `media/<track>` objects have the formats of a watch session's, **signed by the source's peer key** instead of the session key. A chunk header in an edit session is version 2 ([Media chunk](#media-chunk)).
 - Chunks from two sources of one asset are kept apart: a peer fetches a range of an asset from one source, preferring a source it already holds chunks of that asset from, then the lowest RTT. When that source goes, the next one's chunks are fetched for what is still missing.
 - **Delivery is by request only, through the relay** (`deliver`). There is no shared playhead to push ahead of, so nothing is pushed, nobody subscribes live to `media`, and forwarders, peer groups and `caps.audio` don't apply. The source answers requests in priority order: `urgent`, then `ahead`, then `background`.
 - An asset with no source online can still be edited: the timeline refers to it by its id. Its media plays only from chunks a peer already holds.
 
 ### Media keys
 
-Every media object key and store path in an edit session starts with `<source>/<AssetId>/`: `media/<source>/<AssetId>/<track>/<index>`. Because the object key is the encryption's associated data, ciphertext can't be moved from one asset or source to another. The calls and events that name a track (`sync.read`, `sync.drop`, `stored`, `evicted`, `complete`, have ranges) name an asset and source as well.
+Every media object key and store path in an edit session starts with `<source>/<AssetId>/`: `media/<source>/<AssetId>/<track>/<index>` and `index/<source>/<AssetId>/<page>@<n>`. Because the object key is the encryption's associated data, ciphertext can't be moved from one asset or source to another. The calls and events that name a track (`sync.read`, `sync.drop`, `stored`, `evicted`, `complete`, have ranges) name an asset and source as well.
 
 ### Interests in an edit session
 
@@ -773,7 +792,7 @@ The editor moves the first on every `progress` event, and replaces the others on
 | `peer/<PeerId>/history/<BranchId>` / `history` | That peer, while it or an agent it carries sequences the branch | All | The branch's entries, refusals and terms |
 | `peer/<PeerId>` / `presence` | That peer | All | Selection, playhead, the tool in use, a drag in progress, and the agents it carries |
 | `peer/<PeerId>` / `control` | That peer | Peers following it | Its playhead, as a [control record](#control-record) |
-| `asset/<PeerId>` / `<AssetId>/…` | That peer, a source of the asset | Peers that ask | The asset's catalog, codec setups and chunks |
+| `asset/<PeerId>` / `<AssetId>/…` | That peer, a source of the asset | Peers that ask | The asset's catalog, chunk index, codec setups and chunks |
 
 - **Batches and histories are broadcasts of their own,** beside `peer/<PeerId>`, because the relay authorizes broadcasts, not tracks: so it can refuse them to a peer with `view` alone.
 - **Sync never reads timeline content.** For every timeline object it receives, it calls the consumer's `verify(bytes)`, which `@snowy-media/timeline` provides. It returns a batch's `{ author, seq }`, a history object's `{ branch, term, n, hash }`, or invalid. Sync orders, detects gaps and repairs by those fields alone. An invalid object, live or repaired, is dropped and not passed on; a repaired one counts as `gone`, and the next candidate is asked. Which sequencer to accept, and whether an author's rights allow a batch, are the consumer's to decide.
@@ -876,7 +895,7 @@ The transports' keepalives and idle timeouts (QUIC's idle timeout, WebRTC's conn
 
 - Forwards every object to its current subscribers and to whoever it was addressed to, then forgets it.
 - Keeps no cache, no history and no latest value. It has no timers of its own beyond QUIC's.
-- **After a restart:** every peer gets `link close`, reconnects, re-announces and republishes its current capability record and `have`. The source republishes `catalog` and `control`. No data is lost, because peers hold all of it.
+- **After a restart:** every peer gets `link close`, reconnects, re-announces and republishes its current capability record and `have`. The source republishes `catalog`, `control` and the page of the index still filling. No data is lost, because peers hold all of it.
 
 ### Authorization
 
@@ -994,6 +1013,7 @@ The sync package needs these engine capabilities through public exports:
 | Constant | Value |
 | --- | --- |
 | Minimum video chunk length | 2 s, closed at the next keyframe |
+| Chunk index page | 64 chunks |
 | Urgent window | Playhead to playhead + 30 s |
 | Player interest | 2 min behind to 15 min ahead of the playhead |
 | Push horizon | 15 min ahead of the playhead |

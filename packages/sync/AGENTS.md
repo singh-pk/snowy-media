@@ -21,8 +21,9 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/chunk.ts` | the media chunk: its signed header and packet records, encoded and checked, and sealed under its object key |
 | `src/signed-record.ts` | the source's records as JSON signed by the session key, over a domain prefix and the session |
 | `src/catalog.ts` | the catalog and each track's codec setup, as signed records |
+| `src/chunk-index.ts` | the chunk index: where each chunk cut so far begins, in signed pages of 64 chunks, joined, and the chunk covering a time |
 | `src/control.ts` | the control record: the source's playback position and state from a moment on its clock |
-| `src/source-records.ts` | the source's records as a peer holds them: the newest catalog and control record and each track's setup, sealed as they came |
+| `src/source-records.ts` | the source's records as a peer holds them: the newest catalog and control record, each track's setup and each page of the chunk index, sealed as they came |
 | `src/state-requests.ts` | getting the session's state on join: asking the source or the best-ranked peer for the source's records, and answering such asks |
 | `src/have.ts` | have ranges: what a forwarder holds, sealed and checked, published once per burst of store changes, and each forwarder's newest as a peer keeps them |
 | `src/push-queue.ts` | what the source sends next: seek targets, then requests, then chunks ahead of the playhead up to the push horizon, then background requests |
@@ -60,5 +61,5 @@ Beyond the rules above and [docs/architecture.md](docs/architecture.md), a revie
 
 - **Shortest path.** A chunk comes from where [Choosing where each chunk comes from](docs/architecture.md#choosing-where-each-chunk-comes-from) says, in its order; a change to that order changes the document first.
 - **Relay first.** The relay, over WebTransport, is the path for every peer that can reach it; a direct WebRTC link is a shortcut on top. ICE uses the two STUN endpoints only, a pair whose ICE check fails stays on the relay, and `symmetric` peers never use WebRTC. No change makes a session depend on a direct link or on a server the design doesn't have, such as TURN. Networks that block UDP are outside the design.
-- **Least data.** Each byte crosses each link once: nothing is sent twice, a record goes out only when it changes, a request no longer needed is cancelled, and metadata reaches only the peers that use it. The exceptions are the design's: the source sends a chunk again to a peer no forwarder can serve, and peers republish what they publish after a relay restart. An encoding on a path that carries every chunk is compact, and each field earns its bytes. A test of something that sends asserts how much it sent.
+- **Least data.** Each byte crosses each link once: nothing is sent twice, a record goes out only when it changes, a request no longer needed is cancelled, and metadata reaches only the peers that use it. The exceptions are the design's: the source sends a chunk again to a peer no forwarder can serve, the page of the chunk index still filling goes again as it grows, and peers republish what they publish after a relay restart. An encoding on a path that carries every chunk is compact, and each field earns its bytes. A test of something that sends asserts how much it sent.
 - **Highest quality.** Nothing lowers bitrate, resolution or frame rate to save bytes or to keep up; a slow peer is served from elsewhere or waits (root rule 10).

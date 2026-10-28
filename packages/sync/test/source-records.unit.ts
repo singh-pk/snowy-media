@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // The source's records as a peer holds them (src/source-records.ts), in Chromium: what the source
-// seals is kept, read and passed on unchanged; only a newer catalog or control record replaces
-// the one held, whatever order they arrive in, and a track keeps its first setup; and an object
-// that doesn't open, isn't a source record or isn't the session's is rejected, changing nothing.
+// seals is kept, read and passed on unchanged; only a newer catalog or control record, or a page
+// of the chunk index listing more chunks, replaces the one held, whatever order they arrive in,
+// and a track keeps its first setup; the whole state takes every page of the index up to the
+// last held; and an object that doesn't open, isn't a source record or isn't the session's is
+// rejected, changing nothing.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -38,6 +40,9 @@ const video: CodecSetup = { track: 0, codec: "avc1.640028", codedWidth: 1920, co
 const audio: CodecSetup = { track: 1, codec: "opus", sampleRate: 48_000, numberOfChannels: 2 };
 
 const sealed = async (record: SourceRecord) => sealSourceRecord(session, content, record);
+
+// The bounds of `count` chunks of 2 s each from 0 s: a full page of the index is 64.
+const twoSeconds = (count: number) => Array.from({ length: count + 1 }, (_, i) => i * 2_000_000);
 
 // A peer's records, with every record it reports kept.
 function peer() {
@@ -157,4 +162,54 @@ test("an object that doesn't open, isn't a source record or isn't the session's 
   expect(bob.records.catalog()).toBeUndefined();
   expect(bob.records.objects()).toEqual([]);
   expect(bob.reported).toEqual([]);
+});
+
+test("each page of the index is replaced only by one listing more chunks, and passed on with the rest", async () => {
+  // Page 0 full, 64 chunks of 2 s, then page 1 with one chunk and with two.
+  const full = twoSeconds(64);
+  const [first, oneMore, twoMore, catalogObject] = await Promise.all([
+    sealed({ kind: "index", page: { page: 0, bounds: full } }),
+    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000] } }),
+    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000, 133_000_000] } }),
+    sealed({ kind: "catalog", catalog }),
+  ]);
+  expect([first.key, oneMore.key, twoMore.key]).toEqual(["index/0@64", "index/1@1", "index/1@2"]);
+  const bob = peer();
+  const kept = await receiveAll(bob.records, [
+    oneMore,
+    twoMore,
+    oneMore,
+    catalogObject,
+    first,
+    twoMore,
+  ]);
+  expect(kept).toEqual([true, true, false, true, true, false]);
+  expect(bob.records.bounds()).toEqual([...full, 130_000_000, 133_000_000]);
+  expect(bob.reported.map((r) => r.kind)).toEqual(["index", "index", "catalog", "index"]);
+  expect(bob.records.objects()).toEqual([catalogObject, twoMore, first]);
+});
+
+test("the whole state takes every page of the index up to the last held, and none when none is held", async () => {
+  const objects = await Promise.all([
+    sealed({ kind: "catalog", catalog }),
+    sealed({ kind: "control", control }),
+    sealed({ kind: "setup", setup: video }),
+    sealed({ kind: "setup", setup: audio }),
+  ]);
+  // Page 0 one chunk short of full, then full, and page 1, which starts where the full page ends.
+  const [short, full, next] = await Promise.all([
+    sealed({ kind: "index", page: { page: 0, bounds: twoSeconds(63) } }),
+    sealed({ kind: "index", page: { page: 0, bounds: twoSeconds(64) } }),
+    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000] } }),
+  ]);
+  const bob = peer();
+  await receiveAll(bob.records, objects);
+  const complete = [bob.records.complete()];
+
+  for (const object of [next, short, full]) {
+    await bob.records.receive(object);
+    complete.push(bob.records.complete());
+  }
+
+  expect(complete).toEqual([true, false, false, true]);
 });
