@@ -1,11 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The source's records of what it streams (docs/architecture.md#catalog): the catalog, the
-// session's tracks and duration, and one codec setup per track, what a decoder is configured
-// with. Each is a signed record (src/signed-record.ts), so a peer can take one from anyone. Each
-// object's key names what it holds, `catalog@<version>` or `init/<track>`, and reading one checks
-// that it holds that.
+// The catalog and codec setups (docs/architecture.md#catalog). Each is signed, so a peer can take
+// one from anyone, and reading one checks it holds what its object key names.
 
 import { isCount, isRecord } from "./chat";
 import type { Bytes } from "./crypto";
@@ -66,10 +63,8 @@ export type CodecSetup = {
   numberOfChannels?: number;
 };
 
-// The object key of a catalog.
 const catalogKey = (version: number) => `catalog@${version}`;
 
-// The object key of a track's codec setup.
 const setupKey = (track: number) => `init/${track}`;
 
 const isText = (value: unknown): value is string => typeof value === "string" && value !== "";
@@ -154,7 +149,6 @@ function checkSetup(value: Record<string, unknown>) {
   return { record, setup };
 }
 
-// The bytes a description spells in base64url, or an `InvalidRecordError`.
 function decodeDescription(description: string): Bytes {
   try {
     return new Uint8Array(Uint8Array.fromBase64(description, { alphabet: "base64url" }));

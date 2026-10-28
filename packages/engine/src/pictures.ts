@@ -39,7 +39,6 @@ interface SlotParts {
   readonly imported?: GPUTextureView;
 }
 
-/** How a frame's planes are uploaded: see planesOf. */
 export interface Layout {
   readonly yuv: boolean;
   readonly depth: number;
@@ -91,7 +90,6 @@ export function planesOf(format: VideoPixelFormat, width: number, height: number
   };
 }
 
-// The size of the part of `frame` that is shown.
 // FFmpeg's frames are their visible part.
 export const visibleWidth = (frame: DecodedFrame) =>
   frame instanceof VideoFrame ? (frame.visibleRect?.width ?? frame.codedWidth) : frame.codedWidth;

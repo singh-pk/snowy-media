@@ -9,11 +9,18 @@
 
 import { existsSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { commentBudget, type Change } from "./comment-budget";
 
 const ROOT = join(import.meta.dir, "..");
 const BIN = join(ROOT, "node_modules/.bin");
 
-const input: { tool_input?: { file_path?: string } } = await Bun.stdin.json();
+interface Edit {
+  old_string?: string;
+  new_string?: string;
+}
+
+const input: { tool_input?: Edit & { file_path?: string; content?: string; edits?: Edit[] } } =
+  await Bun.stdin.json();
 const path = input.tool_input?.file_path ?? "";
 const file = relative(ROOT, path).replaceAll("\\", "/");
 // A path on another drive comes back absolute, and is just as outside.
@@ -45,8 +52,21 @@ async function report(command: string[]) {
   return code === 0 ? "" : `${out}${err}`.trim();
 }
 
+const toChange = (e: Edit) => ({ before: e.old_string ?? "", after: e.new_string ?? "" });
+
+// What the edit changed. A Write replaces the whole file, so it is measured against the last commit.
+function changes(): Change[] {
+  const tool = input.tool_input ?? {};
+  const edits = tool.edits ?? (tool.new_string === undefined ? [] : [tool]);
+  if (tool.content === undefined) return edits.map(toChange);
+  const head = Bun.spawnSync(["git", "show", `HEAD:${file}`], { cwd: ROOT });
+  const before = head.exitCode === 0 ? head.stdout.toString() : "";
+  return [{ before, after: tool.content }];
+}
+
 if (outside || !existsSync(path)) process.exit(0);
 const reports = await Promise.all(commands().map(report));
+if (/^packages\/.*\.ts$/.test(file)) reports.push(commentBudget(changes()));
 const failed = reports.filter((r) => r !== "");
 
 if (failed.length > 0) {

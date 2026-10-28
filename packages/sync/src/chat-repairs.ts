@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Asking for missing chat (docs/architecture.md#gaps-and-repair). The peer with a gap ranks the
-// candidates by `SHA-256(candidate ‖ author ‖ firstMissingSeq)` and asks the lowest; on `gone`,
-// a reply that doesn't fill the gap, or when that peer's link closes, it asks the next.
-// Everything moves on events: there is no timeout, since a link that dies closes.
+// Asking for missing chat (docs/architecture.md#gaps-and-repair). There is no timeout, since a
+// link that dies closes, and that moves the ask to the next candidate.
 
 import type { KeyId } from "./crypto";
 import { rank } from "./rank";
@@ -18,14 +16,12 @@ type Ask = {
   passed: boolean;
 };
 
-// A set of candidates as one string, whatever their order.
 // copy: sorted without reordering the caller's.
 const together = (candidates: KeyId[]) => candidates.toSorted().join("\n");
 
 export function createChatRepairs(send: (peer: KeyId, author: KeyId, firstSeq: number) => void) {
   // One ask per author: an earlier gap replaces a later one, which it covers.
   const asks = new Map<KeyId, Ask>();
-  // Per author, the highest seq held with none missing below it.
   const contiguous = new Map<KeyId, number>();
   // Per author, a gap every candidate failed to fill, and who they were: not asked again, on the
   // next gap event, until the candidates change or one of them has closed its link.

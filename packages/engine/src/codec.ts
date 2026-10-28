@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// WebCodecs decoder configs for the codecs WebCodecs decodes. The codec string is built as
-// its spec defines it: from the stream's configuration record (avcC, hvcC, av1C), which is
-// also the config's description, or, where the container has none (MPEG-TS, raw streams), from
-// the parameter sets in band, in the record's place or in the first keyframe.
+// WebCodecs decoder configs. The codec string is built as its spec defines it, from the stream's
+// configuration record (avcC, hvcC, av1C), also the config's description, or where the container
+// has none (MPEG-TS, raw streams) from the parameter sets in band.
 //
 // - H.264: ISO/IEC 14496-15 §5.3.3 and RFC 6381 §3.3, avc1.PPCCLL.
 // - HEVC: ISO/IEC 14496-15 Annex E.3, hvc1 or hev1, then profile, compatibility, tier and
@@ -401,14 +400,9 @@ export function makesFrame(p: VideoParams, data: Uint8Array) {
 export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderConfig {
   const [num, den] = p.sampleAspect;
   const isSquare = !(num > 0 && den > 0 && num !== den);
-  // With each frame out as soon as the stream allows. Without it, Chromium holds more
-  // frames than the stream reorders, and in sparse video those wait seconds for the packets
-  // that let them out. Decoding 4K is about as fast with it
-  // (docs/architecture.md#video-decoder-configs).
-  // The colour the container states. Without it, Chromium takes a VP9 stream, whose
-  // bitstream states no transfer, for BT.709 SDR, HDR included. What the stream leaves out is
-  // as FFmpeg takes it: BT.601 limited Y′CbCr, and primaries and a transfer Chromium leaves as
-  // they are, so a frame it converts matches the compositor's (docs/architecture.md#colour).
+  // The colour the container states: without it, Chromium takes a VP9 stream, whose bitstream
+  // states no transfer, for BT.709 SDR, HDR included. What the stream leaves out is as FFmpeg
+  // takes it, so a frame Chromium converts matches the compositor's (docs/architecture.md#colour).
   // copy: once per stream, the stated colour over the defaults.
   const colour: VideoColorSpaceInit = {
     primaries: "bt709",
@@ -423,6 +417,8 @@ export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderC
     // Non-square pixels make the displayed size differ from the coded size.
     ...(isSquare ? {} : { displayAspectWidth: p.width * num, displayAspectHeight: p.height * den }),
     colorSpace: colour,
+    // Without it, Chromium holds more frames than the stream reorders, and in sparse video those
+    // wait seconds for the packets that let them out (docs/architecture.md#video-decoder-configs).
     optimizeForLatency: true,
   };
   return Object.assign(codecOf(p, keyframe), size);

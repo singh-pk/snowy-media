@@ -1,20 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A ring of audio in a SharedArrayBuffer, from the media worker to the AudioWorklet: 32-bit
-// float samples, channels interleaved, at the rate the ring was made for. The producer
-// blocks (Atomics.wait) while the ring is full; the worklet never waits: an empty ring is an
-// underrun, and it plays silence.
+// A ring of interleaved 32-bit float audio from the media worker to the AudioWorklet, which also
+// carries the clock the worklet publishes (docs/architecture.md#audio-and-clock). The producer
+// blocks while the ring is full; the worklet never waits, and plays silence on an underrun.
 //
-// The ring also carries the clock the worklet publishes: the media time of the next sample it
-// will play, the context time it plays at, and whether it is playing or stopped. It advances
-// only by frames played, so it cannot drift from the audio, and it stops on an underrun. Once
-// the audio is finished, or where there is none, it plays silence as far as the video's
-// packets reach, so the clock runs on to the end of the file and stops there.
-// The main thread adds the context's output timestamp, the one thing only it can read: which
-// context time is being heard at which moment, so any thread knows what is heard now.
-//
-// Positions count frames (one sample per channel), only grow, and wrap as 32-bit integers.
+// The clock advances only by frames played, so it cannot drift from the audio. Positions count
+// frames (one sample per channel), only grow, and wrap as 32-bit integers.
 
 // Control words.
 const WRITE = 0;
@@ -25,8 +17,7 @@ const CHANNELS = 4;
 const RATE = 5;
 // The clock: odd while the worklet writes it, so a reader that sees it odd or changed reads
 // again (a seqlock). Then the frames played and the context frame the next one plays at, each
-// as two 32-bit halves, and whether it is playing. Every word is read and written with
-// Atomics, so a reader that sees the sequence unchanged saw one consistent clock.
+// as two 32-bit halves, and whether it is playing; every word with Atomics.
 const SEQUENCE = 6;
 const PLAYED = 7;
 const FRAME = 9;
@@ -37,15 +28,13 @@ const PLAYING = 11;
 const BELL = 12;
 // 1 once no more audio comes: all of it is in the ring, or there is none.
 const FINISHED = 13;
-// A Float64 word: the media time of the first frame. The ring is made with the time playing
-// starts from, and the producer sets it before the first frame. Plain, not atomic: the stores
-// of WRITE and SEQUENCE that follow publish it, or without audio those of REACH, so a reader
-// sees it once the clock has played a frame, and may see the time it was made with before.
+// A Float64 word: the media time of the first frame, set by the producer before the first one.
+// Plain, not atomic: the stores of WRITE and SEQUENCE that follow publish it, or without audio
+// those of REACH, so a reader may see the time the ring was made with until a frame plays.
 const START = 7;
-// The output timestamp, written by the main thread under a seqlock of its own, every word
-// with Atomics as for the clock: the context time being heard and when, in whole
-// microseconds as two 32-bit halves each, and whether the context is running; or, held, the
-// media time heard in place of the context time.
+// The output timestamp, written by the main thread under a seqlock of its own: the context time
+// being heard and when, in whole microseconds as two 32-bit halves each, and whether the context
+// runs; or, held, the media time heard in place of the context time.
 const OUTPUT_SEQUENCE = 16;
 const OUTPUT_RUNNING = 17;
 const OUTPUT_TIME = 18;
@@ -64,7 +53,6 @@ const HALF = 2 ** 32;
 /** The name of the AudioWorkletProcessor that plays a ring (src/audio.worklet.ts). */
 export const AUDIO_PROCESSOR = "snowy-audio";
 
-/** Its options: the ring it plays. */
 export interface AudioOptions {
   ring: SharedArrayBuffer;
 }
@@ -385,7 +373,6 @@ export function createPcmControl(ring: SharedArrayBuffer) {
     return Atomics.load(control, OUTPUT_RUNNING) === RUNNING;
   }
 
-  /** Whether the producer waits for room. */
   function producerWaiting() {
     return Atomics.load(control, PRODUCER_WAITING) === 1;
   }

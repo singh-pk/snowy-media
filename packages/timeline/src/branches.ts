@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A project's branches (docs/architecture.md#branches): main, and one more for each
-// `branch.create` entry, each its own linear history that starts from the document at that entry
-// and is sequenced by its creator. Batches and entries are handed to the branch they name; those
-// for a branch whose creating entry isn't applied here yet wait for it, as do entries merging
-// entries this peer doesn't have yet.
+// A project's branches (docs/architecture.md#branches): main, and one per `branch.create` entry,
+// each sequenced by its creator. Batches and entries for a branch whose creating entry isn't
+// applied here yet wait for it, as do entries merging entries this peer doesn't have yet.
 
 import { keyIdOf, type Batch } from "./batch";
 import type { EntryRef } from "./document";
@@ -33,7 +31,7 @@ const readOnly = (history: History) => ({
 
 const none = (): Changes => new Map();
 
-/** A branch: its name, the entry it starts from (none for main), who sequences it, and whether closed. */
+/** `from` is undefined for main. */
 export type Branch = {
   id: BranchId;
   name: string;
@@ -42,10 +40,8 @@ export type Branch = {
   closed: boolean;
 };
 
-/** What a call changed, per branch. */
 export type Changes = Map<BranchId, Change>;
 
-// The branches created here and what waits for those that aren't yet.
 type State = {
   branches: Map<BranchId, { branch: Branch; history: History }>;
   // Every branch a `branch.close` entry closed, including one not created here yet.

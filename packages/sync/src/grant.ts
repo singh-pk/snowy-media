@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Grants in an edit session (docs/architecture.md#rights-and-grants): the project key gives a
-// key, or anyone holding an invite, rights in the project, and a peer passes some of its own on
-// to an agent. A grant is checked against its chain alone, so any peer, and the relay's auth
-// server, decides the same from the grant itself.
+// Grants in an edit session (docs/architecture.md#rights-and-grants). A grant is checked against
+// its chain alone, so any peer, and the relay's auth server, decides the same from the grant.
 
 import { isRecord } from "./chat";
 import { base64url, keyId, sign, signedBy, isKeyId, type KeyId } from "./crypto";
 
-/** What a grant lets its holder do in a project. */
 export type Right = "view" | "propose" | "edit";
 
 /** Every right, in the order a grant lists them. Each one needs the one before it. */
@@ -29,7 +26,6 @@ export type Grant = {
 
 const encoder = new TextEncoder();
 
-// A grant's fields as they are put together, where `to` and `chain` may be undefined.
 type Fields = {
   session: KeyId;
   rights: Right[];

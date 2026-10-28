@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render worker's decoders for the video streams WebCodecs does not decode: each stands in
-// for a VideoDecoder in src/video.ts, and decodes in the video decode worker
-// (src/video.worker.ts), which this starts once and keeps, so a seek or another file does not
-// load its FFmpeg module again. Records go both ways through two rings, with no message per
-// packet or frame (src/protocol.ts). A packet's bytes never pass through here: the decode worker
-// copies them out of the packet ring, and only where they are goes to it.
+// The render worker's decoders for the video streams WebCodecs does not decode, each standing in
+// for a VideoDecoder. The decode worker (src/video.worker.ts) is started once and kept, so a seek
+// or another file does not load its FFmpeg module again; it copies a packet's bytes itself.
 
 import type { VideoParams } from "./codec";
 import {
@@ -39,7 +36,7 @@ const PACKED = [0n, 1n] as const;
 const FROM_CAPACITY = 1 << 16;
 
 const FORMATS: ReadonlySet<string | undefined> = new Set(PIXEL_FORMATS);
-// Whether a name is one of PIXEL_FORMATS. TypeScript's DOM types know fewer than Chromium takes.
+// TypeScript's DOM types know fewer pixel formats than Chromium takes.
 const isFormat = (v: string | undefined): v is VideoPixelFormat => FORMATS.has(v);
 
 /**
@@ -59,7 +56,6 @@ interface SharedFrame {
   close(): void;
 }
 
-/** A decoded frame: from WebCodecs, or from FFmpeg. */
 export type DecodedFrame = VideoFrame | SharedFrame;
 
 /** Where a decoder's frames, its taking a packet, and its failure go. */
@@ -108,8 +104,6 @@ type Producer = ReturnType<typeof createProducer>;
 // packed it into a buffer of its own.
 type GiveBack = (frame: number, packed: bigint, module: number) => void;
 
-// What the decoders share: the open ones by id, the next id, the worker's failure, and how records
-// and messages go to it.
 interface Wasm {
   state: { next: number; failed: Error | undefined };
   open: Map<number, Open>;
@@ -169,8 +163,6 @@ function sharedFrame(
   };
 }
 
-// The side that takes the worker's records, for the decoders in `open`; frames go back with
-// `giveBack`.
 function createReplies(open: Map<number, Open>, giveBack: GiveBack) {
   // Each module's memory, which its frames are read from, once the worker has loaded it.
   const memories = VIDEO_MODULES.map(() => Promise.withResolvers<WebAssembly.Memory>());
@@ -183,7 +175,6 @@ function createReplies(open: Map<number, Open>, giveBack: GiveBack) {
   // Where a failure's message is copied to be decoded: TextDecoder takes no shared memory.
   const reason = new Uint8Array(1024);
 
-  // Hands the frame in the payload back to the module that decoded it.
   function release() {
     const frame = (words[FRAME.frame] ?? 0) >>> 0;
     giveBack(frame, PACKED[words[FRAME.packed] ?? 0] ?? 0n, words[FRAME.module] ?? 0);
@@ -265,10 +256,6 @@ function failing(failure: Error): Decoder {
   };
 }
 
-/**
- * A decoder of the stream with parameters `p`, which an FFmpeg module decodes, its packets in
- * packet ring `ring`.
- */
 function createDecoder(
   w: Wasm,
   p: VideoParams,

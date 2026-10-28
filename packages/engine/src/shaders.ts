@@ -60,7 +60,6 @@ fn bilinear(t: texture_2d<u32>, uv: vec2f) -> vec2f {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// The planes' R′G′B′ at \`uv\`.
 fn convert(uv: vec2f) -> vec3f {
   let y = bilinear(luma, uv).r;
   let blue = bilinear(cb, uv);
@@ -92,10 +91,9 @@ const RGB_SHADER = /* wgsl */ `${VERTEX}
 }
 `;
 
-// A frame converted by Chromium into a picture of its size. Where Chromium took it for Apple's
-// BT.709, a gamma of 1.961, and encoded it as sRGB (`apple`), that is undone; and where it took
-// another matrix or range than the stream's, `undo` takes its R′G′B′ back through its matrix to
-// the planes and on through the stream's, leaving the frame's R′G′B′ (docs/architecture.md#colour).
+// A frame converted by Chromium. Where Chromium took it for Apple's BT.709, a gamma of 1.961, and
+// encoded it as sRGB (`apple`), that is undone; where it took another matrix or range than the
+// stream's, `undo` maps its R′G′B′ to the stream's (docs/architecture.md#colour).
 const IMPORT_SHADER = /* wgsl */ `${VERTEX}
 @group(0) @binding(0) var frame: texture_external;
 @group(0) @binding(1) var linear: sampler;

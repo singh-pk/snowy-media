@@ -18,7 +18,6 @@ export const KEY_ID = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 // seq from 1, index from 0, in decimal without leading zeros, so each id has one spelling.
 export const ITEM_ID = /^([A-Za-z0-9_-]{42}[AEIMQUYcgkosw048])\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 
-/** Whether `value` is a key id. */
 export function isKeyId(value: string) {
   return KEY_ID.test(value);
 }

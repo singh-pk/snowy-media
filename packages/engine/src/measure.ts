@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// How a stream's frames go up, measured on its own frames (docs/architecture.md#colour): a
-// frame drawn both ways at a grid of points, by Chromium's conversion and from its planes, read
-// back and compared, to tell whether Chromium converts it as FFmpeg does, with Apple's gamma, or
-// through another matrix or range that can be undone.
+// How a stream's frames go up, measured on its own frames (docs/architecture.md#colour): to tell
+// whether Chromium converts them as FFmpeg does, with Apple's gamma, or through another matrix or
+// range that can be undone.
 
 import { identity, undoMatrix } from "./colour";
 import { planeViews, type Slot } from "./pictures";
@@ -16,7 +15,8 @@ const GRID_WIDTH = 128;
 const GRID_HEIGHT = 72;
 const GRID_ROW = GRID_WIDTH * 16;
 // Of a measurement's channels, those neither near black nor near white tell the conversions
-// apart, and in a sharp frame, as colour bars, they are only along its edges; with fewer than this, as in a dark frame, the next frame is measured.
+// apart, and in a sharp frame, as colour bars, they are only along its edges; with fewer than
+// MIN_POINTS, as in a dark frame, the next frame is measured.
 const MIDTONES = [0.1, 0.9] as const;
 const MIN_POINTS = 300;
 // Of its points, those whose channels differ by more than this are coloured: only they tell a
@@ -32,10 +32,8 @@ const MAX_TRIES = 60;
 const MEDIAN_OFF = 1.5 / 255;
 const P95_OFF = 6 / 255;
 // Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped: shown by at
-// least BEYOND_POINTS of its channels further than BEYOND below 0, and as many above 1, as one
-// clip may be at one end only. Where Chromium clips, as into an 8-bit texture, a saturated
-// colour would not come back; a frame whose colours all fit shows nothing either way, so it
-// decides nothing, and a later, more saturated frame is measured.
+// least BEYOND_POINTS channels further than BEYOND below 0, and as many above 1, as one clip may
+// be at one end only. A frame whose colours all fit decides nothing; a later one is measured.
 const BEYOND = 2 / 255;
 const BEYOND_POINTS = 10;
 
@@ -49,13 +47,11 @@ const BEYOND_POINTS = 10;
 export interface Route {
   readonly stated: VideoColorSpaceInit;
   via: "unmeasured" | "imported" | "apple" | "read";
-  // The frames measured so far.
   tries: number;
   // From Chromium's R′G′B′, Apple's gamma undone where `apple`, to the stream's: column-major.
   readonly undo: Float32Array;
 }
 
-/** What a measurement decides for: the stream's stated colour, its planes' bit depth, and `undo`. */
 interface Measured {
   readonly stated: VideoColorSpaceInit;
   readonly depth: number;
@@ -72,9 +68,8 @@ const ASSUMED: readonly VideoColorSpaceInit[] = [
 ];
 
 // What Chromium converts as FFmpeg does, which converts neither primaries nor transfer: BT.709's
-// primaries, and the transfers it takes for sRGB's, all a stream that states none is decoded as
-// (src/codec.ts). Measuring tells a transfer and a matrix apart, but not primaries, which only
-// the most saturated colours would.
+// primaries, and the transfers it takes for sRGB's (src/codec.ts). Measuring tells a transfer and
+// a matrix apart, but not primaries, which only the most saturated colours would.
 const KEPT_PRIMARIES = new Set<VideoColorPrimaries | null | undefined>([undefined, "bt709"]);
 const KEPT_TRANSFERS = new Set<VideoTransferCharacteristics | null | undefined>([
   undefined,
@@ -96,7 +91,6 @@ export function createRoute(stated: VideoColorSpaceInit): Route {
 
 const srgbDecode = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
-// The value at fraction `q` of `sorted`.
 function quantile(sorted: Float32Array, q: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? Infinity;
 }
@@ -185,7 +179,6 @@ export function verdict(
   return "read";
 }
 
-/** What a measurement draws with. */
 interface MeasureGpu {
   readonly device: GPUDevice;
   readonly pipeline: GPURenderPipeline;
@@ -254,10 +247,8 @@ export function createMeasurer(gpu: MeasureGpu) {
   // None is under way at first.
   measuring.done.resolve();
 
-  // Converts the points of the grid of `frame` both ways, from its planes uploaded into `picture`
-  // and as Chromium converts it, and decides `route` by them, or leaves it for a later frame,
-  // up to MAX_TRIES. A measurement that fails reads the planes from then on. The planes are
-  // `depth`-bit.
+  // Decides `route` from `frame`'s grid, or leaves it for a later frame, up to MAX_TRIES. A
+  // measurement that fails reads the planes from then on.
   async function measure(frame: VideoFrame, picture: Slot, route: Route, depth: number) {
     measuring.busy = true;
     route.tries++;

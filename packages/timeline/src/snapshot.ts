@@ -22,7 +22,6 @@ import {
 } from "./records";
 import { createStoryline } from "./storyline";
 
-/** A project's whole state as plain data, which a new project can start from. */
 export type Snapshot = {
   name: string;
   assets: AssetState[];
@@ -53,7 +52,6 @@ function withRemoved<T extends { removed: boolean }>(
   return states;
 }
 
-/** The whole state, to start another project from. */
 export function snapshotOf(records: Records): Snapshot {
   const state: Snapshot = {
     name: records.name,

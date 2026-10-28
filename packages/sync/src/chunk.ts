@@ -1,17 +1,14 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media chunk (docs/architecture.md#media-chunk): a header the source signs, then the
-// chunk's packets in decode order. The header carries the body's SHA-256, so one signature
-// covers both, and a peer stores a chunk only once both check out. Everything is little-endian;
-// timestamps are microseconds on one timeline for every track.
+// The media chunk (docs/architecture.md#media-chunk). The header carries the body's SHA-256, so one
+// signature covers both. Little-endian; timestamps are microseconds on one timeline for all tracks.
 //
-// A signed header can never be taken back (the source stores it and never signs that chunk
-// again), so encoding refuses any field that would not read back as itself.
+// A signed header can never be taken back (the source never signs that chunk again), so encoding
+// refuses any field that would not read back as itself.
 //
-// On the wire a chunk is sealed with the content key under its object key,
-// `media/<track>/<index>`, which travels with it, so a peer can open it before reading the
-// header that names its slot.
+// A chunk is sealed under its object key, which travels with it, so a peer can open it before
+// reading the header that names its slot.
 
 import {
   keyBytes,
@@ -220,7 +217,6 @@ export async function decodeChunk(
   };
 }
 
-/** A chunk's object key: `media/<track>/<index>`. */
 export const chunkKey = ({ track, index }: ChunkSlot) => `media/${track}/${index}`;
 
 const CHUNK_KEY = /^media\/(0|[1-9]\d{0,4})\/(0|[1-9]\d{0,9})$/;

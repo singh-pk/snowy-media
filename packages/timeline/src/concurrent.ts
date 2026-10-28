@@ -91,7 +91,6 @@ function clash(mine: Set<string>, theirs: Set<string>) {
   return false;
 }
 
-/** What each batch a merge brought touched. */
 export const broughtTouches = (merged: Applied["merged"]): Touched[] =>
   merged.map(({ batch: { author, seq, ops }, skipped }) => {
     const left = new Set(skipped.map((skip) => skip.index));

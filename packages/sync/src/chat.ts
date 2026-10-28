@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Chat messages and checkpoints (docs/architecture.md#chat). A message's bytes are its
-// canonical JSON: the fields in the order of `ChatMessage`, absent ones left out, as UTF-8.
-// Every peer re-encodes what it parses the same way, so they all hash a message alike: each
-// message names its predecessor's hash, and a signed checkpoint names the newest one, which
-// proves every message that chains back from it.
+// Chat messages and checkpoints (docs/architecture.md#chat). A message's bytes are its canonical
+// JSON (fields in `ChatMessage` order, absent ones left out), and every peer re-encodes what it
+// parses the same way, so they all hash a message alike and a checkpoint proves its chain.
 
 import { isHlc, type Hlc } from "./hlc";
 import {
@@ -86,7 +84,6 @@ function checkTarget(value: unknown): ChatTarget {
   return { author: value.author, seq: value.seq };
 }
 
-// What each kind carries besides the common fields.
 function checkKindFields(kind: ChatKind, m: Record<string, unknown>) {
   const has = (field: string) => m[field] !== undefined;
 
@@ -157,7 +154,6 @@ export function checkMessage(value: unknown): ChatMessage {
 export const encodeMessage = (message: ChatMessage): Bytes =>
   encoder.encode(JSON.stringify(checkMessage(message)));
 
-// The JSON in `bytes`, or an `InvalidMessageError` for anything that isn't UTF-8 JSON.
 function parseJson(bytes: Bytes): unknown {
   try {
     return JSON.parse(decoder.decode(bytes));
@@ -186,7 +182,6 @@ function checkpointBytes({ author, seq, head }: Omit<Checkpoint, "sig">) {
   return bytes;
 }
 
-/** Signs a checkpoint at the author's newest message with the author's peer key. */
 export async function signCheckpoint(
   peer: CryptoKeyPair,
   newest: ChatMessage,
@@ -259,7 +254,6 @@ export async function proven(messages: ChatMessage[], checkpoint: Checkpoint, si
   return chain;
 }
 
-// The candidate whose hash is the one expected.
 async function chained(candidates: ChatMessage[], expected: string) {
   for (const message of candidates) {
     const hash = await messageHash(message);

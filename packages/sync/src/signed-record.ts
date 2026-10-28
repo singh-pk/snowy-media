@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The source's signed records (docs/architecture.md#catalog): JSON signed by the session key
-// over a domain prefix, the session and every field in a fixed order. The prefix keeps a
-// signature over one kind of record from passing for another, or for anything else the session
-// key signs. Each kind checks its own fields into canonical shape; this signs and verifies that.
+// The source's signed records (docs/architecture.md#catalog). The domain prefix keeps a signature
+// over one kind of record from passing for another, or for anything else the session key signs.
 
 import { isRecord } from "./chat";
 import { keyId, sigBytes, sign, verify, type Bytes, type KeyId } from "./crypto";
@@ -41,7 +39,6 @@ export async function signRecord(session: CryptoKeyPair, domain: string, record:
   return encoder.encode(JSON.stringify({ ...record, sig: base64(sig) }));
 }
 
-// The JSON in `bytes`, or an `InvalidRecordError` for anything that isn't UTF-8 JSON.
 function parseJson(bytes: Bytes): unknown {
   try {
     return JSON.parse(decoder.decode(bytes));

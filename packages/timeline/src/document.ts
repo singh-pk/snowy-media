@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The records of a project's document and the operations that change them
-// (docs/architecture.md#the-document, #operation-kinds), as schemas: each checks an untrusted
-// value and returns it in canonical shape (src/schema.ts). A record an operation adds has no id
-// in the operation; its id is the operation's, `<author>.<seq>.<index>` (src/ids.ts).
+// The document's records and operations as schemas (docs/architecture.md#the-document,
+// #operation-kinds; src/schema.ts). A record an operation adds has no id in the operation; its id
+// is the operation's, `<author>.<seq>.<index>` (src/ids.ts).
 
 import { ITEM_ID, KEY_ID } from "./ids";
 import { isPositionKey } from "./position";
@@ -207,7 +206,6 @@ export const entryRef = refine(
 const set = <K extends string>(op: K) => record({ op: literal(op), id: itemId, path, value });
 const remove = <K extends string>(op: K) => record({ op: literal(op), id: itemId });
 
-/** Any operation, by its `op`. */
 export const operation = union("op", {
   "project.set": record({ op: literal("project.set"), name }),
   "asset.add": record({ op: literal("asset.add"), asset }),
@@ -247,7 +245,6 @@ export const operation = union("op", {
   "branch.close": record({ op: literal("branch.close"), branch: branchId }),
 });
 
-/** An asset record. */
 export type Asset = ReturnType<typeof asset>;
 /** A sequence's settings, without its id. */
 export type SequenceRecord = ReturnType<typeof sequence>;
@@ -259,7 +256,6 @@ export type ItemRecord = ReturnType<typeof item>;
 export type EffectRecord = ReturnType<typeof effect>;
 /** A keyframe, known by its target, param and source point. */
 export type KeyframeRecord = ReturnType<typeof keyframe>;
-/** Where an item is. */
 export type Anchor = ReturnType<typeof anchor>;
 
 export type EntryRef = ReturnType<typeof entryRef>;

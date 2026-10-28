@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The WebGPU compositor. A decoded frame is uploaded into textures of its own, a picture, and
-// closed: a VideoFrame's planes copied out first, FFmpeg's straight from its shared memory;
-// a picture is drawn into the canvas, rotated and flipped as the stream's display matrix says,
-// scaled to fit and centred, with black around it. A frame whose planes can be read is
-// converted to RGB here, with its own matrix and range, so every decoder's frames look the same
-// and keep every bit; one whose planes cannot (a 10-bit hardware frame) is converted by
-// Chromium, as an external texture (docs/architecture.md#colour).
+// The WebGPU compositor. A frame whose planes can be read is converted here, with its own matrix
+// and range, so every decoder's frames look the same and keep every bit; one whose planes cannot
+// (a 10-bit hardware frame) is converted by Chromium (docs/architecture.md#colour).
 
 import { yuvMatrix } from "./colour";
 import { createMeasurer, type Measurer, type Route } from "./measure";
@@ -44,7 +40,6 @@ interface Gpu {
 const uniform = (device: GPUDevice, size: number) =>
   device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-// A new picture of `key` for frames whose planes go up as `layout` says.
 function makePlanes(gpu: Gpu, key: string, layout: Layout): Slot {
   const { device, pipelines, sampler, viewBuffer, pool } = gpu;
   const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
@@ -101,7 +96,6 @@ function createPlaneUpload(gpu: Gpu, measurer: Measurer) {
     return { data: staging.buffer, layout };
   }
 
-  // Writes the colour uniform of a Y′CbCr picture: `pixels` of `depth` bits, as `stated`.
   function writeColour(
     buffer: GPUBuffer,
     pixels: VideoPixelFormat,
@@ -117,9 +111,6 @@ function createPlaneUpload(gpu: Gpu, measurer: Measurer) {
     gpu.device.queue.writeBuffer(buffer, 0, colour);
   }
 
-  // Writes the planes of `frame`, which has a format, into a picture, and converts them when
-  // drawn, by the colour `route` states; and measures a Y′CbCr VideoFrame while its stream is
-  // unmeasured.
   return async function uploadPlanes(frame: DecodedFrame, route: Route) {
     const pixels = frame.format;
     if (!pixels) throw new Error("a frame without a format has no planes to read");
@@ -153,7 +144,6 @@ function createPlaneUpload(gpu: Gpu, measurer: Measurer) {
   };
 }
 
-// A new picture of `key` that Chromium converts a `width` × `height` frame into.
 function makeImported(gpu: Gpu, key: string, width: number, height: number): Slot {
   const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT;
   const picked = gpu.device.createTexture({ format: IMPORTED, size: [width, height], usage });

@@ -1,16 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The connection to the relay (docs/architecture.md#the-relay): MoQ over WebTransport, through
-// the `@moq/net` client. One connection per peer per session gives:
-//
-// - presence: a peer is online while its broadcast `peer/<PeerId>` is announced;
-// - this peer's tracks under `peer/<self>`, and subscriptions to other peers' tracks;
-// - the source's tracks under `source`, published by the source and subscribed by the rest;
-// - a `Link` to each online peer, over the inbox broadcasts.
-//
-// Every object is a group of its own, so one lost or slow object never holds up another, and
-// objects may arrive in any order. Everything is driven by the transport's events.
+// The connection to the relay (docs/architecture.md#the-relay). Every object is a group of its
+// own, so one lost or slow object never holds up another, and objects may arrive in any order.
 
 import * as Moq from "@moq/net";
 import { isRecord } from "./chat";
@@ -18,7 +10,6 @@ import type { Bytes, KeyId } from "./crypto";
 import type { Link, LinkEvents, Message } from "./link";
 
 export type RelayOptions = {
-  /** The relay's WebTransport URL. */
   url: string;
   /**
    * For a relay whose certificate no authority signs, such as one in tests: the certificate's
@@ -26,7 +17,6 @@ export type RelayOptions = {
    */
   serverCertificateHashes?: Array<{ algorithm: "sha-256"; value: BufferSource }>;
   session: KeyId;
-  /** This peer's id. */
   self: KeyId;
   /**
    * What the relay admits this peer with: a token from `peerToken` or `sourceToken`
@@ -61,13 +51,10 @@ export type RelayEvents = {
   close(refused: boolean): unknown;
 };
 
-/** A track this peer publishes: each object sent is a group of its own. */
 type Publisher = { send(payload: Bytes): void; stop(): void };
 
-/** A subscription to a track, which `cancel` ends. */
 type Subscription = { cancel: () => void };
 
-/** The relay refused a request. */
 export class RelayRequestError extends Error {
   override name = "RelayRequestError";
 }
@@ -125,7 +112,6 @@ export function unframe(framed: Bytes) {
   return { key, bytes: framed.subarray(2 + length) };
 }
 
-// A message on `ctl`, or undefined for one that isn't JSON.
 function parsed(payload: Bytes): unknown {
   try {
     return JSON.parse(decoder.decode(payload));
@@ -134,7 +120,6 @@ function parsed(payload: Bytes): unknown {
   }
 }
 
-// Waits for what a handler returned, reporting it if it rejects.
 async function settle(returned: unknown) {
   try {
     await returned;
@@ -153,7 +138,6 @@ function call<Args extends unknown[]>(handler: (...args: Args) => unknown, ...ar
   }
 }
 
-// The handlers registered for each event.
 function emitter<Events extends Record<string, (...args: never[]) => unknown>>(handlers: {
   [E in keyof Events]: Array<Events[E]>;
 }) {
@@ -195,7 +179,6 @@ async function resolved(request: Moq.Origin.Requesting) {
   }
 }
 
-// Whether `waiting` resolves rather than rejects.
 async function resolves(waiting: PromiseLike<unknown>) {
   try {
     await waiting;
@@ -231,8 +214,6 @@ async function readGroup(group: Moq.Group.Consumer, handle: (payload: Bytes) => 
   }
 }
 
-// Hands each object on a subscription to `handle`, as each group arrives, then calls `ended`
-// once the subscription ends, however it ends.
 async function read(
   track: Moq.Track.Subscriber,
   handle: (payload: Bytes) => unknown,
@@ -250,7 +231,6 @@ async function read(
   }
 }
 
-// Publishes a track of `broadcast`: the relay forwards it to whoever subscribes.
 function publisher(broadcast: Moq.Broadcast.Producer, name: string): Publisher {
   const track = broadcast.createTrack(name, { priority: priority(name) });
   const sent = { stopped: false };
@@ -288,7 +268,6 @@ type Subscribe = (
   stopped?: () => void,
 ) => Promise<Subscription>;
 
-// Subscribing to tracks the relay announces, refused once the connection has closed.
 function createSubscribe(remote: Moq.Origin.Producer, state: { closed: boolean }): Subscribe {
   return async (path, name, handle, stopped = () => undefined) => {
     if (state.closed)
@@ -326,7 +305,6 @@ function createSubscribe(remote: Moq.Origin.Producer, state: { closed: boolean }
   };
 }
 
-/** What a connection shares with its links and its presence. */
 type RelayContext = {
   self: KeyId;
   /** What this peer publishes, and what the relay announces to it, relative to the session. */
@@ -360,7 +338,6 @@ type LinkStatus = {
   closed: boolean;
 };
 
-/** The parts of a link that subscribing to the other end's side uses. */
 type LinkEnds = {
   status: LinkStatus;
   subscriptions: Subscription[];
@@ -397,7 +374,6 @@ async function keep(ends: LinkEnds, subscribing: Promise<Subscription>) {
   if (ends.status.closed) subscription.cancel();
 }
 
-// Subscribes to the other end's side of a link, at `path`, then says this end is listening.
 async function listenTo(subscribe: Subscribe, path: Moq.Path.Valid, ends: LinkEnds) {
   const { status } = ends;
   if (status.listening || status.closed) return;
@@ -508,12 +484,9 @@ function relayLink(context: RelayContext, peer: KeyId): RelayLink {
   return { link, seen, inbound: () => listenTo(context.subscribe, path, ends), shut };
 }
 
-// Presence and links: who is online, from the peers' broadcasts, and a link to each, subscribed
-// once its inbox for this peer is announced too.
 function createPresence(context: RelayContext) {
   const { self, links, events } = context;
   const online = new Set<KeyId>();
-  // Peers whose inbox for this peer, `inbox/<self>/<peer>`, is announced.
   const inboxes = new Set<KeyId>();
 
   function linkTo(peer: KeyId) {
@@ -570,7 +543,6 @@ function createPresence(context: RelayContext) {
     }
   }
 
-  // Hands each announcement and withdrawal under `scope` to `handle`, until the connection ends.
   async function follow(scope: string, handle: (update: Moq.Announce.Update) => void) {
     const updates = context.remote.announced(Moq.Path.Pattern.parse(scope));
 
@@ -633,7 +605,6 @@ export async function connectRelay(options: RelayOptions) {
   const { ownTracks, sourceTracks } = publishTracks(local, options);
   const presence = createPresence(context);
 
-  // Ends everything this peer published or watched.
   function release() {
     for (const { shut } of links.values()) shut();
     for (const published of ownTracks.values()) published.stop();

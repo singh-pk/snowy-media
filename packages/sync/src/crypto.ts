@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Keys, signatures and encryption for every object (docs/architecture.md#identity-sessions-and-access,
-// docs/architecture.md#encryption). Peers and the session are Ed25519 public keys, named by
-// their base64url; content is AES-256-GCM under a key derived from the session secret, with a
-// fresh random nonce for every encryption, so no object key, replaced object or lost counter
-// can ever reuse one.
+// docs/architecture.md#encryption). Every encryption takes a fresh random nonce, so no object key,
+// replaced object or lost counter can ever reuse one.
 
 const NONCE = 12;
 const KEY = 32;
@@ -16,7 +14,6 @@ const encoder = new TextEncoder();
 /** Bytes WebCrypto accepts: never a view of a SharedArrayBuffer. */
 export type Bytes = Uint8Array<ArrayBuffer>;
 
-/** An object as it travels: its key, and its bytes sealed under that key. */
 export type SealedObject = { key: string; sealed: Bytes };
 
 /** An Ed25519 public key, as unpadded base64url: a `PeerId` or a `SessionId`. */
@@ -66,7 +63,6 @@ export function sigBytes(sig: unknown) {
   return canonical ? bytes : undefined;
 }
 
-/** The public key a key id names, for verifying. */
 export const publicKey = (id: KeyId) =>
   crypto.subtle.importKey("raw", keyBytes(id), { name: "Ed25519" }, true, ["verify"]);
 

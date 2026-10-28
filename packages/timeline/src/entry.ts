@@ -19,7 +19,6 @@ const entryFields = {
   batch: batchRef,
 };
 
-// Only the first entry follows no entry.
 const chained = (entry: { n: number; prev: string }) => (entry.n === 1) === (entry.prev === "");
 
 const unsignedEntry = refine(record(entryFields), chained, "prev doesn't fit n");
@@ -53,7 +52,6 @@ export const entries = signedFormat<Entry>({
   signed: signedEntry,
 });
 
-/** Refusals' bytes and signatures. */
 export const refusals = signedFormat<Refusal>({
   noun: "a refusal",
   domain: "snowy refusal v1\n",

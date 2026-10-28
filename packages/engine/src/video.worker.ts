@@ -1,15 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The video decode worker: decodes, with FFmpeg's `video` or `video-ext` module, the video
-// streams WebCodecs does not, for the render worker (src/wasm-video.ts). FFmpeg decodes
-// synchronously, in software, so it does so here, never in the render worker's animation
-// frames. Each frame, in a format VideoFrame takes (sny_to_video_format), stays where the
-// decoder left it in the module's shared memory, which the render worker uploads it from; the
-// render worker sends it back once it is uploaded or dropped. Records go both ways through the
-// rings the render worker sends at the start, with no message per packet or frame; a packet is
-// copied out of its play's packet ring, which comes by message, straight into the module's
-// memory.
+// The video decode worker, for the streams WebCodecs does not decode. FFmpeg decodes
+// synchronously, so it does so here, never in the render worker's animation frames. A frame stays
+// in the module's shared memory, which the render worker uploads it from, until it is sent back.
 
 import {
   AVERROR_EAGAIN,
@@ -46,22 +40,18 @@ const MAX_PLANES = 4;
 // Decoding threads: one a core, at most the module's pool of 8.
 const THREADS = Math.min(navigator.hardwareConcurrency, 8);
 
-// Where a frame record's payload is put together.
 const payload = new Uint8Array(FRAME.bytes);
 const words = new Int32Array(payload.buffer);
 const doubles = new Float64Array(payload.buffer);
 // Where a failure's message is put; a longer one is cut short.
 const message = new Uint8Array(1024);
-// Where a packet record's payload is read.
 const placeWords = new Int32Array(PLACE.bytes / 4);
 const placeBytes = new Uint8Array(placeWords.buffer);
-// Whether a packet ring record of PART `part` completes its packet.
 const completes = (part: number | undefined) => part === PART.whole || part === PART.last;
 
 // Where the packet ring record is that the last packet record read places, filled by `placeOf`.
 const placed: Place = { start: 0, size: 0, part: PART.whole };
 
-// Reads where the packet ring record that packet record `record` places is into `placed`.
 function placeOf(record: Packet) {
   // copy: 12 bytes, into words to read them.
   placeBytes.set(record.data);
@@ -205,9 +195,7 @@ function createTaker(m: VideoModule, pkt: Ptr, heap: () => Uint8Array, packets: 
   };
 }
 
-// What a decoder is made from: stream parameters `params` for the `module`th module, a time base
-// of `num`/`den`, the packet ring its packets are in, and `send`, which sends each frame it
-// decodes.
+// `num`/`den` is the stream's time base; `send` sends each frame decoded.
 interface DecoderOptions {
   module: number;
   params: Uint8Array;
@@ -217,7 +205,6 @@ interface DecoderOptions {
   send: () => void;
 }
 
-// A decoder in module `m`.
 function createDecoder(m: VideoModule, options: DecoderOptions) {
   const { module, params, num, den, packets, send } = options;
   // Rounded as src/video.ts rounds the packets' timestamps, so a frame's matches its packet's.
@@ -250,7 +237,6 @@ function createDecoder(m: VideoModule, options: DecoderOptions) {
     throw new Error("decoder: out of memory");
   }
 
-  // The index in PIXEL_FORMATS of each format name met, by its pointer.
   const formats = new Map<Ptr, number>();
 
   // The decoded frame, held in a reference of its own (or converted into a frame of its own) so
@@ -339,7 +325,6 @@ function createModules() {
   return { loaded, module };
 }
 
-// Serves the render worker through the rings of `start`.
 async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
   const records = createConsumer(to);
   const replies = createProducer(from);

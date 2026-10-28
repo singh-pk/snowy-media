@@ -39,7 +39,6 @@ const signedBatch = refine(
 
 /** A signed batch, in canonical shape. */
 export type Batch = ReturnType<typeof signedBatch>;
-/** A batch before its author signs it. */
 export type UnsignedBatch = ReturnType<typeof unsignedBatch>;
 
 const format = signedFormat<Batch>({

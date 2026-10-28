@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // A project's records as applying keeps them (docs/architecture.md#the-document): every record by
-// id, removed ones included, so an id stays taken and a removed record keeps its state; the
-// indexes kept in step with them; and looking up a live record, which skips an operation naming
-// one that isn't.
+// id, removed ones included, so an id stays taken and a removed record keeps its state. Looking up
+// a live record skips an operation naming one that isn't.
 
 import type {
   Asset,
@@ -37,7 +36,6 @@ export type Clip = Extract<ItemRecord, { kind: "clip" }>;
  */
 export type Runs = ReadonlyArray<readonly [number, number]>;
 
-/** A project's document as applying changes it. */
 export type Records = {
   name: string;
   assets: Map<string, AssetState>;
@@ -59,7 +57,6 @@ export type Records = {
   batches: Map<string, Runs>;
 };
 
-/** An empty document. */
 export function createRecords(): Records {
   return {
     name: "",
@@ -101,7 +98,6 @@ function withSeq(runs: Runs, seq: number): Runs {
 export const has = (records: Records, batch: { author: string; seq: number }) =>
   holds(records.batches.get(batch.author), batch.seq);
 
-/** Records a batch as applied. */
 export function hold(records: Records, batch: { author: string; seq: number }) {
   const { batches } = records;
   batches.set(batch.author, withSeq(batches.get(batch.author) ?? [], batch.seq));
@@ -120,7 +116,6 @@ function dependsOn(record: ItemRecord) {
   return "clip" in record.anchor ? record.anchor.clip : undefined;
 }
 
-// The records a clip uses: its role, and its asset or the sequence it plays.
 function usedBy(record: ItemRecord) {
   if (record.kind !== "clip") return [];
   const { source } = record;
@@ -128,19 +123,16 @@ function usedBy(record: ItemRecord) {
   return "sequence" in source ? [record.role, source.sequence] : [record.role];
 }
 
-/** Adds `id` to the set `index` keeps under `key`. */
 export function add(index: Map<string, Set<ItemId>>, key: string, id: ItemId) {
   const set = index.get(key) ?? new Set();
   set.add(id);
   index.set(key, set);
 }
 
-/** The live items an index keeps under `key`. */
 export function live(records: Records, index: Map<string, Set<ItemId>>, key: string) {
   return [...(index.get(key) ?? [])].filter((id) => records.items.get(id)?.removed === false);
 }
 
-/** Indexes what an item's record depends on and uses. */
 function link(records: Records, id: ItemId, record: ItemRecord) {
   const target = dependsOn(record);
   if (target !== undefined) add(records.dependents, target, id);

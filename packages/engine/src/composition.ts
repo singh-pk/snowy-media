@@ -26,14 +26,13 @@ export interface PlanLayer {
   effects: unknown[];
 }
 
-/** A video layer: a layer drawn with its opacity, blend and transform. */
 export interface PlanVideoLayer extends PlanLayer {
   opacity: unknown;
   blend: string;
   transform: { x: unknown; y: unknown; scaleX: unknown; scaleY: unknown; rotation: unknown };
 }
 
-/** An audio layer: a layer mixed with its gain and pan, faded in up to `fadeIn` and out from `fadeOut`. */
+/** Faded in up to `fadeIn` and out from `fadeOut`. */
 export interface PlanAudioLayer extends PlanLayer {
   gainDb: unknown;
   pan: unknown;
@@ -55,7 +54,6 @@ export interface Plan {
   segments: PlanSegment[];
 }
 
-/** A composition the engine plays, as the app gives it. */
 export interface Composition {
   /** How long it is, in microseconds. */
   duration: number;
@@ -104,8 +102,6 @@ function sourceKey({ source }: PlanLayer) {
   return "generator" in source ? `generator:${source.generator}` : `sequence:${source.sequence}`;
 }
 
-// Throws for what a layer does that the engine does not play: a source other than a file, a
-// speed other than 1, or an effect.
 function checkLayer(layer: PlanLayer) {
   if (!("asset" in layer.source)) throw unsupported("a source other than a file");
   const [num, den] = layer.speed;

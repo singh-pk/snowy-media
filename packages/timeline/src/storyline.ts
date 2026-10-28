@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A storyline's layout (docs/architecture.md#layout): its items ordered by (position, id), each
-// starting at the sum of the durations before it. They are kept in an AVL tree whose nodes also
-// hold their subtree's total duration, so inserting, removing, moving or changing the length of
-// an item costs O(log n), and so does finding an item's start or the item at a time. The tree's
-// shape depends on the order items arrived in, but no result does, and nothing in it is random.
+// A storyline's layout (docs/architecture.md#layout): items ordered by (position, id), in an AVL
+// tree whose nodes hold their subtree's total duration, so every edit and lookup is O(log n). The
+// tree's shape depends on the order items arrived in, but no result does, and nothing is random.
 
 import type { ItemId } from "./ids";
 import type { PositionKey } from "./position";
@@ -17,7 +15,6 @@ type Node = {
   left: Node | undefined;
   right: Node | undefined;
   height: number;
-  // The total duration of this node's subtree.
   total: number;
 };
 
@@ -139,7 +136,6 @@ function startIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   throw new RangeError(`not in the storyline: ${id}`);
 }
 
-// The item after the one at `position` and `id` in order, if there is one.
 function nextIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   let found: ItemId | undefined;
   let cursor = root;
@@ -154,7 +150,6 @@ function nextIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   return found;
 }
 
-// The item before the one at `position` and `id` in order, if there is one.
 function previousIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   let found: ItemId | undefined;
   let cursor = root;
@@ -169,7 +164,6 @@ function previousIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   return found;
 }
 
-// The smallest position key in the tree after `position`, if there is one.
 function keyAfterIn(root: Node | undefined, position: PositionKey) {
   let found: PositionKey | undefined;
   let cursor = root;
@@ -184,7 +178,6 @@ function keyAfterIn(root: Node | undefined, position: PositionKey) {
   return found;
 }
 
-// The item playing at `t` flicks: the one with `start <= t < start + duration`.
 function atIn(root: Node | undefined, t: number): Placed | undefined {
   let before = 0;
   let cursor = root;
@@ -204,7 +197,6 @@ function atIn(root: Node | undefined, t: number): Placed | undefined {
   return undefined;
 }
 
-// Every item of the tree in order, with its start.
 function* itemsIn(root: Node | undefined): Generator<Placed> {
   const stack: Node[] = [];
   let cursor = root;

@@ -2,14 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Getting the session's state on join (docs/architecture.md#presence-and-membership): the relay
-// holds none, so a joiner asks one peer for the source's records, sent with a link's `send`. It
-// asks the source if it's online, otherwise the online peer with the lowest
-// `SHA-256(peer ‖ "state")`. The responder delivers every record it holds, unchanged, through the
-// link's `deliver`, and says how many with `state-sent`; or it answers `state-gone` if it doesn't
-// hold the whole state. The joiner asks the next peer on `state-gone`, on a record that doesn't
-// check out, once a peer's records have all come and still leave it short, or when that peer's
-// link closes. Every record is signed, so it can come from any peer. Everything moves on events:
-// there is no timeout, since a link that dies closes.
+// holds none, so a joiner asks one peer at a time. Every record is signed, so it can come from any
+// peer. There is no timeout, since a link that dies closes, and that moves the ask on.
 
 import { isCount, isRecord } from "./chat";
 import type { Bytes, KeyId } from "./crypto";
@@ -41,17 +35,14 @@ export function checkStateControl(value: unknown): StateControl | undefined {
 
 export type StateResponderOptions = {
   records: Records;
-  /** Sends a message to a peer over its link. */
   send(peer: KeyId, message: StateAnswer): void;
   /** Sends an object to a peer that asked for it, on its `deliver` track. */
   deliver(peer: KeyId, key: string, bytes: Bytes): void;
 };
 
-/** Answers other peers' `state-request` from the records this peer holds. */
 export function createStateResponder(options: StateResponderOptions) {
   const { records } = options;
 
-  /** Answers a `state-request` from `peer`. */
   function requested(peer: KeyId, { ask }: StateRequest) {
     if (!records.complete()) {
       options.send(peer, { type: "state-gone", ask });
@@ -68,7 +59,6 @@ export function createStateResponder(options: StateResponderOptions) {
 
 export type StateAskOptions = {
   records: Records;
-  /** Sends a message to a peer over its link. */
   send(peer: KeyId, message: StateRequest): void;
   /** Whether this peer's link to `peer` is open: one that closed while ranking isn't asked. */
   linked(peer: KeyId): boolean;
@@ -89,7 +79,6 @@ export function createStateAsk(options: StateAskOptions) {
     starts: 0,
   };
 
-  // The peer asked now, if an ask is waiting on one.
   const waiting = () => ask.candidates[ask.asked];
 
   // Asks the next candidate whose link is open, unless the whole state is held: then, or once no

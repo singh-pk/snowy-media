@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// What a peer holds of each author's chat, to answer repairs (docs/architecture.md#gaps-and-repair):
-// the messages, and for each run of chained seqs, the checkpoint with the highest seq. Every
-// batch ends with a checkpoint, so an honest author's runs each end at one; keeping just that one
-// per run lets the peer prove any message it holds, and drops the rest. When a gap fills, two
-// runs join, and the lower run's checkpoint goes. Runs join only where a message's `prev` names
-// the one held below it: an author that forks its chain leaves separate runs, each still proven
-// by its own checkpoint.
+// What a peer holds of each author's chat, to answer repairs (docs/architecture.md#gaps-and-repair).
+// The highest checkpoint of each run of chained seqs proves every message in it. Runs join only
+// where a message's `prev` names the one held below, so a forked chain stays separate runs.
 
 import type { ChatBatch } from "./chat-batch";
 import { messageHash, type ChatMessage, type Checkpoint } from "./chat";
@@ -20,7 +16,7 @@ type Author = {
   newest: number;
 };
 
-/** One run of chained seqs held, inclusive. */
+/** Inclusive. */
 type Run = { first: number; last: number };
 
 export function createChatHoldings() {
@@ -134,25 +130,21 @@ export function createChatHoldings() {
   return { add, restore, repair, after, checkpoints, newest };
 }
 
-// Whether the message held at `seq` chains to the one held below it.
 const linked = ({ messages, hashes }: Author, seq: number) =>
   hashes.has(seq - 1) && messages.get(seq)?.prev === hashes.get(seq - 1);
 
-// The first seq of the run of chained held seqs that contains `seq`.
 function firstOf(held: Author, seq: number) {
   let first = seq;
   while (linked(held, first)) first--;
   return first;
 }
 
-// The run of chained held seqs that contains `seq`.
 function runOf(held: Author, seq: number): Run {
   let last = seq;
   while (linked(held, last + 1)) last++;
   return { first: firstOf(held, seq), last };
 }
 
-// Holds each message whose seq isn't held yet, with its hash.
 async function holdMessages(held: Author, messages: ChatMessage[]) {
   const fresh = messages.filter((m) => !held.messages.has(m.seq));
   const hashes = await Promise.all(fresh.map(messageHash));
@@ -163,7 +155,6 @@ async function holdMessages(held: Author, messages: ChatMessage[]) {
   }
 }
 
-// The held checkpoints with only the highest in each run kept.
 function highestPerRun(held: Author) {
   // Highest first: a checkpoint below the start of the last kept one's run is in another run.
   // Each run is walked once, so a restore with a checkpoint per batch stays linear.
@@ -184,8 +175,7 @@ function highestPerRun(held: Author) {
   return kept;
 }
 
-// The batch proving `from` and every later message in its run up to the run's checkpoint, or
-// undefined. Only a forked chain leaves messages past a run's checkpoint; they can't be proven.
+// Only a forked chain leaves messages past a run's checkpoint; they can't be proven.
 function batchFrom(held: Author, from: number): ChatBatch | undefined {
   if (!held.messages.has(from)) return undefined;
 

@@ -22,7 +22,6 @@ import {
 import { guarded, skip } from "./skip";
 import { flicksToSource } from "./time";
 
-/** A clip, with its id. */
 type Piece = { id: ItemId; clip: Clip };
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -32,7 +31,6 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const pastSplit = (at: number, point: number, clip: Clip) =>
   clip.speed[0] > 0 ? at >= point : at <= point;
 
-// A clip with one of its fades set to `length`; a clip without audio has none.
 function withFade(clip: Clip, fade: "fadeIn" | "fadeOut", length: number) {
   return clip.audio === undefined ? clip : { ...clip, audio: { ...clip.audio, [fade]: length } };
 }
@@ -54,7 +52,6 @@ function pieceAnchor(records: Records, clip: Clip, offset: number, sequence: Ite
   return { ...anchor, at };
 }
 
-// Moves the keyframes of `from` at source points `moves` picks to `to`.
 function handKeyframes(records: Records, from: ItemId, to: ItemId, moves: (at: number) => boolean) {
   const own = records.keyframes.get(from);
   const target = records.keyframes.get(to) ?? new Map<string, KeyframeRecord>();

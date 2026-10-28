@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// One branch's linear history (docs/architecture.md#linear-history): the entries its sequencer
-// appends, each naming a batch, and the batches still pending. The document every peer shows is
-// the entries applied in order, then the pending batches in (hlc, author) order. The entries'
-// document is kept apart from the shown one, so an entry that orders batches as they are shown
-// changes nothing, and one that doesn't rebuilds the shown document from the entries' alone.
+// One branch's linear history (docs/architecture.md#linear-history): every peer shows the entries
+// in order, then the pending batches in (hlc, author) order. The entries' document is kept apart,
+// so an entry ordering batches as shown changes nothing; one that doesn't rebuilds the shown one.
 
 import { keyIdOf, type Batch } from "./batch";
 import { broughtTouches, clashesSince, touches, type BatchRef, type Touched } from "./concurrent";
@@ -28,10 +26,7 @@ type BranchId = Batch["branch"];
 type Merge = Extract<Operation, { op: "branch.merge" }>;
 type Project = ReturnType<typeof createProject>;
 
-/**
- * An entry as applied, with its hash and batch: the operations it skipped, the batches its merges
- * brought, and whether its author couldn't see a change.
- */
+/** `concurrent` is whether its author couldn't see a change. */
 type Entered = {
   entry: Entry;
   hash: string;
@@ -63,7 +58,6 @@ export type Change = {
 
 type Held = { batch: Batch; hash: string };
 
-// A history's whole state, which the functions below share.
 type State = {
   branch: BranchId;
   sequencer: KeyId;
@@ -75,9 +69,7 @@ type State = {
   touched: Touched[][];
   // Each entry's skipped operations, by index, for undoing it.
   skips: Array<ReadonlySet<number>>;
-  // The entry that appended each batch, by author and seq.
   entryOf: Map<string, number>;
-  // Each author's appended batches, in the order appended.
   byAuthor: Map<KeyId, Batch[]>;
   // Batches by hash: an author who signs two batches with one seq has both held until an entry
   // picks one.
@@ -94,7 +86,6 @@ type State = {
   // The entries' document every SNAPSHOT_EVERY entries, from entry 0.
   snapshots: Map<number, Snapshot>;
   view: Project;
-  // The pending batches as applied to the shown document, in order.
   shown: Array<{ held: Held; applied: Applied }>;
   resolver: Resolver;
 };
@@ -148,7 +139,6 @@ function head(state: State) {
   return { n, hash: n === 0 ? "" : (state.hashes[n - 1] ?? "") };
 }
 
-// The batch an entry appended.
 function batchOf(state: State, n: number) {
   const each = state.held.get(state.appended[n - 1]?.batch.hash ?? "");
   if (each === undefined) throw new RangeError(`no batch for entry ${n}`);
@@ -159,10 +149,9 @@ function batchOf(state: State, n: number) {
 const named = (state: State, ref: EntryRef) =>
   ref.hash === (ref.n === 0 ? "" : state.hashes[ref.n - 1]);
 
-// The entries' document at an entry, from the nearest snapshot at or before it and the entries
-// after that; undefined for an entry this history doesn't have under that hash. An entry holding a
-// revert has a snapshot of its own, so the entries replayed never hold one, and going back never
-// recurses.
+// The entries' document at an entry, from the nearest snapshot at or before it; undefined for an
+// entry not here under that hash. An entry holding a revert has a snapshot of its own, so the
+// entries replayed never hold one, and going back never recurses.
 function atEntry(state: State, ref: EntryRef): Snapshot | undefined {
   if (ref.n > state.appended.length || !named(state, ref)) return undefined;
   if (ref.n === state.appended.length) return state.entered.snapshot();
@@ -253,9 +242,6 @@ function undoState(state: State, author: KeyId) {
   return { mine, undone, isUndo };
 }
 
-// The author's latest batch on the branch that isn't an undo, isn't undone, and applied an
-// operation undo can take back. A batch of only reverts and branch operations is passed over;
-// reverting to the entry before it takes it back.
 function undoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone } = undoState(state, author);
   const found = mine.find(
@@ -269,8 +255,6 @@ function undoable(state: State, author: KeyId): BatchRef | undefined {
   return found === undefined ? undefined : { author, seq: found.batch.seq };
 }
 
-// The author's latest undo that isn't itself undone, if no edit of theirs came after it. A redo is
-// an undo of an undo, so it is never redone itself.
 function redoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone, isUndo } = undoState(state, author);
 
@@ -344,10 +328,8 @@ function applyNext(state: State, batch: Batch) {
   return { applied, reverts };
 }
 
-// An entry just applied to the entries' document: its hash, its batch, and what applying it did.
 type EnteredNow = { entry: Entry; hash: string; batch: Batch; applied: Applied; reverts: boolean };
 
-// Records an entry just applied, and whether it is concurrent.
 function appendEntered(
   state: State,
   { entry, hash, batch, applied, reverts }: EnteredNow,
@@ -396,7 +378,6 @@ function dropOthers(state: State, each: Held) {
   return others;
 }
 
-// Applies the next entry, whose batch is held, to the entries' document.
 function enter(state: State, entry: Entry, hash: string, change: Change) {
   const each = state.held.get(entry.batch.hash);
   if (each === undefined || !follows(state, entry))
@@ -485,7 +466,6 @@ const ready = (state: State, { batch }: Held) =>
     state.settled.has(keyOf({ author: batch.author, seq: batch.branchPrev }))) &&
   !waits(state, batch);
 
-// The received batches not yet appended, in clock order.
 function waiting(state: State) {
   return state.queue
     .splice(0)

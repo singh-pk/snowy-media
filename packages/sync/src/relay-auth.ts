@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Relay authorization (docs/architecture.md#authorization): the join grant, the token a peer
-// dials the relay with in a watch or an edit session, and the auth server moq-relay asks
-// (`--auth-url`), which checks a token and answers with what its peer may publish and subscribe
-// to. The server keeps nothing: each answer comes from the token and the dialed path alone, and
-// from the app's `admit` when it passes one, which keeps whatever state its own policy needs. It
-// is a `fetch` handler on Web Crypto, so it runs wherever that does:
-// `Bun.serve({ fetch: authServer })`, or a Worker.
+// Relay authorization (docs/architecture.md#authorization). The auth server keeps nothing: each
+// answer comes from the token, the dialed path and the app's `admit` alone. It is a `fetch` handler
+// on Web Crypto, so it runs wherever that does: `Bun.serve({ fetch: authServer })`, or a Worker.
 
 import { isRecord } from "./chat";
 import { RIGHTS, readGrant, verifyGrant, type Grant, type Right } from "./grant";
@@ -49,7 +45,6 @@ const requestBytes = (prefix: string, { peer, session, issuedAt }: ConnectionReq
 
 const encode = (token: Token) => base64url(encoder.encode(JSON.stringify(token)));
 
-/** The join grant for the session whose key pair this is. */
 export async function joinGrant(session: CryptoKeyPair): Promise<JoinGrant> {
   const id = await keyId(session.publicKey);
   const sig = await sign(session.privateKey, grantBytes(id));
@@ -191,7 +186,6 @@ const sourceGrant = (peer: KeyId): RelayGrant => ({
   subscribe: ["**"],
 });
 
-// The token a connection dialed at `path` with `query`, once every check passed, or undefined.
 async function checked(path: string, query: string | undefined, now: number, fresh: boolean) {
   const session = sessionOf(path);
   const token = readToken(query);
@@ -294,8 +288,7 @@ const status = (code: number) => new Response(null, { status: code });
 // whatever the connection moved.
 const RELAY_CLOSED = new Set(["refused", "expired", "invalid", "dropped"]);
 
-// Why the relay says a connection ended, and its byte counts, `{ sent, received }` as the relay
-// sees them, when they are counts and the relay counted them. moq-relay reads them from QUIC
+// Bytes are `{ sent, received }` as the relay sees them. moq-relay reads them from QUIC
 // (WebTransport included) and reports zeros for its other transports, which a peer may choose.
 function endOf(id: string, { reason, transport, bytes }: Record<string, unknown>): Ended {
   const ended: Ended = { id };

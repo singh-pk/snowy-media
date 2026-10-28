@@ -1,21 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// What the source sends next (docs/architecture.md#push-order): one queue for every chunk it
-// sends, in four tiers. First the seek target's chunks, then chunks peers asked for, then chunks
-// ahead of the playhead up to the push horizon, then peers' background requests, which go only
-// when nothing above can. Ahead of the playhead, each index goes subtitles, then the audio tracks
-// a peer selected, then video, so every track of a moment arrives before the next moment. A chunk
-// goes out live once; after that, only to a peer that asks for it.
+// What the source sends next (docs/architecture.md#push-order). Each index goes subtitles, then
+// the selected audio, then video, so every track of a moment arrives before the next moment.
 //
-// The queue holds no chunks, only which to send next. The source asks for one whenever its stream
-// will accept more, so pushing runs as fast as its upload, and on nothing else. Indexes are cut in
-// order as the source demuxes, and a chunk can go only once it is cut, so what isn't cut yet
-// waits.
-//
-// It holds at most 4 requests from each peer, answering `busy` beyond them, so it stays bounded
-// whatever a peer sends; an urgent request beyond them takes the place of the peer's newest
-// background one, which is answered `busy` instead, as on a forwarder's link.
+// The source asks for the next chunk whenever its stream will accept more, so pushing runs as
+// fast as its upload, and on nothing else. It holds at most 4 requests per peer, so it stays
+// bounded whatever a peer sends.
 
 import type { Catalog } from "./catalog";
 import type { ChunkSlot } from "./chunk";
@@ -56,7 +47,6 @@ const ids = (tracks: Catalog["tracks"], kind: Catalog["tracks"][number]["kind"])
 
 const sameSlot = (a: ChunkSlot, b: ChunkSlot) => a.track === b.track && a.index === b.index;
 
-// Whether a request is a peer's for a chunk.
 const isRequest = (peer: KeyId, slot: ChunkSlot) => (r: Request) =>
   r.peer === peer && sameSlot(r.slot, slot);
 
@@ -68,7 +58,6 @@ const toPeer = (r: Request): Send => ({ to: "peer", peer: r.peer, slot: r.slot }
 const countOf = (requests: Request[], peer: KeyId) =>
   requests.reduce((count, r) => (r.peer === peer ? count + 1 : count), 0);
 
-// The chunks cut so far, in index order, found by time.
 function createCuts() {
   // Each chunk ends where the next begins, as in the chunk index.
   const state = { bounds: [] as number[], ended: false };
@@ -132,7 +121,6 @@ function createRequests() {
     return { queued: true, bumped };
   }
 
-  // The requests for an index past the last, taken out.
   function takePast(count: number) {
     const past = (r: Request) => r.slot.index >= count;
     // copy: once per session, the requests past the end, from both tiers into one list.
@@ -152,8 +140,6 @@ function createRequests() {
 
 type Cuts = ReturnType<typeof createCuts>;
 
-// What goes live: the tracks in the order each index goes, which chunks have gone, and the seek
-// target and playhead that say which go next.
 function createLive(tracks: Catalog["tracks"], cuts: Cuts) {
   const subtitles = ids(tracks, "subtitle");
   const audio = ids(tracks, "audio");
@@ -165,19 +151,17 @@ function createLive(tracks: Catalog["tracks"], cuts: Cuts) {
     /** The tracks pushed live, in the order each index goes: no audio until one is selected. */
     // copy: once per session, the few track ids, in order.
     order: [...subtitles, ...video],
-    /** Each track's indexes sent live. */
     pushed: new Map<number, Set<number>>(),
   };
 
   const sent = ({ track, index }: ChunkSlot) => state.pushed.get(track)?.has(index) === true;
 
-  // The first chunk at an index not yet sent live, of the live tracks in the order they go.
   function unsentAt(index: number) {
     const track = state.order.find((t) => !sent({ track: t, index }));
     return track === undefined ? undefined : { track, index };
   }
 
-  // The seek target's chunk not yet sent, forgetting the target once all have gone.
+  // Forgets the target once all its chunks have gone.
   function target(): ChunkSlot | undefined {
     if (state.targetUs === undefined) return undefined;
     const index = cuts.covering(state.targetUs);
@@ -187,7 +171,6 @@ function createLive(tracks: Catalog["tracks"], cuts: Cuts) {
     return slot;
   }
 
-  // The first chunk ahead of the playhead not yet sent live, up to the push horizon.
   function ahead(): ChunkSlot | undefined {
     const from = cuts.covering(state.playheadUs);
     if (from === undefined) return undefined;
@@ -252,7 +235,6 @@ export function createPushQueue(options: PushQueueOptions) {
     return background === undefined ? undefined : toPeer(background);
   }
 
-  // Calls `onQueued` when a change leaves something to send after `next` found nothing.
   function changed() {
     if (!state.waiting || pick() === undefined) return;
     state.waiting = false;
@@ -287,7 +269,6 @@ export function createPushQueue(options: PushQueueOptions) {
     changed();
   }
 
-  /** The playhead moved, as playback does. */
   function playhead(us: number) {
     live.playhead(us);
     changed();

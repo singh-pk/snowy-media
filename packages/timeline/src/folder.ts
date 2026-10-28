@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The project folder (docs/architecture.md#the-project-folder): what the editor writes for each
-// author's batches and each branch's entries, and opening a project from it again. The package
-// never touches the folder; it says what to write and is handed the files it reads. A log or a
-// history is segments of records, each a 4-byte big-endian length and then an object's canonical
-// bytes. A segment is named by the first seq or n in it and grows to SEGMENT_BYTES, since
-// Chromium copies a whole file to append to it.
+// The project folder (docs/architecture.md#the-project-folder). A log or history is segments of
+// records, each a 4-byte big-endian length then canonical bytes. A segment is named by its first
+// seq or n and grows to SEGMENT_BYTES, since Chromium copies a whole file to append to it.
 
 import { batchHash, decodeBatch, encodeBatch, verifyBatch, type Batch } from "./batch";
 import { createBranches, type Changes } from "./branches";
@@ -17,7 +14,6 @@ import { InvalidError } from "./schema";
 /** Bytes for the editor to write into the file at `path`, from `offset`: the file's length so far. */
 export type Write = { path: string; offset: number; bytes: Uint8Array };
 
-/** A file of the project folder, as the editor read it. */
 export type FolderFile = { path: string; bytes: Uint8Array };
 
 /** The size a log or history segment grows to before the next one starts. */

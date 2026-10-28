@@ -1,28 +1,23 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// How far a video decoder has decoded, whatever order it emits frames in: every frame up to a
-// time has come out of it. A packet that makes no frame (a VP8 alt-ref frame) is not waited
-// for, and nor is one whose frame a decoder never emits, once a frame fed far enough after it
-// has come out (docs/architecture.md#video-output).
+// How far a video decoder has decoded, whatever order it emits frames in. A packet that makes
+// no frame (a VP8 alt-ref frame), or whose frame is never emitted, stops being waited for once a
+// frame fed far enough after it comes out (docs/architecture.md#video-output).
 
 /**
  * How many packets, in decode order, a frame may be fed after one whose frame comes out after
- * it. How long a decoder holds frames delays them all alike, so this is how far the stream
- * reorders. Twice the 16 frames of an
- * H.264 or HEVC decoded picture buffer, as a margin; a stream that reorders further, or
- * stores a field a packet, may count a frame decoded before it comes, which then shows late
- * or is dropped, but never holds play.
+ * it: how far the stream reorders. Twice the 16 frames of an H.264 or HEVC decoded picture
+ * buffer, as a margin; a stream that reorders further, or stores a field a packet, may show a
+ * frame late or drop it, but never holds play.
  */
 const HELD = 32;
 
-/** Tracks the packets given to a decoder whose frames have not come out. */
 export function createDecodeTracker(held = HELD) {
-  // Their timestamps, and their numbers in the order they were fed, in that order.
+  // In the order fed.
   const stamps: number[] = [];
   const numbers: number[] = [];
   const state = {
-    // The latest timestamp out.
     latest: -Infinity,
     // The dts of the last packet fed: every packet still to come is due after it.
     fed: -Infinity,

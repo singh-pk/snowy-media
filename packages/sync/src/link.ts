@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A link to one peer (docs/architecture.md#package-boundaries). Both transports give one: the
-// relay, through the inbox tracks, and a direct connection, through its data channels. Chat,
-// and later the scheduler, use only this, never MoQ or WebRTC.
+// A link to one peer (docs/architecture.md#package-boundaries), over the relay's inbox tracks or a
+// direct connection's data channels, so what uses it never refers to MoQ or WebRTC.
 
 import type { ChatControl } from "./chat-requests";
 import type { ChunkControl } from "./chunk-requests";
@@ -11,10 +10,6 @@ import type { Bytes, KeyId } from "./crypto";
 import type { HaveControl } from "./have";
 import type { StateControl } from "./state-requests";
 
-/**
- * A control message: the chat repair messages, asking for the session's state on join, have
- * ranges, and asking for chunks.
- */
 export type Message = ChatControl | StateControl | HaveControl | ChunkControl;
 
 /** What a link reports. A handler may return a promise; the link doesn't wait for it. */

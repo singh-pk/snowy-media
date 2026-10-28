@@ -13,7 +13,6 @@ interface Shown {
   readonly displayHeight: number;
 }
 
-/** The size of the canvas drawn into. */
 interface Canvas {
   readonly width: number;
   readonly height: number;
@@ -39,7 +38,6 @@ export function viewMap(
   const width = frame.displayWidth;
   const height = frame.displayHeight;
 
-  // The display's size, the frame's corners transformed, and the scale that fits it in.
   const displayWidth = Math.abs(a) * width + Math.abs(c) * height;
   const displayHeight = Math.abs(b) * width + Math.abs(d) * height;
   const fit = Math.min(canvas.width / displayWidth, canvas.height / displayHeight);

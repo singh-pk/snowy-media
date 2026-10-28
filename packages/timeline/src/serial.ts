@@ -13,7 +13,6 @@ async function settledOf(previous: Promise<unknown>) {
   }
 }
 
-// Runs `work` once `previous` has settled, however it settled.
 async function afterSettled<T>(previous: Promise<unknown>, work: () => Promise<T>) {
   await settledOf(previous);
   return work();
@@ -30,10 +29,7 @@ export function createSerial() {
   };
 }
 
-/**
- * `call` on `state`, made to run through `serial`: once every call to `serial` before has
- * finished. A history and the branches each make their calls this way.
- */
+/** `call` on `state`, run through `serial`: once every call to `serial` before has finished. */
 export function queued<S, A extends unknown[], T>(
   serial: ReturnType<typeof createSerial>,
   state: S,

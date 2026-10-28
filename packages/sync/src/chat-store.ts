@@ -1,23 +1,18 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Chat in the local store (docs/architecture.md#local-store): `chat/<author>` in the session's
-// OPFS directory, an append-only log of the author's messages and the checkpoints that prove
-// them, one JSON record per line. It is written through sync access handles, so it runs in a
-// dedicated worker. An append counts only once all of it is written and flushed; one that fails
-// is cut back off. A crash can tear only the end of the log, which is cut off when the store
-// opens: everything from the first line that isn't a record, when no record follows it. A record
-// after a bad line means the log is corrupt, and the store refuses to open rather than drop it,
-// which could give a published seq to another message. The
-// store is this origin's own, so records are checked for shape, not signatures again.
+// Chat in the local store (docs/architecture.md#local-store). Sync access handles, so it runs in
+// a dedicated worker. A crash tears only the log's end, cut off on open; a record after a bad line
+// is corruption, refused rather than dropped, since dropping it could give a published seq to
+// another message. The store is this origin's own, so records are checked for shape, not
+// signatures.
 
 import { checkCheckpoint, checkMessage, type ChatMessage, type Checkpoint } from "./chat";
 import { isKeyId, type KeyId } from "./crypto";
 
-/** What the store holds of one author, in the order it was written. */
+/** In the order written. */
 export type ChatRecords = { messages: ChatMessage[]; checkpoints: Checkpoint[] };
 
-/** What one append writes: an author's messages, and a checkpoint that proves them. */
 export type ChatAppend = { messages?: ChatMessage[]; checkpoint?: Checkpoint | undefined };
 
 /** An author's log holds a complete line that isn't a well-formed record by that author. */
@@ -25,7 +20,7 @@ export class CorruptChatLogError extends Error {
   override name = "CorruptChatLogError";
 }
 
-/** An author's log, with the seqs written to it, so nothing is written twice. */
+/** With the seqs written, so nothing is written twice. */
 type Log = {
   handle: FileSystemSyncAccessHandle;
   size: number;
@@ -37,7 +32,6 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const NEWLINE = 0x0a;
 
-// One line's record, or undefined for one that isn't a well-formed record by `author`.
 function parse(line: Uint8Array, author: KeyId) {
   try {
     const value: unknown = JSON.parse(decoder.decode(line));
@@ -107,7 +101,6 @@ function read(handle: FileSystemSyncAccessHandle, author: KeyId) {
   return { records, size: end };
 }
 
-// Opens an author's log, releasing its file if reading it fails.
 async function open(dir: FileSystemDirectoryHandle, author: KeyId) {
   const file = await dir.getFileHandle(author, { create: true });
   const handle = await file.createSyncAccessHandle();

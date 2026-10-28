@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The control record (docs/architecture.md#control-record): where the source's playback is, and
-// whether it plays, from a moment on the source's clock. Only the source writes it, as a signed
-// record (src/signed-record.ts), so a peer can take one from anyone. Each play, pause or seek has
-// the next epoch, and its object key, `control@<epoch>`, names it; a peer follows the highest.
+// The control record (docs/architecture.md#control-record). Only the source writes it, signed, so a
+// peer can take one from anyone; a peer follows the highest epoch.
 
 import { isCount, isRecord } from "./chat";
 import type { Bytes } from "./crypto";

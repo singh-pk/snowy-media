@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A project's document, changed only by applying batches (docs/architecture.md#applying). Every
-// operation is checked again as it is applied, against the document as it is then, and one that
-// doesn't fit is skipped and recorded, never half applied: a batch from a buggy or hostile peer
-// can't break anyone's document, and every peer skips the same operations. Applying uses only
-// the batch and the document: no clock, no random numbers, no locale.
+// A project's document, changed only by applying batches (docs/architecture.md#applying). An
+// operation that doesn't fit is skipped, never half applied, so a buggy or hostile peer can't break
+// anyone's document and every peer skips the same. No clock, no random numbers, no locale.
 
 import { apply, type Range, type Resolver } from "./apply";
 import type { Batch } from "./batch";
@@ -20,7 +18,6 @@ export type { Applied, Range, Resolver } from "./apply";
 export { leafOf } from "./leaf";
 export type { Snapshot } from "./snapshot";
 
-/** What a peer reads of a document: everything but applying. */
 export type Document = Omit<ReturnType<typeof createProject>, "apply">;
 
 /** A project's document, empty or as a snapshot left it. */

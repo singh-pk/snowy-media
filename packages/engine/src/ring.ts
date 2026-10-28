@@ -1,18 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A ring of packets in a SharedArrayBuffer, from one producer thread to one consumer thread,
-// with no message per packet. It is a byte stream of records: a 32-byte header, then the
-// payload, padded to 32 bytes. A record may wrap around the end of the ring, so it fits without
-// wasting the space at the end. A packet larger than half the ring goes as pieces of a quarter
-// of it, which the consumer puts back together, so a packet of any size passes; one packet at a
-// time is in pieces, and other records may come between them. A consumer may hand a record on
-// unread instead (peekPlace), for another thread to copy its payload out of the ring
-// (createPlaceReader) before the consumer frees it. The producer blocks
-// (Atomics.wait) while the ring is full, except to fail, which takes no room; the consumer
-// never blocks, and waits (Atomics.waitAsync) for the producer to notify it when it writes to
-// an empty ring or fails. A consumer that watches is notified too when the producer's thread
-// blocks, on this ring or on another one it writes.
+// A ring of packets in a SharedArrayBuffer, from one producer thread to one consumer thread, with
+// no message per packet (docs/architecture.md#packet-ring). The producer blocks while the ring is
+// full, except to fail, which takes no room; the consumer never blocks.
 //
 // Positions only grow, as 32-bit integers that wrap; the distance between them is the bytes
 // in use. Each side writes only its own position, so neither needs a lock.
@@ -20,7 +11,6 @@
 // Control words, then the records from byte 64, on a cache line of their own.
 const WRITE = 0;
 const READ = 1;
-// 1 while the producer waits for room.
 const PRODUCER_WAITING = 2;
 const CONSUMER_WAITING = 3;
 const CLOSED = 4;
@@ -124,7 +114,6 @@ export interface OutgoingPacket {
   size: number;
 }
 
-/** A packet of stream 0 with no bytes, to fill. */
 export function createOutgoingPacket(data: Uint8Array = new Uint8Array(0)): OutgoingPacket {
   return { stream: 0, flags: 0, pts: 0n, dts: 0n, duration: 0, data, offset: 0, size: 0 };
 }
@@ -219,7 +208,6 @@ function producerSignals(control: Int32Array) {
       Atomics.store(control, FAILURE, 1);
       wakeConsumer(control);
     },
-    /** Whether the consumer has closed the ring. */
     closed: () => Atomics.load(control, CLOSED) === 1,
     /**
      * Raises or lowers the flag that has the consumer wake the producer as it frees room.
@@ -289,7 +277,6 @@ export function createProducer(ring: SharedArrayBuffer) {
     split.size = size;
 
     while (split.sent < size) {
-      // A quarter of the ring, or what is left.
       const n = Math.min(capacity / 4, size - split.sent);
       const mark = PIECE | (split.sent + n === size ? LAST : 0);
 
@@ -305,8 +292,6 @@ export function createProducer(ring: SharedArrayBuffer) {
     return true;
   }
 
-  // Writes a record of `size` bytes of `packet` from `offset`, its size word marked by `mark`,
-  // if `mode` lets it.
   function record(packet: OutgoingPacket, offset: number, size: number, mark: number) {
     const need = padded(size);
     const room = mode.wait ? reserve(v, need) : fits(v, need);
@@ -354,7 +339,6 @@ interface ConsumerEvents {
 // producer's thread.
 function consumerSignals(ring: SharedArrayBuffer, control: Int32Array, events: ConsumerEvents) {
   const { blocked, freed } = events;
-  // The blocks heard.
   const blocks = { heard: Atomics.load(control, BLOCKS) };
 
   /**
@@ -412,7 +396,6 @@ function consumerSignals(ring: SharedArrayBuffer, control: Int32Array, events: C
     wait,
     close,
     closed,
-    /** Whether the producer waits for room. */
     producerWaiting: () => Atomics.load(control, PRODUCER_WAITING) === 1,
     /**
      * Has `blocked` run when the producer's thread next blocks. Before reading whether it
@@ -504,7 +487,6 @@ function createJoiner(v: Views) {
   return { pieces, whole, join };
 }
 
-// The PART of its packet a record is, by its size word.
 function partOf(word: number) {
   if (!(word & PIECE)) return PART.whole;
   return word & LAST ? PART.last : PART.piece;
@@ -520,7 +502,6 @@ function createHeads(v: Views, packet: Packet) {
   // Whether the producer had failed when `next` found no record.
   const ended = { failed: false };
 
-  // Reads the header of the record at `at` into `packet`.
   function header(at: number) {
     packet.stream = words[(at >> 2) + 1] ?? 0;
     packet.flags = words[(at >> 2) + 2] ?? 0;

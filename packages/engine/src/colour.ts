@@ -47,7 +47,6 @@ export function undoMatrix(
 
 // The inverse of `from`, an affine column-major 4 × 4: the inverse of its 3 × 3, then its offset.
 function affineInverse(from: Float32Array) {
-  // Column-major: row r, column c at c * 4 + r.
   const m = (r: number, c: number) => from[c * 4 + r] ?? 0;
   const det =
     m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) -
@@ -84,9 +83,8 @@ function affineInverse(from: Float32Array) {
 /**
  * Writes into `out` the column-major 4×4 matrix that takes a pixel's `depth`-bit plane values
  * (Y, Cb, Cr, 1) to R′G′B′, by the colour space `space` states. A stream that states no
- * matrix is BT.601, and one that states no range limited, as FFmpeg takes them. For RGB
- * (the planes G, B, R), the planes are R′G′B′ already, scaled by the range: full unless it
- * states limited.
+ * matrix is BT.601, and one that states no range limited, as FFmpeg takes them; RGB planes
+ * (G, B, R) are R′G′B′ already.
  */
 export function yuvMatrix(out: Float32Array, space: VideoColorSpaceInit, depth: number) {
   const max = 2 ** depth - 1;

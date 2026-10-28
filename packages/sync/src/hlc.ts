@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The hybrid logical clock that orders chat (docs/architecture.md#order): 16 hex digits, the
-// wall clock in ms (48 bits) then a counter (16 bits), so comparing two as strings compares
-// them as numbers. It moves forward on every message sent and received, so a reply always
-// sorts after what it answers, whatever the two wall clocks say.
+// The hybrid logical clock that orders chat (docs/architecture.md#order): wall ms (48 bits) then a
+// counter (16 bits) in fixed-width hex, so comparing two as strings compares them as numbers. It
+// moves on every message sent and received, so a reply sorts after what it answers.
 
 const WALL_DIGITS = 12;
 const COUNTER_DIGITS = 4;
@@ -53,7 +52,6 @@ const carried = ({ wall, counter }: Parts): Parts =>
 export function createClock(now: () => number = Date.now, last?: Hlc) {
   let state: Parts = last === undefined ? { wall: 0, counter: 0 } : parse(last);
 
-  /** The value for a message about to be sent. */
   function send() {
     const wall = wallTime(now);
     state =

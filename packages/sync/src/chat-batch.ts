@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The chat batch (docs/architecture.md#sending): everything an author had queued when its
-// stream was free, as one object `chat/<author>/<firstSeq>-<lastSeq>`, sealed with the content
-// key. A batch always empties the author's queue, so it ends with the author's checkpoint at
-// its last message, and proves itself: a batch checks out wherever it came from.
+// The chat batch (docs/architecture.md#sending). A batch always empties the author's queue, so it
+// ends with the author's checkpoint at its last message and proves itself: a batch checks out
+// wherever it came from.
 
 import {
   checkCheckpoint,
@@ -30,7 +29,6 @@ export class InvalidBatchError extends Error {
   }
 }
 
-/** The object key of an author's batch of consecutive messages. */
 export const batchKey = (author: KeyId, firstSeq: number, lastSeq: number) =>
   `chat/${author}/${firstSeq}-${lastSeq}`;
 
@@ -73,7 +71,6 @@ export async function sealBatch(content: CryptoKey, { messages, checkpoint }: Ch
   return { key, bytes };
 }
 
-// The batch's plaintext, or an `InvalidBatchError` if it doesn't open under the content key.
 async function opened(content: CryptoKey, key: string, bytes: Bytes) {
   try {
     return await unseal(content, key, bytes);
