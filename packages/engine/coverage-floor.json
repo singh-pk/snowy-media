@@ -10,7 +10,7 @@
   "src/frames.ts": 94,
   "src/index.ts": 84,
   "src/io.ts": 76,
-  "src/measure.ts": 95,
+  "src/measure.ts": 93,
   "src/media.worker.ts": 90,
   "src/pcm.ts": 91,
   "src/pictures.ts": 95,
@@ -18,10 +18,10 @@
   "src/playback.ts": 93,
   "src/protocol.ts": 100,
   "src/render.worker.ts": 84,
-  "src/ring.ts": 95,
+  "src/ring.ts": 94,
   "src/shaders.ts": 100,
   "src/video.ts": 94,
   "src/video.worker.ts": 88,
   "src/view.ts": 95,
-  "src/wasm-video.ts": 80
+  "src/wasm-video.ts": 79
 }
