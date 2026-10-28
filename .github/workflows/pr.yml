@@ -20,8 +20,6 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          # Dependabot capitalises "Bump" after the commit-message prefix in dependabot.yml, and no
-          # setting changes that.
           if [ "$AUTHOR" = "dependabot[bot]" ]; then TITLE="${TITLE/: Bump /: bump }"; fi
           pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [a-z].{1,70}[^.]$'
           if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
