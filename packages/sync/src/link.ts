@@ -6,15 +6,16 @@
 // and later the scheduler, use only this, never MoQ or WebRTC.
 
 import type { ChatControl } from "./chat-requests";
+import type { ChunkControl } from "./chunk-requests";
 import type { Bytes, KeyId } from "./crypto";
 import type { HaveControl } from "./have";
 import type { StateControl } from "./state-requests";
 
 /**
- * A control message: the chat repair messages, asking for the session's state on join, and have
- * ranges.
+ * A control message: the chat repair messages, asking for the session's state on join, have
+ * ranges, and asking for chunks.
  */
-export type Message = ChatControl | StateControl | HaveControl;
+export type Message = ChatControl | StateControl | HaveControl | ChunkControl;
 
 /** What a link reports. A handler may return a promise; the link doesn't wait for it. */
 export type LinkEvents = {
