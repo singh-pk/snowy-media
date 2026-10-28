@@ -15,6 +15,7 @@
   "src/chunk.ts": 100,
   "src/control.ts": 100,
   "src/crypto.ts": 100,
+  "src/fetch-plan.ts": 98,
   "src/grant.ts": 100,
   "src/have.ts": 100,
   "src/hlc.ts": 100,

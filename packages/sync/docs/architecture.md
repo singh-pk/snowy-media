@@ -549,7 +549,7 @@ The scheduler does no work on a clock, and each event's work is bounded by what 
 
 | Event | Work |
 | --- | --- |
-| Room on a link (a delivery done, `busy`, `gone`) | Places chunks until the link is full again: each priority's cursor moves on from where it stopped, skipping whole ranges held, coming live or asked |
+| Room on a link (a delivery done, `busy`, `gone`) | Places chunks until no link has room: each priority's scan runs from the playhead, skipping whole ranges held, coming live or, where only a forwarder may be asked, advertised by none, and stops at the first chunk no link can take |
 | A link opens, or a forwarder's `caps` change | Places chunks on that link as for room; a forwarder heard from again may be asked for what it answered `gone` to |
 | A new page of the chunk index | Places only the newly listed chunks an interest covers |
 | `started` / `paused` | Gives the chunks ahead deadlines, or takes them away; nothing is placed or cancelled |
