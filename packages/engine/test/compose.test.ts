@@ -34,7 +34,7 @@ const OFFSET = START - IN;
 // as test/play.test.ts measured them: Chromium draws slower than real time on CI's macOS
 // runners (SLOW_DRAWING) and in software on its Linux and Windows ones (SOFTWARE_GPU).
 const LATE = SLOW_DRAWING ? 1 : SOFTWARE_GPU ? 0.05 : 0.02;
-// How early a frame may be drawn, in seconds, by the same measures.
+// How early a frame may be drawn, in seconds: test/play.test.ts measured up to 15 ms in software.
 const EARLY = 0.02;
 const REAL_TIME = SLOW_DRAWING ? 1 : 0.25;
 // Seeks: in the gap before the clip, in it, and in the gap after it.
@@ -90,11 +90,11 @@ function frameAt(t: number) {
 }
 
 // What the canvas should show at composition time `t`: black (-1) outside the clip, or the
-// frames that may be on screen, from the one due LATE before to the one due at `t`.
+// frames that may be on screen, from the one due LATE before to the one due EARLY after `t`.
 function shownAt(t: number) {
   if (t < START || t >= END) return [-1];
   const first = frameAt(Math.max(IN, t - LATE - OFFSET));
-  const last = frameAt(t - OFFSET);
+  const last = frameAt(t + EARLY - OFFSET);
   return Array.from({ length: last - first + 1 }, (_, i) => first + i);
 }
 
