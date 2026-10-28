@@ -12,7 +12,7 @@ import type { Catalog, CodecSetup } from "./catalog";
 import {
   decodeIndexPage,
   encodeIndexPage,
-  joinedBounds,
+  joinedIndex,
   listed,
   reachesPage,
   type IndexPage,
@@ -176,8 +176,8 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     );
   }
 
-  /** The bounds of the chunks the index lists so far, joined from its pages. */
-  const bounds = () => joinedBounds((page) => held.pages.get(page)?.value);
+  /** The chunks the index lists so far, joined from its pages: their bounds and sizes. */
+  const index = () => joinedIndex((page) => held.pages.get(page)?.value);
 
   // The highest page of the index held, or -1 for none, which any bounds reach.
   function lastPage() {
@@ -195,7 +195,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     const { catalog, control } = held;
     if (catalog === undefined || control === undefined) return false;
     if (!catalog.value.tracks.every((track) => held.setups.has(track.id))) return false;
-    return reachesPage(bounds(), lastPage());
+    return reachesPage(index().bounds, lastPage());
   }
 
   return {
@@ -205,6 +205,6 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     catalog: () => held.catalog?.value,
     control: () => held.control?.value,
     setup: (track: number) => held.setups.get(track)?.value,
-    bounds,
+    index,
   };
 }
