@@ -43,7 +43,7 @@ Everything up to [Edit sessions](#edit-sessions) describes watch sessions. Edit 
 | **Local-first** | Every peer keeps its own copy of what its interests cover; the source reads from its file. The interface reads only from local data, never from the network. Losing the network loses nothing that was already received. |
 | **One writer per object** | Each object has exactly one author: the source writes media, control and the catalog, and each peer writes its own chat and records. In an edit session, each asset's source writes that asset's media, each author writes their own timeline batches, and the active sequencer writes a branch's history. Two peers never write the same object, so nothing needs merging. |
 | **Event-driven** | Snowy's code has no timers and polls nothing. Every action responds to an event from the transport, the engine, the store or the user. The only clocks are the transports' keepalives and the engine's media clock, and both reach Snowy as events. |
-| **Each byte crosses each link once** | No peer receives the same object twice. The source pushes each chunk to the relay once. It sends a chunk again only to a peer that asks for one no connected forwarder holds. The page of the [chunk index](#chunk-index) still filling is the one record sent again as it grows, at most 64 chunks' worth. |
+| **Each byte crosses each link once** | No peer receives the same object twice. The source pushes each chunk to the relay once. It sends a chunk again only to a peer that asks for one no connected forwarder holds, or an urgent one its forwarder has sent nothing of and would deliver after its deadline. The page of the [chunk index](#chunk-index) still filling is the one record sent again as it grows, at most 64 chunks' worth. |
 | **Metadata goes only to those who need it** | What a forwarder holds goes to its group, and a receiver's capability record goes to the source. Records are sent when they change, never repeated. |
 | **A stateless relay** | The relay forwards objects and forgets them. It stores nothing and runs no timers. Peers are the only storage. |
 | **One code path** | Every peer runs the same logic. Roles come from measured values and user settings, never from browser or device detection. |
@@ -251,7 +251,7 @@ Every name sits under the namespace `snowy/<SessionId>`. The relay enforces who 
 | Catalog | `catalog@version` | Source | About 1 KB | Session-key signature |
 | Control record | `control@epoch` | Source | About 100 B | Session-key signature |
 | Codec setup | `init/<track>` | Source | Under 1 KB | Session-key signature |
-| Chunk index page | `index/<page>@n` | Source | Up to about 870 B: 64 chunks | Session-key signature |
+| Chunk index page | `index/<page>@n` | Source | Up to about 1.4 KB: 64 chunks | Session-key signature |
 | Media chunk | `media/<track>/<index>` | Source | One GOP: typically 1–5 MB for video, tens of KB for audio and text subtitles, up to a few MB for bitmap subtitles | Signed chunk header |
 | Chat batch | `chat/<author>/<firstSeq>-<lastSeq>` | Author | About 150 B per message | Hash chain plus a signed checkpoint |
 | Capability record | `caps/<peer>@version` | That peer | About 150 B | Peer-key signature |
@@ -339,14 +339,16 @@ Body
 type IndexPage = {
   page: number;                  // lists chunks from page × 64
   bounds: number[];              // the page's chunk i is [bounds[i], bounds[i + 1]), in microseconds
+  bytes: number[];               // the page's chunk i of video is bytes[i] long, sealed
 };
 ```
 
 - **Why it exists:** interests are time ranges, but chunks are asked for and advertised by index, and a chunk is as long as the file's keyframes make it. A peer learns a chunk's times from its header only once it holds the chunk, so without the index a joiner or a seek couldn't tell which chunk covers a moment.
 - **One list for every track,** since an index is the same time range in each. Each chunk ends where the next begins, so `n` chunks take `n + 1` numbers, increasing; a moment before the first chunk counts as covered by it.
-- **It comes in pages of 64 chunks,** each a signed record like the catalog, under the prefix `snowy index v1`, keyed `index/<page>@<n>` for the `n` chunks it lists. The page number is signed with the bounds, so a page can't be passed off as another. A page only grows as the source cuts, until it is full, so a peer keeps the one listing the most of each, and the source keeps no counter: it builds each page from the chunk headers it already keeps.
+- **Sizes let a peer plan in bytes.** A chunk's length in time follows the file's keyframes, and its size follows the bitrate too, from hundreds of KB to tens of MB. Video is most of a moment's bytes, so each chunk's sealed video size, listed beside its bounds, tells a peer what asking for it costs before the first byte arrives ([Choosing where each chunk comes from](#choosing-where-each-chunk-comes-from)). A chunk of another track costs the video size × that track's `bitrateKbps` ÷ the video's, from the catalog. The page's sizes are signed with its bounds, and a page whose `bytes` doesn't hold one positive whole number per chunk is refused.
+- **It comes in pages of 64 chunks,** each a signed record like the catalog, under the prefix `snowy index v1`, keyed `index/<page>@<n>` for the `n` chunks it lists. The page number is signed with the bounds, so a page can't be passed off as another. A page only grows as the source cuts, until it is full, so a peer keeps the one listing the most of each, and the source keeps no counter: it builds each page from the chunk headers and sizes it already keeps.
 - **Pages join from the first:** a peer reads the index as page 0, then each next page that starts where the one before ends, up to the first that isn't full. Whether every chunk is cut is the catalog's `chunkCount`: once it is set and the index lists that many, a moment past the last chunk counts as covered by the last.
-- **The source publishes the page still filling as it cuts,** when its stream will accept more, so a burst of cuts becomes one update, as with [have ranges](#have-ranges). A full page never goes again. That page is the one record that repeats bytes a peer already has, and pages bound it: an update is at most about 870 bytes, and at one update per cut the index costs about 520 bytes a chunk in all, sealed and framed, so some 2 MB for a two-hour film in 2-second chunks.
+- **The source publishes the page still filling as it cuts,** when its stream will accept more, so a burst of cuts becomes one update, as with [have ranges](#have-ranges). A full page never goes again. That page is the one record that repeats bytes a peer already has, and pages bound it: an update is at most about 1.4 KB, and at one update per cut the index costs about 790 bytes a chunk in all, sealed and framed, so some 3 MB for a two-hour film in 2-second chunks.
 - **A peer holds each page sealed as it came** and passes them on to a joiner with the other records. What isn't listed yet waits for the next page. A session has no index before its first chunk is cut, so the [whole state](#presence-and-membership) needs none, but it does need every page before the last one held: a full page never goes again, so a peer holding page `p` whose pages don't join up to it missed one, doesn't hold the whole state, and asks for it again, as a joiner does. A joiner that has the state before any page places its interests once one arrives on `index`.
 
 ## Local store
@@ -362,7 +364,7 @@ OPFS  snowy/<SessionId>/
         peers/<PeerId>     newest caps record of each known peer
         counters           this peer's caps version
         meta               this session's onEnd
-        index/<track>      the source only: every signed chunk header it has cut, in index order
+        index/<track>      the source only: every signed chunk header it has cut, in index order, each video one with its sealed size
         fingerprint        the source only: size, lastModified, SHA-256 of its file's first and last MiB
 IDB   snowy-keys / <SessionId>
         peer               this device's peer key pair (non-extractable)
@@ -443,7 +445,7 @@ Players and editors can be in the same session: interests belong to each peer.
 - The source picks its file with `showOpenFilePicker()` and keeps the `FileSystemFileHandle` in IndexedDB. It never copies the file.
 - **After a reload,** the source calls `queryPermission({ mode: "read" })` on the handle. If permission was dropped, the *Resume sharing* button calls `requestPermission()`, which needs that click.
 - Before resuming, the source checks the file against the `fingerprint` in its local store. If the size, `lastModified`, or either hash differs, the file has changed on disk, and the source refuses to resume. Resuming would sign different data under the same chunk indexes.
-- The source stores **no chunks**, only the signed header of every chunk it has cut (`index/<track>`). The headers survive a reload, so indexes and boundaries never change and nothing is signed twice.
+- The source stores **no chunks**, only the signed header of every chunk it has cut, and the sealed size of each video chunk (`index/<track>`). The headers survive a reload, so indexes and boundaries never change and nothing is signed twice.
 - **Cutting a past chunk again:** the source seeks the demuxer to the previous chunk's `startUs` (the file's start for index 0), demuxes forward, and keeps the packets whose pts falls in `[startUs, endUs)`. Seeking one chunk early catches audio and subtitle packets stored in the file before the video keyframe.
 - Before sending a chunk cut again, the source checks its body against `bodyHash` in the stored header. On a mismatch, it replies `gone` to the requester and reports `file-changed` to its consumer, never sending a chunk that wouldn't verify.
 
@@ -491,41 +493,84 @@ The source sends the next chunk as soon as the relay stream will accept more dat
 
 ### Choosing where each chunk comes from
 
-The scheduler runs on events (`progress`, `have`, `stored`, `close`, `busy`, `gone`, interest changes) and nothing else. For every chunk an interest covers that the peer doesn't yet hold, found by time in the [chunk index](#chunk-index), highest interest priority first:
+The scheduler plans in time and bytes. Every chunk an interest covers that the peer doesn't yet hold, found by time in the [chunk index](#chunk-index), has a **deadline** and a **cost**. While playing, the deadline is `now + (chunk start − playhead)`, at normal speed, and now for the chunk holding the playhead; a chunk that ends at or before the playhead has none, and while paused or before playback starts, no chunk has one. The cost is the chunk's sealed size from the index. Every link has a measured **RTT** and **throughput**: a forwarder's from [its data channels](#data-channels), the source's from [its requests](#requests-to-the-source). A chunk's **expected finish** on a link is `rtt + (bytes the link sends before it + its own bytes yet to arrive) / throughput`, where what goes before it is the rest of the chunk on the wire and the requests of the same or higher priority asked earlier, as [a forwarder serves them](#serving-requests).
 
 ```text
 covered by a live subscription?              → wait for it to arrive
 urgent
-├─ a connected forwarder advertises it with a free slot
-│     → ask that forwarder, lowest RTT first
-└─ otherwise → ask the source, through inbox/<source>/<self>/ctl
+├─ a connected forwarder advertises it
+│     → ask the one that finishes it first, once one of them has room
+└─ none does → ask the source, through inbox/<source>/<self>/ctl, once its link has room; while it is offline, wait for a `have` or its `announce`
 ahead
-├─ a connected forwarder advertises it with a free slot
-│     → ask that forwarder, lowest RTT first
-└─ otherwise → wait for the next `have` or `progress` event
-background (only while no urgent or ahead request is waiting), in time order from the playhead to the end, then from the start
-├─ a connected forwarder advertises it with a free slot
-│     → ask that forwarder, lowest RTT first
-└─ otherwise → ask the source, through inbox/<source>/<self>/ctl, which answers at background priority
+├─ a connected forwarder advertises it
+│     → ask the one that finishes it first, once one of them has room
+└─ none does → wait for the next `have`
+background (only while no urgent or ahead request is out), from the playhead to the end, then from the start
+├─ a connected forwarder advertises it
+│     → ask the one that finishes it first, once one of them has room
+└─ none does → ask the source, through inbox/<source>/<self>/ctl, once its link has room, which answers at background priority; while it is offline, wait as above
 ```
 
+- **A link has room** while fewer than 2 requests are out on it, or while the bytes asked of it and not yet arrived are under its throughput × RTT. A video chunk takes far longer to send than a round trip, so this is normally 2: one chunk arriving and the next already asked, so the link never waits a round trip between chunks. Deeper queues add nothing to throughput, and they delay an urgent chunk behind the ones queued before it. The source link counts the same, so the source holds a few requests from each peer, never a film's worth.
+- **Within urgent and within ahead, chunks are placed in start order from the playhead,** which is deadline order; those behind the playhead, such as a player's 2-minute tail, come after every chunk ahead of it.
+- **An urgent chunk always has room** on a forwarder link that is full of lower-priority requests: the newest of them that has sent no piece is cancelled to make it, and goes back into the plan.
+- **Picking by expected finish spreads the load:** once the fastest forwarder has a chunk queued, the next goes to whichever finishes it first, which may be another.
 - **One request per chunk at a time.** A chunk is asked from a second source only after one of these events about the first:
 
   | Event | Then |
   | --- | --- |
-  | `busy` reply | Ask the next forwarder that has it, or the source if the chunk is urgent |
-  | `gone` reply (the forwarder no longer holds it) | Same as `busy` |
-  | The link's `close` event | Every request on that link goes back into the plan |
-  | A `progress` event makes the chunk urgent while the forwarder has sent no piece of it | Cancel the forwarder request and ask the source |
+  | `busy` reply | The request ends, but the link gains no room until its next delivery is done; the chunk is placed again by the tree above, that forwarder included once it has room |
+  | `gone` reply from a forwarder (it no longer holds it) | Place the chunk again by the tree above, without that forwarder |
+  | `gone` reply from the source (past the last chunk, or the file changed) | Leave the chunk out of the plan until a forwarder's `have` lists it |
+  | The link's `close` event, or the source going offline | Every request on that link goes back into the plan |
+  | A `progress` event finds an urgent request to a forwarder that has sent no piece of it and whose expected finish passes its deadline, while the source is online with room and would finish it sooner | Cancel the forwarder request and ask the source |
+  | A chunk asked at a lower priority becomes urgent | Ask the same link again, urgently, so its request moves up |
 
-- **Requests are cancelled explicitly** with a `cancel` message, so the sender stops sending.
+- **Requests are cancelled explicitly** with a `cancel` message, so the sender stops sending, such as one whose chunk no interest covers any more. A forwarder that answered `gone` for a chunk isn't asked for it again until its ranges or capability record change.
 - **Duplicates can't be stored twice:** a chunk that arrives after the same key was stored is thrown away unread, and its request is cancelled.
+
+### Serving requests
+
+| Message on `ctl` | From | Means |
+| --- | --- | --- |
+| `{ type: "request", track, index, priority }` | The asker | Send this chunk on `data` (or `deliver`, from the source); `priority` is `urgent`, `ahead` or `background` |
+| `{ type: "cancel", track, index }` | The asker | Stop sending it |
+| `{ type: "busy", track, index }` | A forwarder, or the source | It has no room for this asker now |
+| `{ type: "gone", track, index }` | A forwarder, or the source | It doesn't hold it, or it can't be cut again |
+
+- **A forwarder sends one chunk at a time on each link,** the most urgent first, and the oldest asked first within a priority. A whole chunk arriving soon is worth more to a player than two arriving late, and a seek's chunk then waits for at most the one already on the wire.
+- **A forwarder answers `busy`** when a request goes beyond the asker's room, by its own measures of the link (RTT from the connection stats, and throughput as the rate its `data` buffer drains), or when it has no slot for that asker. The two ends measure the link apart, so an asker takes `busy` as an ordinary answer, not a fault.
+- **The source holds at most 4 requests from each peer** and answers `busy` beyond them, so its queue stays bounded whatever a peer sends.
+- A request for a chunk asked before is the same request, with the newer priority; it keeps the time it was first asked.
+
+### What each event costs
+
+The scheduler does no work on a clock, and each event's work is bounded by what it changed, not by the film's length or the session's size:
+
+| Event | Work |
+| --- | --- |
+| Room on a link (a delivery done, `busy`, `gone`) | Places chunks until the link is full again: each priority's cursor moves on from where it stopped, skipping whole ranges held, coming live or asked |
+| A link opens, or a forwarder's `caps` change | Places chunks on that link as for room; a forwarder heard from again may be asked for what it answered `gone` to |
+| A new page of the chunk index | Places only the newly listed chunks an interest covers |
+| `started` / `paused` | Gives the chunks ahead deadlines, or takes them away; nothing is placed or cancelled |
+| `storage-full` | Places nothing more until an interest changes or a chunk is evicted or dropped, which places as for room |
+| The source's `announce` | Places what waited on the source |
+| `have` from a peer | Places only chunks it newly holds that are waiting; none, if it adds nothing waited on |
+| `progress` | Checks the deadlines of the urgent requests out, at most a few per link |
+| An interest moves or is released | A `move` that leaves its index ranges unchanged does nothing. Otherwise it cancels the requests left uncovered, and the cursors start again from the new ranges |
+| A link closes | Puts its requests back into the plan |
+| `stored` | Ends its request, or cancels it if the chunk came another way |
+
+- **Interests and holdings are kept as index ranges per track,** as [have ranges](#have-ranges) are, never one entry per chunk, so moving a 15-minute window costs the same as moving a 30-second one.
+- **Events in one task are planned once:** each marks the plan stale, and one pass runs in a microtask.
+- **A peer's cost follows its group, not the session:** it follows the ranges of at most 4 forwarders and the source, and fan-out to many viewers happens in the relay and in forwarders' slots.
 
 ### Requests to the source
 
 - The source answers through `inbox/<requester>/<source>/deliver`, ahead of everything else in its queue except seek targets. It cuts the chunk again from its file ([The source's file](#the-sources-file)).
 - **While the source is offline,** urgent chunks that no forwarder holds wait for a `have` event or the source's return. The peer pauses locally when its buffer runs out ([Playback control](#playback-control)).
-- The source sends a chunk more than once only in answer to a request: a joiner's urgent window when no forwarder holds it, and an editor's background chunks that no connected forwarder holds.
+- The source sends a chunk more than once only in answer to a request: an urgent chunk no connected forwarder holds, or whose forwarder has sent nothing of it and would deliver it after its deadline, and an editor's background chunks that no connected forwarder holds.
+- **The source link is measured too:** its RTT is the lowest round trip of the [clock-sync exchanges](#clock-offset), and its throughput is measured over each `deliver` object larger than one 64 KiB piece: the bytes after the first 64 KiB over the time from them to its last byte. Until then it is taken as the session bitrate.
 
 ### Have ranges
 
@@ -564,9 +609,10 @@ Each connection has two data channels:
 | `ctl` | Yes | Yes | `have`, `request`, `cancel`, `busy`, `gone`, and the chat repair messages |
 | `data` | Yes | **No** | Chunk pieces |
 
-- A chunk travels in messages of at most 64 KiB, header included. Each header is `{ key, offset, total }`. Because the channel is unordered, one lost piece never delays pieces of other chunks.
+- A chunk travels in messages of at most 64 KiB, header included. Each header is `{ key, offset, total }`. Because the channel is unordered, one lost piece never delays the pieces after it.
 - Sending pauses when `bufferedAmount` reaches 1 MiB and resumes on the `bufferedamountlow` event, with the threshold at 256 KiB.
 - RTT is read from the connection stats when the connection opens and again each time a chunk delivery on it completes.
+- **Throughput** is measured on each delivery of more than one piece: the bytes after its first piece over the time from its first piece to its last. A delivery of one piece, such as most audio and text subtitle chunks, takes no measurable time, so it changes nothing. Until a link's first delivery, its throughput is taken as the session bitrate, which every forwarder's slot covers ([Roles](#roles)).
 
 ## Playback control
 
@@ -860,15 +906,15 @@ Every action in the system responds to one of these events:
 
 | Event | Source | Reaction |
 | --- | --- | --- |
-| `announce(peer)` / `unannounce(peer)` | Relay | Update presence. Plan or drop links. In an edit session, tell the consumer, which may change sequencer. |
+| `announce(peer)` / `unannounce(peer)` | Relay | Update presence. Plan or drop links. Place the requests that waited on the source. In an edit session, tell the consumer, which may change sequencer. |
 | `link open` / `link close` | WebTransport, WebRTC | Start or stop requesting through the link. Retry its requests elsewhere. |
 | `writable` | Writer `ready`, `bufferedamountlow` | Send the next queued object or batch |
-| `delivery done` | Link | Mark the request done. Update measured upload and RTT. |
+| `delivery done` | Link | Mark the request done. Update measured upload, RTT and throughput. |
 | `stored(key)` / `evicted(key)` | Store | Batch a `have` update. Resume playback after waiting. Tell the consumer. |
 | `storage-full` | Store | Stop fetching. Tell the consumer, which narrows, releases or drops. |
 | `file-changed` | Source, re-cutting a chunk | Reply `gone`. Tell the consumer. |
 | `interest` / `move` / `release` | Consumer | Replan requests. Evict chunks no interest covers. Update `caps.wants`. |
-| `progress(t)` | Engine media clock | The consumer moves its interests. Drift correction. |
+| `progress(t)` | Engine media clock | The consumer moves its interests. Check the deadlines of urgent requests. Drift correction. |
 | `started` / `paused` | Engine | Confirm a scheduled command |
 | `control(record)` | `source/control` | Schedule play, pause or seek at `atUs` with the engine |
 | `catalog(version)` | `source/catalog` | Update the tracks and bitrates shown |
@@ -1014,6 +1060,8 @@ The sync package needs these engine capabilities through public exports:
 | --- | --- |
 | Minimum video chunk length | 2 s, closed at the next keyframe |
 | Chunk index page | 64 chunks |
+| Requests out per link | 2, or more while their bytes are under throughput × RTT |
+| Requests the source holds per peer | 4 |
 | Urgent window | Playhead to playhead + 30 s |
 | Player interest | 2 min behind to 15 min ahead of the playhead |
 | Push horizon | 15 min ahead of the playhead |

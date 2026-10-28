@@ -165,12 +165,16 @@ test("an object that doesn't open, isn't a source record or isn't the session's 
 });
 
 test("each page of the index is replaced only by one listing more chunks, and passed on with the rest", async () => {
-  // Page 0 full, 64 chunks of 2 s, then page 1 with one chunk and with two.
+  // Page 0 full, 64 chunks of 2 s, then page 1 with one chunk and with two. Sizes don't matter
+  // here: any positive ones will do, such as the bounds themselves.
   const full = twoSeconds(64);
   const [first, oneMore, twoMore, catalogObject] = await Promise.all([
-    sealed({ kind: "index", page: { page: 0, bounds: full } }),
-    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000] } }),
-    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000, 133_000_000] } }),
+    sealed({ kind: "index", page: { page: 0, bounds: full, bytes: full.slice(1) } }),
+    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000], bytes: [1] } }),
+    sealed({
+      kind: "index",
+      page: { page: 1, bounds: [128_000_000, 130_000_000, 133_000_000], bytes: [1, 2] },
+    }),
     sealed({ kind: "catalog", catalog }),
   ]);
   expect([first.key, oneMore.key, twoMore.key]).toEqual(["index/0@64", "index/1@1", "index/1@2"]);
@@ -184,7 +188,10 @@ test("each page of the index is replaced only by one listing more chunks, and pa
     twoMore,
   ]);
   expect(kept).toEqual([true, true, false, true, true, false]);
-  expect(bob.records.bounds()).toEqual([...full, 130_000_000, 133_000_000]);
+  expect(bob.records.index()).toEqual({
+    bounds: [...full, 130_000_000, 133_000_000],
+    bytes: [...full.slice(1), 1, 2],
+  });
   expect(bob.reported.map((r) => r.kind)).toEqual(["index", "index", "catalog", "index"]);
   expect(bob.records.objects()).toEqual([catalogObject, twoMore, first]);
 });
@@ -198,9 +205,15 @@ test("the whole state takes every page of the index up to the last held, and non
   ]);
   // Page 0 one chunk short of full, then full, and page 1, which starts where the full page ends.
   const [short, full, next] = await Promise.all([
-    sealed({ kind: "index", page: { page: 0, bounds: twoSeconds(63) } }),
-    sealed({ kind: "index", page: { page: 0, bounds: twoSeconds(64) } }),
-    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000] } }),
+    sealed({
+      kind: "index",
+      page: { page: 0, bounds: twoSeconds(63), bytes: twoSeconds(63).slice(1) },
+    }),
+    sealed({
+      kind: "index",
+      page: { page: 0, bounds: twoSeconds(64), bytes: twoSeconds(64).slice(1) },
+    }),
+    sealed({ kind: "index", page: { page: 1, bounds: [128_000_000, 130_000_000], bytes: [1] } }),
   ]);
   const bob = peer();
   await receiveAll(bob.records, objects);

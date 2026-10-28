@@ -163,13 +163,16 @@ test("a joiner takes the chunk index with the rest of the state", async () => {
   const indexed = await holding(4);
   const page = await sealSourceRecord(session, content, {
     kind: "index",
-    page: { page: 0, bounds: [0, 2_000_000, 4_500_000] },
+    page: { page: 0, bounds: [0, 2_000_000, 4_500_000], bytes: [3_100_000, 4_200_000] },
   });
   await indexed.receive(page);
   const j = await joining([{ id: source, records: indexed }]);
   await j.ask.start([source], source);
   await j.network.settle();
-  expect(j.records.bounds()).toEqual([0, 2_000_000, 4_500_000]);
+  expect(j.records.index()).toEqual({
+    bounds: [0, 2_000_000, 4_500_000],
+    bytes: [3_100_000, 4_200_000],
+  });
   expect(j.records.objects()).toEqual([...objects, page]);
 });
 
