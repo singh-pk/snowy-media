@@ -266,3 +266,15 @@ test("a closed link drops its requests, and a later one starts afresh", async ()
   // a's chunk 1 was never read once its link closed.
   expect(f.at.reads).toEqual([0, 2, 2]);
 });
+
+test("a link that closes while its chunk is read is sent nothing", async () => {
+  const f = forwarder([0, 1], { a: 10, b: 10 });
+  f.ask("a", 0, "urgent");
+  f.server.closed("a");
+  // A cancel from a peer with no requests changes nothing.
+  f.server.requested("c", { type: "cancel", track: 0, index: 0 });
+  f.ask("b", 1, "urgent");
+  await f.until(1);
+  expect(f.events).toEqual(["deliver b media/0/1"]);
+  expect(f.at.reads).toEqual([0, 1]);
+});
