@@ -31,7 +31,7 @@ export type SourceSenderOptions = {
 };
 
 // The chunk being cut for a peer. The queue no longer holds it, so a cancel or the peer leaving
-// while it is cut drops it here instead.
+// while it is cut drops it here instead, and the peer asking for it again is the same request.
 function createCutting() {
   const state = {
     now: undefined as { peer: KeyId; slot: ChunkSlot; dropped: boolean } | undefined,
@@ -55,7 +55,15 @@ function createCutting() {
     if (now?.peer === peer && (slot === undefined || sameSlot(slot, now.slot))) now.dropped = true;
   }
 
-  return { start, end, drop };
+  // Whether `slot` is the peer's chunk being cut, which then goes to it even if dropped before.
+  function asked(peer: KeyId, slot: ChunkSlot) {
+    const now = state.now;
+    if (now?.peer !== peer || !sameSlot(slot, now.slot)) return false;
+    now.dropped = false;
+    return true;
+  }
+
+  return { start, end, drop, asked };
 }
 
 export function createSourceSender(options: SourceSenderOptions) {
@@ -106,7 +114,7 @@ export function createSourceSender(options: SourceSenderOptions) {
     try {
       while (!state.stopped) await step();
     } catch (error) {
-      options.stopped(error);
+      if (!state.stopped) options.stopped(error);
     }
   }
 
@@ -134,6 +142,7 @@ export function createSourceSender(options: SourceSenderOptions) {
       const control = checkChunkControl(value);
       if (control === undefined || state.stopped) return;
       if (control.type === "cancel") cutting.drop(link.peer, control);
+      if (control.type === "request" && cutting.asked(link.peer, control)) return;
       queue.requested(link.peer, control);
     });
     link.on("close", () => unlinked(link));

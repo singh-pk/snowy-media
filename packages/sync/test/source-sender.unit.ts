@@ -278,7 +278,7 @@ test("a cancel while its chunk is cut drops it, and others' or another chunk's d
   expect(s.heard.filter((event) => !event.startsWith("live"))).toEqual(["bob deliver media/0/1"]);
 });
 
-test("a peer leaving while its chunk is cut is sent it once, on the link it asks again on", async () => {
+test("a peer leaving while its chunk is cut, and asking again, is sent it once, on its new link", async () => {
   const s = source({ held: true });
   s.cut(1);
   const bob = s.link("bob");
@@ -295,9 +295,40 @@ test("a peer leaving while its chunk is cut is sent it once, on the link it asks
   cut.release();
   await s.until(3 + 1);
   await s.settle();
-  expect(s.at.asked).toEqual(["0:0", "0:0", "2:0", "1:0", "0:0"]);
+  // The chunk being cut is the one asked for again, so it isn't cut a second time.
+  expect(s.at.asked).toEqual(["0:0", "2:0", "1:0", "0:0"]);
   expect(s.heard.filter((event) => !event.startsWith("live"))).toEqual(["again deliver media/0/0"]);
   expect(s.at.stopped).toEqual([]);
+});
+
+test("a chunk asked for again while it is cut goes once and takes no room", async () => {
+  const s = source({ held: true });
+  s.cut(5);
+  const bob = s.link("bob");
+  bob.send({ type: "request", track: 0, index: 0, priority: "ahead" });
+  await s.settle();
+  const cut = s.holdCut();
+  s.release();
+  await cut.entered;
+  bob.send({ type: "request", track: 0, index: 0, priority: "urgent" });
+
+  for (const index of [1, 2, 3, 4]) {
+    bob.send({ type: "request", track: 0, index, priority: "background" });
+  }
+
+  await s.settle();
+  cut.release();
+  await s.until(15 + 5);
+  await s.settle();
+  // Bob's, cut once, and the live video chunk of the same index.
+  expect(s.at.asked.filter((slot) => slot === "0:0")).toHaveLength(2);
+  expect(s.heard.filter((event) => !event.startsWith("live"))).toEqual([
+    "bob deliver media/0/0",
+    "bob deliver media/0/1",
+    "bob deliver media/0/2",
+    "bob deliver media/0/3",
+    "bob deliver media/0/4",
+  ]);
 });
 
 test("stop ends sending, idle, waiting for the stream or cutting, and other messages are ignored", async () => {
@@ -333,4 +364,17 @@ test("stop ends sending, idle, waiting for the stream or cutting, and other mess
   await task();
   expect(cutting.at.asked).toEqual(["2:0"]);
   expect(cutting.heard).toEqual([]);
+
+  // A cut that fails once sending has stopped isn't reported.
+  const failing = source();
+
+  failing.at.cutting = () => {
+    failing.sender.stop();
+    throw new DOMException("file", "NotReadableError");
+  };
+
+  failing.cut(1);
+  await task();
+  expect(failing.at.asked).toEqual(["2:0"]);
+  expect(failing.at.stopped).toEqual([]);
 });
