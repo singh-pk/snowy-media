@@ -8,48 +8,16 @@
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
-import {
-  chunkKey,
-  encodeChunk,
-  HEADER,
-  openChunk,
-  type ChunkSlot,
-  type Packet,
-} from "../src/chunk";
+import { chunkKey, encodeChunk, HEADER, openChunk, type ChunkSlot } from "../src/chunk";
 import { createChunkCutter, type CutChunk } from "../src/chunk-cutter";
 import { recutChunk } from "../src/chunk-recut";
 import { contentKey, generateKeyPair, keyId, unseal, type Bytes } from "../src/crypto";
+import { AUDIO, demuxer, file, S, VIDEO, at, type Read } from "./support/demuxed";
 import { rejection } from "./support/rejection";
 
 const pair = await generateKeyPair();
 const sessionId = await keyId(pair.publicKey);
 const content = await contentKey(crypto.getRandomValues(new Uint8Array(32)), sessionId);
-const S = 1_000_000;
-const VIDEO = 0;
-const AUDIO = 1;
-
-type Read = readonly [number, Packet];
-
-function at(ptsS: number, keyframe = false, tag = 0): Packet {
-  const ptsUs = Math.round(ptsS * S);
-  return { ptsUs, dtsUs: ptsUs, durationUs: 40_000, keyframe, data: Uint8Array.of(tag) };
-}
-
-// Video keyframes every 1.5 s, so a chunk spans two GOPs and some keyframes start none, with a
-// frame between; audio every 0.5 s, each packet a keyframe as audio's are, stored 0.6 s ahead
-// of the video around it.
-function makeFile() {
-  const file: Read[] = [];
-
-  for (let i = 0; i < 12; i++) {
-    file.push([VIDEO, at(i * 1.5, true, i)], [VIDEO, at(i * 1.5 + 0.75, false, i)]);
-    for (const a of [0, 0.5, 1]) file.push([AUDIO, at(i * 1.5 + a + 0.6, true)]);
-  }
-
-  return file;
-}
-
-const file = makeFile();
 
 // What the source keeps of the first cut: each chunk's encoded bytes, whose header it stores.
 async function firstCut(packets: readonly Read[]) {
@@ -62,31 +30,6 @@ async function firstCut(packets: readonly Read[]) {
 }
 
 const encoded = await firstCut(file);
-
-// A demuxer over `packets`, sought to the latest video keyframe at or before `fromUs`, or with
-// `early` the one before that, as a seek index listing only some keyframes would.
-function demuxer(packets: readonly Read[], early = false) {
-  const seen = { reads: 0, stopped: false, from: [] as Array<number | undefined> };
-
-  async function* read(fromUs: number | undefined) {
-    seen.from.push(fromUs);
-    const keys = packets.flatMap(([track, p], i) =>
-      track === VIDEO && p.keyframe && p.ptsUs <= (fromUs ?? 0) ? [i] : [],
-    );
-    const start = fromUs === undefined ? 0 : (keys.at(early ? -2 : -1) ?? 0);
-
-    try {
-      for (const next of packets.slice(start)) {
-        seen.reads++;
-        yield next;
-      }
-    } finally {
-      seen.stopped = seen.reads < packets.length - start;
-    }
-  }
-
-  return { read, seen };
-}
 
 const header = (slot: ChunkSlot) => encoded.get(chunkKey(slot))?.subarray(0, HEADER);
 

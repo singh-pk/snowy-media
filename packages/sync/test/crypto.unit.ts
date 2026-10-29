@@ -3,7 +3,7 @@
 //
 // Keys, signatures and encryption (src/crypto.ts), in Chromium: key ids round-trip, signatures check
 // only against their key and data, and sealed objects open only under the same content key and
-// object key, each with a fresh nonce.
+// object key, each with a fresh nonce, at the size `sealedSize` gives.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -15,6 +15,7 @@ import {
   keyId,
   publicKey,
   seal,
+  sealedSize,
   sign,
   unseal,
   verify,
@@ -96,4 +97,12 @@ test("a sealed object doesn't open as another object, under another key, or alte
 test("the content key can't be exported", async () => {
   const key = await contentKey(secret, "session");
   expect(key.extractable).toBe(false);
+});
+
+test("a sealed object is the size sealedSize gives for its plaintext", async () => {
+  const key = await contentKey(secret, "session");
+  const sizes = [0, 1, 1000];
+  const sealed = await Promise.all(sizes.map((n) => seal(key, "media/0/0", new Uint8Array(n))));
+
+  expect(sealed.map((s) => s.byteLength)).toEqual(sizes.map(sealedSize));
 });

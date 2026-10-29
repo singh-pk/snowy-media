@@ -48,7 +48,7 @@ export function createChunkCutter(options: ChunkCutterOptions) {
   const first = from?.index ?? 0;
   const starts: number[] = [];
   const held = new Map(tracks.map((track) => [track, [] as Held[]]));
-  const state = { video: [] as Packet[], ended: false };
+  const state = { video: [] as Packet[], ended: false, lost: false };
   const open = () => first + starts.length - 1;
 
   // Chunk `index` of another track takes what was read from the keyframe starting the chunk
@@ -89,9 +89,12 @@ export function createChunkCutter(options: ChunkCutterOptions) {
   function videoPacket(read: Packet) {
     const startUs = starts.at(-1);
 
-    // What comes before the first keyframe can't be decoded.
+    // What comes before the first keyframe can't be decoded. Keyframes come in pts order, so one
+    // past `from.startUs` before it means that keyframe is gone.
     if (startUs === undefined) {
-      if (!read.keyframe || (from !== undefined && read.ptsUs !== from.startUs)) return;
+      if (!read.keyframe) return;
+      state.lost = from !== undefined && read.ptsUs > from.startUs;
+      if (from !== undefined && read.ptsUs !== from.startUs) return;
       starts.push(read.ptsUs);
     } else if (read.keyframe && read.ptsUs >= startUs + MIN_CHUNK_US) closeVideo(read.ptsUs);
 
@@ -101,14 +104,16 @@ export function createChunkCutter(options: ChunkCutterOptions) {
   /**
    * A packet the demuxer read, in file order. Video before the first keyframe, and packets of a
    * track not cut, are left out, as are another track's packets read too late or too early for
-   * the chunk their pts falls in.
+   * the chunk their pts falls in. Returns false once the keyframe at `from.startUs` can't come,
+   * as a later one came first: the rest of the file cuts nothing, and needn't be read.
    */
   function packet(track: number, read: Packet) {
-    if (state.ended) return;
+    if (state.ended) return !state.lost;
     if (track === video) videoPacket(read);
     // Read before cutting starts, it could only be in chunk `from.index`, which isn't cut.
     else if (from === undefined || starts.length > 0)
       held.get(track)?.push({ packet: read, read: open() });
+    return !state.lost;
   }
 
   function lastEnd() {

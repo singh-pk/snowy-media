@@ -7,6 +7,7 @@
 // ever reuse one.
 
 const NONCE = 12;
+const TAG = 16;
 const KEY = 32;
 // An Ed25519 signature, as unpadded base64url.
 const SIG = /^[A-Za-z0-9_-]{86}$/;
@@ -124,6 +125,9 @@ export async function seal(key: CryptoKey, objectKey: string, plaintext: Bytes) 
   sealed.set(new Uint8Array(ciphertext), NONCE);
   return sealed;
 }
+
+/** The size of what `seal` makes of `plain` bytes. */
+export const sealedSize = (plain: number) => NONCE + plain + TAG;
 
 /** Decrypts what `seal` made under the same key and object key; rejects anything else. */
 export async function unseal(key: CryptoKey, objectKey: string, sealed: Bytes) {
