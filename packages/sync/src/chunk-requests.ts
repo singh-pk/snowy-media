@@ -19,9 +19,9 @@ type ChunkRequest = { type: "request"; priority: FetchPriority } & ChunkSlot;
 /** Asks the sender to stop sending a chunk. */
 type ChunkCancel = { type: "cancel" } & ChunkSlot;
 /** The sender has no room for this asker now. */
-type ChunkBusy = { type: "busy" } & ChunkSlot;
+export type ChunkBusy = { type: "busy" } & ChunkSlot;
 /** The sender doesn't hold the chunk, or can't cut it again. */
-type ChunkGone = { type: "gone" } & ChunkSlot;
+export type ChunkGone = { type: "gone" } & ChunkSlot;
 
 export type ChunkControl = ChunkRequest | ChunkCancel | ChunkBusy | ChunkGone;
 
