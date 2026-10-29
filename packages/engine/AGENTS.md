@@ -22,10 +22,10 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | Path | What it holds |
 | --- | --- |
 | `src/index.ts` | the public API, and the player on the main thread: open, compose, play, pause, seek and scrub |
-| `src/composition.ts` | what a composition is to the engine: the shape of the plan it reads, and the one clip of a plan it plays, checked |
+| `src/composition.ts` | what a composition is to the engine: the shape of the plan it reads, and the clips of a plan it plays, checked |
 | `src/playback.ts` | one play on the main thread: its rings and audio output, the output timestamp it publishes, and whether it may start and is heard |
 | `src/platform.ts` | the platform check on the main thread, and `UnsupportedPlatformError` |
-| `src/media.worker.ts` | the media worker: reads and demuxes the file, and decodes and resamples its audio, with the FFmpeg core |
+| `src/media.worker.ts` | the media worker: reads and demuxes the file, or a composition's clips in turn, and decodes and resamples its audio, with the FFmpeg core |
 | `src/audio-decoder.ts` | the media worker's audio decoder: a queue of an audio stream's packets, decoded and resampled into the PCM ring |
 | `src/io.ts` | the media worker's synchronous reads from a `File` |
 | `src/ring.ts` | the packet ring between two threads |
@@ -33,6 +33,7 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | `src/video.ts` | the render worker's video output: decoding from the packet ring, with WebCodecs or FFmpeg, and presentation |
 | `src/wasm-video.ts` | the render worker's decoders for the codecs WebCodecs does not decode, in the video decode worker |
 | `src/video.worker.ts` | the video decode worker: decodes those codecs with the FFmpeg `video` and `video-ext` modules |
+| `src/track.ts` | the render worker's video track: an output per clip, each reading the packet ring on from where the last stopped, shown by the clock |
 | `src/frames.ts` | the frame queue, in presentation order and bounded by bytes |
 | `src/decoding.ts` | how far a video decoder has decoded, whatever order it emits frames in |
 | `src/compositor.ts` | the WebGPU compositor: a frame uploaded and converted from Y′CbCr as FFmpeg converts it, turned by its display matrix, fitted into the canvas |

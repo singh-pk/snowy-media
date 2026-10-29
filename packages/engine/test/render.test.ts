@@ -11,8 +11,9 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { decodable, inPage, launch } from "./support/browsers";
-import { MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import { MEDIA_WORKER, PAGE, serveEngine, TRACK_PAGE } from "./support/serve";
 import type * as PageSupport from "./support/page";
+import type * as TrackSupport from "./support/track";
 
 interface Video {
   id: number;
@@ -214,6 +215,73 @@ test("a decoder closed partway through handing over a packet leaves the next dec
     ),
   );
   expect(got).toEqual({ partial: true, ids: frames });
+}, 60_000);
+
+type TrackClip = { in: number; out: number; offset: number };
+
+// Plays `clips` (microseconds) of `file` as a track (renderTrack, in test/support/track.ts) and
+// returns what it showed at each of `times`, with the frames due then by native FFmpeg's
+// timestamps: the latest at or before the time less the offset of the clip that holds it.
+async function trackInPage(file: string, clips: TrackClip[], times: number[]) {
+  const { video } = expected[file] ?? {};
+  if (!video) throw new Error(`no ${file} in expected.json`);
+  const scale = video.scale ?? 1;
+  const [width, height] = [video.shown[0] / scale, video.shown[1] / scale];
+  const got = await inPage(server.url.href, (tab) =>
+    tab.evaluate(
+      async ({ page, track, worker, n, stream, play }) => {
+        const support: typeof PageSupport = await import(page);
+        const tracks: typeof TrackSupport = await import(track);
+        const { media, params } = await support.openVideo(worker, n, stream);
+        const shown = await tracks.renderTrack(media, stream, params, play);
+        media.stop();
+        return shown;
+      },
+      {
+        page: PAGE,
+        track: TRACK_PAGE,
+        worker: MEDIA_WORKER,
+        n: file,
+        stream: video.id,
+        play: { clips, times, width, height },
+      },
+    ),
+  );
+  const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
+  const micros = video.pts.map((pts) => Math.round((pts * num * 1e6) / den));
+
+  const frames = times.map((t) => {
+    const clip = clips.find((c) => t >= c.in + c.offset && t < c.out + c.offset);
+    return clip ? micros.findLastIndex((m) => m <= t - clip.offset) : -1;
+  });
+
+  return { ...got, frames };
+}
+
+// Three clips, the second cut back in the file straight after the first, the third after a gap.
+// Shown first well into the third, the track passes the first two before their outputs have read
+// them; they read on to their cuts without decoding, and the third shows the frame due there.
+test("a track shows a later clip at once, reading past the clips before it", async () => {
+  const clips = [
+    { in: 1_200_000, out: 2_900_000, offset: -700_000 },
+    { in: 100_000, out: 1_800_000, offset: 2_100_000 },
+    { in: 1_100_000, out: 2_600_000, offset: 3_300_000 },
+  ];
+  const got = await trackInPage("h264-aac.mp4", clips, [4_500_000, 5_500_000]);
+  expect(got.shown).toEqual(got.frames);
+  expect(got.ahead).toEqual([true]);
+}, 60_000);
+
+// A cut straight to 3 s into a file whose only keyframe is at 0 s: the next clip decodes from
+// there to its in point before the cut, more than the second the track decodes ahead of the clock.
+test("a track decodes the next clip up to its in point before the cut", async () => {
+  const clips = [
+    { in: 0, out: 500_000, offset: 0 },
+    { in: 3_000_000, out: 3_500_000, offset: -2_500_000 },
+  ];
+  const got = await trackInPage("scrub-4k-h264-aac.mp4", clips, [450_000, 500_000]);
+  expect(got.shown).toEqual(got.frames);
+  expect(got.ahead).toEqual([true]);
 }, 60_000);
 
 for (const [file, { video }] of Object.entries(expected)) {

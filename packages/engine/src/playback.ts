@@ -7,14 +7,15 @@
 
 import { createAudioOutput } from "./audio";
 import type { VideoParams } from "./codec";
+import { type Clip, endOf } from "./composition";
 import { createPcmControl, createPcmProducer, createPcmRing } from "./pcm";
-import type { FromMedia, FromRender, ToMedia, ToRender } from "./protocol";
+import type { FromMedia, FromRender, ToMedia, ToRender, VideoClip } from "./protocol";
 import { closeRing, createRing, RING_CAPACITY } from "./ring";
 
 // The PCM ring's length at `rate`: the smallest power of two that holds a second, so the media
 // worker can demux a second of video ahead of the audio it decodes.
 const pcmFrames = (rate: number) => 2 ** Math.ceil(Math.log2(rate));
-// The packet ring of a file without video, which only ever carries the END record.
+// The packet ring of a play without video, which only ever carries the END record.
 const NO_VIDEO_RING = 64;
 // The audio buffered before a play starts, in seconds, so a slow start does not underrun.
 const PREROLL = 0.25;
@@ -30,7 +31,7 @@ const CHANNELS = 2;
 type Clock = ReturnType<typeof createPcmControl>;
 type Output = ReturnType<typeof createOutputClock>["output"];
 type DemuxMessage = Omit<Extract<ToMedia, { type: "demux" }>, "id">;
-type PlayMessage = Extract<ToRender, { type: "play" }>;
+type ReadMessage = DemuxMessage | Omit<Extract<ToMedia, { type: "track" }>, "id">;
 
 /** How far the render worker has decoded, as it last reported, and for which play. */
 export type VideoReport = Omit<Extract<FromRender, { type: "video" }>, "type">;
@@ -47,8 +48,8 @@ export interface Playback {
 
 export interface PlaybackHost {
   render: Worker;
-  /** Sends the media worker a demux request; `buffered` runs once its audio is buffered. */
-  demux: (message: DemuxMessage, buffered: () => void) => Promise<FromMedia>;
+  /** Sends the media worker a read request; `buffered` runs once its audio is buffered. */
+  demux: (message: ReadMessage, buffered: () => void) => Promise<FromMedia>;
   /** Has whatever waits on the engine's state look again. */
   changed: () => void;
   /** Whether play `id` is what plays, so its failures count. */
@@ -69,13 +70,13 @@ export interface PlaybackOptions {
 }
 
 /**
- * The streams of the open file a play plays, and the clip they are cut to (src/composition.ts),
- * in microseconds of the file's time: from `in` to `out`, in a composition that ends at `end`.
+ * What a play plays: the open file's streams, or a composition's clips (src/composition.ts) in
+ * the order they play, on a composition that ends at `end`, in microseconds.
  */
 export interface Played {
   video: number | undefined;
   audio: number | undefined;
-  clip?: { in: number; out: number; end: number } | undefined;
+  track?: { clips: Clip[]; end: number } | undefined;
 }
 
 interface Reading {
@@ -85,41 +86,66 @@ interface Reading {
   pcm: SharedArrayBuffer;
   from: number;
   params: VideoParams | undefined;
-  // The audio stream it plays, unless it is past the clip.
   audio: number | undefined;
   played: Played;
+  // A composition's clips the play reaches.
+  clips: Clip[];
   preroll: number;
 }
 
-// A clip's video and audio are read from its in point at the earliest, while its clock starts
-// where the play starts. Resolves once the media worker has read what the play plays, or at once
-// with nothing to read, as in the gap after a clip, where the clock runs on to the composition's
-// end.
-function startReading(r: Reading, buffered: () => void): Promise<unknown> {
-  const { host, id, ring, pcm, from, params, audio, played } = r;
-  const { clip } = played;
-  const read = clip ? Math.max(from, clip.in) : from;
+// The clips a play from `from` reaches, the first cut to start there.
+function clipsFrom(clips: Clip[], from: number) {
+  const reached = clips.filter((c) => endOf(c) > from);
+  const [first] = reached;
+  // copy: the clip the play starts in, once a play, so the plan's own is left as it is.
+  if (first) reached[0] = { ...first, in: Math.max(first.in, from - first.offset) };
+  return reached;
+}
 
-  if (params) {
-    const play: PlayMessage = { type: "play", id, ring, params, pcm, from: read };
-    if (clip) play.window = { start: from, in: clip.in, out: clip.out };
-    host.render.postMessage(play);
-  } else if (clip) {
-    host.render.postMessage({ type: "clear" } satisfies ToRender);
-  }
+// The clips of `clips` with video, as the render worker plays them.
+const videoOf = (clips: Clip[], video: Record<number, VideoParams>) =>
+  clips.flatMap(({ video: stream, ...place }): VideoClip[] => {
+    const params = stream === undefined ? undefined : video[stream];
+    return params ? [{ params, in: place.in, out: place.out, offset: place.offset }] : [];
+  });
 
-  if (!params && audio === undefined) {
+// Resolves once the media worker has read what the play plays, or at once with nothing to read,
+// as after the last clip, where the clock runs on in silence to the composition's `end`.
+function startTrack(
+  r: Reading,
+  end: number,
+  video: Record<number, VideoParams>,
+  buffered: () => void,
+) {
+  const { host, id, ring, pcm, from, clips } = r;
+  const shown = videoOf(clips, video);
+  if (shown.length > 0)
+    host.render.postMessage({ type: "play", id, ring, pcm, from, clips: shown });
+  else host.render.postMessage({ type: "clear" } satisfies ToRender);
+
+  if (clips.length === 0) {
     const producer = createPcmProducer(pcm);
     producer.finish();
-    if (clip) producer.reach(clip.end / 1e6);
+    producer.reach(end / 1e6);
     buffered();
     return Promise.resolve();
   }
 
+  return host.demux({ type: "track", ring, pcm, from, clips, end, preroll: r.preroll }, buffered);
+}
+
+// A file's video and audio, read from `from`; its video plays as one clip to its end.
+function startReading(r: Reading, buffered: () => void): Promise<unknown> {
+  const { host, id, ring, pcm, from, params, audio, played } = r;
+
+  if (params) {
+    const clips = [{ params, in: from, out: Infinity, offset: 0 }];
+    host.render.postMessage({ type: "play", id, ring, pcm, from, clips });
+  }
+
   const streams = params && played.video !== undefined ? [played.video] : [];
-  const message: DemuxMessage = { type: "demux", ring, streams, from: read, pcm };
+  const message: DemuxMessage = { type: "demux", ring, streams, from, pcm };
   if (audio !== undefined) message.audio = { stream: audio, preroll: r.preroll };
-  if (clip) message.clip = { start: from, until: clip.out, end: clip.end };
   return host.demux(message, buffered);
 }
 
@@ -217,13 +243,16 @@ function createReadiness({ host, id, hasVideo, demux, output }: ReadinessOptions
 
 export async function startPlayback(options: PlaybackOptions): Promise<Playback> {
   const { host, context, id, opened, played, from } = options;
-  // In the gap after a clip, nothing of it plays.
-  const reads = !played.clip || from < played.clip.out;
-  const audio = reads ? played.audio : undefined;
-  const params = reads && played.video !== undefined ? opened?.video[played.video] : undefined;
+  const { track } = played;
+  const video = opened?.video ?? {};
+  const audio = track ? undefined : played.audio;
+  const params = !track && played.video !== undefined ? video[played.video] : undefined;
 
-  if (audio === undefined && !params && !played.clip)
+  if (!track && audio === undefined && !params)
     throw new Error("play: the file has no video or audio to play");
+
+  const clips = track ? clipsFrom(track.clips, from) : [];
+  const hasVideo = Boolean(params) || clips.some((c) => c.video !== undefined);
 
   const frames = pcmFrames(context.sampleRate);
   const pcm = createPcmRing(frames, CHANNELS, context.sampleRate, from / 1e6);
@@ -241,22 +270,26 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
     throw new DOMException("play: stopped while it started", "AbortError");
   }
 
-  const ring = createRing(params ? RING_CAPACITY : NO_VIDEO_RING);
+  const ring = createRing(hasVideo ? RING_CAPACITY : NO_VIDEO_RING);
   const demux = { buffered: false, done: false };
   const preroll = PREROLL * context.sampleRate;
-  const reading = { host, id, ring, pcm, from, params, audio, played, preroll };
+  const reading = { host, id, ring, pcm, from, params, audio, played, clips, preroll };
 
-  const demuxed = startReading(reading, () => {
+  const buffered = () => {
     demux.buffered = true;
     host.changed();
-  });
+  };
+
+  const demuxed = track
+    ? startTrack(reading, track.end, video, buffered)
+    : startReading(reading, buffered);
 
   const frame = { id: 0 };
   const { output, publish } = createOutputClock(context, clock, host.changed);
   const { primed, drawn, heard } = createReadiness({
     host,
     id,
-    hasVideo: Boolean(params),
+    hasVideo,
     demux,
     output,
   });

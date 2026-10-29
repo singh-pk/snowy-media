@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // What a composition is to the engine (docs/architecture.md#compositions): the shape of the plan
-// it reads, which the render plan of @snowy-media/timeline fits, and the one clip of a plan it
+// it reads, which the render plan of @snowy-media/timeline fits, and the clips of a plan it
 // plays, checked. Times on the composition are microseconds; a source point is in its stream's
 // time base.
 
@@ -65,7 +65,7 @@ export interface Composition {
 }
 
 /**
- * The one clip of a composition: the asset and the streams of it that play, and where, in
+ * A clip of a composition: the asset and the streams of it that play, and where, in
  * microseconds: from `in` to `out` in the file, played on the composition from `in + offset`.
  */
 export interface Clip {
@@ -77,6 +77,12 @@ export interface Clip {
   out: number;
   offset: number;
 }
+
+type Placed = Pick<Clip, "in" | "out" | "offset">;
+
+/** Where a clip starts and ends on the composition, in microseconds. */
+export const startOf = (c: Placed) => c.in + c.offset;
+export const endOf = (c: Placed) => c.out + c.offset;
 
 const unsupported = (what: string) =>
   new DOMException(`compose: ${what} is not supported`, "NotSupportedError");
@@ -103,8 +109,14 @@ function sourceKey({ source }: PlanLayer) {
   return "generator" in source ? `generator:${source.generator}` : `sequence:${source.sequence}`;
 }
 
+// The file `layer` reads, the only source played.
+function fileOf({ source }: PlanLayer) {
+  if (!("asset" in source)) throw unsupported("a source other than a file");
+  return source;
+}
+
 function checkLayer(layer: PlanLayer) {
-  if (!("asset" in layer.source)) throw unsupported("a source other than a file");
+  fileOf(layer);
   const [num, den] = layer.speed;
   if (num !== den) throw unsupported(`a speed of ${num}/${den}`);
   if (layer.effects.length > 0) throw unsupported("an effect");
@@ -126,10 +138,9 @@ function checkAudio(layer: PlanAudioLayer) {
   if (layer.fadeIn !== layer.start || layer.fadeOut !== layer.end) throw unsupported("a fade");
 }
 
-const streamOf = (layer: PlanLayer | undefined) =>
-  layer && "asset" in layer.source ? layer.source.stream : undefined;
+const streamOf = (layer: PlanLayer | undefined) => layer && fileOf(layer).stream;
 
-const assetOf = ({ source }: PlanLayer) => ("asset" in source ? source.asset : undefined);
+const assetOf = (layer: PlanLayer) => fileOf(layer).asset;
 
 // Where `layer` reads its file from and to, and its offset on the composition, in microseconds.
 function placeOf(layer: PlanLayer) {
@@ -149,37 +160,82 @@ function inStep(v: PlanVideoLayer, a: PlanAudioLayer) {
   return assetOf(v) === assetOf(a) && v.start === a.start && v.end === a.end && near;
 }
 
-/**
- * The one clip `plan` plays within `duration` microseconds, or undefined for a plan that plays
- * nothing there. Throws a NotSupportedError for what the engine does not play: more than one
- * layer of video or audio, video and audio that are not of one file in step, a source other than
- * a file, a transition, an effect, a speed other than 1, and any opacity, blend, transform, gain,
- * pan or fade but the plain one.
- */
-export function clipOf(plan: Plan, duration: number): Clip | undefined {
-  const { video, audio } = layersOf(plan);
-  if (video.size > 1) throw unsupported("more than one video layer");
-  if (audio.size > 1) throw unsupported("more than one audio layer");
-  const v = video.values().next().value;
-  const a = audio.values().next().value;
-  if (v) checkVideo(v);
-  if (a) checkAudio(a);
+type Pair =
+  | { v: PlanVideoLayer; a: PlanAudioLayer | undefined }
+  | { v: undefined; a: PlanAudioLayer };
+
+// Layers that may be in step: of one asset, placed alike.
+const alike = (layer: PlanLayer) => `${assetOf(layer)}:${layer.start}:${layer.end}`;
+
+// Each video layer with the audio layer in step with it, if there is one, and every other layer
+// alone. Only layers of one asset placed alike can be in step, so only those are compared.
+function pairsOf(video: Iterable<PlanVideoLayer>, audio: Iterable<PlanAudioLayer>) {
+  const unpaired = Map.groupBy(audio, alike);
+  const pairs: Pair[] = [];
+
+  for (const v of video) {
+    const candidates = unpaired.get(alike(v)) ?? [];
+    const at = candidates.findIndex((a) => inStep(v, a));
+    pairs.push({ v, a: candidates[at] });
+    if (at >= 0) candidates.splice(at, 1);
+  }
+
+  for (const left of unpaired.values()) for (const a of left) pairs.push({ v: undefined, a });
+  return pairs;
+}
+
+// The clip of `pair`, cut to the part that plays within `duration`, or undefined if none does.
+function clipOf({ v, a }: Pair, duration: number): Clip | undefined {
   const first = v ?? a;
-  if (!first || !("asset" in first.source)) return undefined;
-  if (v && a && !inStep(v, a)) throw unsupported("video and audio that are not in step");
-  // The part of the clip that plays within the composition, in the file's time.
   const { offset, ...place } = placeOf(first);
+  // In the file's time.
   const from = Math.max(place.in, -offset);
   const to = Math.min(place.out, duration - offset);
   if (from >= to) return undefined;
-  const asset = first.source.asset;
   return {
     clip: first.clip,
-    asset,
+    asset: assetOf(first),
     video: streamOf(v),
     audio: streamOf(a),
     in: from,
     out: to,
     offset,
   };
+}
+
+// Throws unless clip `b`, which starts no earlier than `a`, starts once `a` has ended.
+function checkCut(a: Clip, b: Clip) {
+  if (startOf(b) >= endOf(a)) return;
+  const both = (kind: "video" | "audio") => a[kind] !== undefined && b[kind] !== undefined;
+  if (both("video")) throw unsupported("more than one video layer at a time");
+  if (both("audio")) throw unsupported("more than one audio layer at a time");
+  throw unsupported("video and audio that are not in step");
+}
+
+/**
+ * The clips `plan` plays within `duration` microseconds, in the order they play: each a layer
+ * of video and a layer of audio of one file in step, or either alone. Throws a NotSupportedError
+ * for what the engine does not play: clips that play at the same time, as video and audio that
+ * are not in step do, clips of more than one file, a source other than a file, a transition, an
+ * effect, a speed other than 1, and any opacity, blend, transform, gain, pan or fade but the
+ * plain one.
+ */
+export function clipsOf(plan: Plan, duration: number): Clip[] {
+  const { video, audio } = layersOf(plan);
+  for (const v of video.values()) checkVideo(v);
+  for (const a of audio.values()) checkAudio(a);
+  const clips = pairsOf(video.values(), audio.values()).flatMap((pair) => {
+    const clip = clipOf(pair, duration);
+    return clip ? [clip] : [];
+  });
+  clips.sort((a, b) => startOf(a) - startOf(b));
+
+  for (const [i, clip] of clips.entries()) {
+    const before = clips[i - 1];
+    if (before) checkCut(before, clip);
+  }
+
+  const asset = clips[0]?.asset;
+  if (clips.some((c) => c.asset !== asset)) throw unsupported("clips of more than one file");
+  return clips;
 }

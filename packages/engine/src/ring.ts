@@ -38,6 +38,8 @@ export const RING_CAPACITY = 1 << 23;
 export const END = -1;
 /** The stream of the packet a consumer gets in place of the rest once the producer has failed. */
 export const FAILED = -2;
+/** The stream of the record that follows a clip's last packet, before the next clip's first. */
+export const CUT = -3;
 /**
  * FFmpeg's values the records carry, AV_PKT_FLAG_KEY and AV_NOPTS_VALUE, here so a consumer
  * need not load FFmpeg for them (test/ring.unit.ts checks them).
@@ -47,7 +49,7 @@ export const NO_TIMESTAMP = -(2n ** 63n);
 
 /** A packet as the consumer sees it. `data` is valid until `release`. */
 export interface Packet {
-  /** The stream index, END or FAILED. */
+  /** The stream index, END, CUT or FAILED. */
   stream: number;
   /** AV_PKT_FLAG_* bits, KEY_FLAG among them. */
   flags: number;
@@ -102,7 +104,7 @@ type Views = ReturnType<typeof views>;
  * it keeps for every packet, so writing a packet allocates nothing.
  */
 export interface OutgoingPacket {
-  /** The stream index, or END. */
+  /** The stream index, END or CUT. */
   stream: number;
   flags: number;
   pts: bigint;
@@ -243,6 +245,8 @@ export function createProducer(ring: SharedArrayBuffer) {
   const piece: Piece = { offset: 0, size: 0, mark: 0 };
   const ending = createOutgoingPacket(bytes);
   ending.stream = END;
+  const cutting = createOutgoingPacket(bytes);
+  cutting.stream = CUT;
 
   /**
    * Copies `packet` into a record, waiting for room. False once the consumer has closed the
@@ -315,6 +319,8 @@ export function createProducer(ring: SharedArrayBuffer) {
     end: () => write(ending),
     /** Writes the END record if the ring has room for it, as `offer`. */
     offerEnd: () => offer(ending),
+    /** Writes the CUT record if the ring has room for it, as `offer`. */
+    offerCut: () => offer(cutting),
   });
 }
 

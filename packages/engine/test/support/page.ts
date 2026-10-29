@@ -55,7 +55,7 @@ function crc32(data: Uint8Array) {
 // This page is test/dist/test/support/page.js; the engine's workers are in test/dist.
 const startVideoWorker = () =>
   new Worker(new URL("../../video.worker.js", import.meta.url), { type: "module" });
-const wasm = createWasmVideo(startVideoWorker);
+export const wasm = createWasmVideo(startVideoWorker);
 
 /** The decoders in a video decode worker of their own, its ring `capacity` bytes. */
 export const startDecoders = (capacity: number) => createWasmVideo(startVideoWorker, capacity);
@@ -152,8 +152,8 @@ export async function hashRing(ring: SharedArrayBuffer, dts: boolean) {
  * starts, so it underruns only at the end. Returns the media time of the first frame; the
  * clock's media time less its context time, every SAMPLE_FRAMES frames while it runs; the
  * clock at the end; when channel 0 clicks, in context time; and, in stereo, the probe of what
- * played (test/support/audio.ts). A clip (`clip`, src/protocol.ts) is read from `from`, its clock
- * starting at `start`.
+ * played (test/support/audio.ts). A track (src/protocol.ts) plays the stream's `clips`, in
+ * microseconds of the file, `offset` later on a clock that starts at `from` and runs on to `end`.
  */
 export async function play(
   media: ReturnType<typeof startMedia>,
@@ -163,13 +163,13 @@ export async function play(
     seconds,
     channels,
     frames,
-    clip,
+    track,
   }: Record<"seconds" | "channels" | "frames", number> & {
     worklet: string;
-    clip?: { from: number; start: number; until: number; end: number };
+    track?: { from: number; clips: { in: number; out: number; offset: number }[]; end: number };
   },
 ) {
-  const start = (clip?.start ?? 0) / 1e6;
+  const start = (track?.from ?? 0) / 1e6;
   const pcm = createPcmRing(2 ** Math.ceil(Math.log2(frames)), channels, PCM_RATE, start);
   const control = createPcmControl(pcm);
   const length = seconds * PCM_RATE;
@@ -182,10 +182,12 @@ export async function play(
   // No packets: the ring only gets the END record.
   const ring = createRing(64);
   const audio = { stream, preroll: 0 };
-  const from = clip?.from ?? 0;
-  const until = clip && { start: clip.start, until: clip.until, end: clip.end };
-  const request = { type: "demux" as const, ring, streams: [], from, pcm, audio };
-  await media.request(until ? { ...request, clip: until } : request);
+  const clip = { clip: "", asset: "", video: undefined, audio: stream };
+  const clips = track?.clips.map((c) => ({ ...c, ...clip }));
+  const demux = { type: "demux" as const, ring, streams: [], from: 0, pcm, audio };
+  await media.request(
+    track && clips ? { type: "track", ring, pcm, ...track, clips, preroll: 0 } : demux,
+  );
   const offsets: number[] = [];
 
   // Samples the clock, which only the audio thread moves, with rendering suspended at
@@ -515,12 +517,14 @@ export async function failDemux(
   context.configure({ device, format, alphaMode: "opaque" });
   const ring = createRing(RING_CAPACITY);
   const compositor = createCompositor(device, context, format);
-  const output = createVideoOutput(ring, p, { compositor, wasm });
+  const consumer = createConsumer(ring);
+  const output = createVideoOutput(ring, p, { compositor, wasm, consumer });
   const results = await Promise.allSettled([
     media.request({ type: "demux", ring, streams: [stream], from: -1 }),
     output.done,
   ]);
   output.close();
+  consumer.close();
   device.destroy();
   const [demuxed, done] = results;
   const message = demuxed.status === "rejected" ? String(demuxed.reason) : "replied";
@@ -531,7 +535,7 @@ export async function failDemux(
 const GREEN = { channels: 4, offset: 1 };
 
 /** A `width` × `height` WebGPU canvas on a device of its own, whose drawing can be read back. */
-async function readableCanvas(width: number, height: number) {
+export async function readableCanvas(width: number, height: number) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("no GPU adapter");
   const device = await adapter.requestDevice();
@@ -549,7 +553,7 @@ async function readableCanvas(width: number, height: number) {
  * Reads back what was just drawn into a `width` × `height` canvas on `device`, as its pixels
  * with rows packed.
  */
-function createReadBack(device: GPUDevice, width: number, height: number) {
+export function createReadBack(device: GPUDevice, width: number, height: number) {
   // Rows of a texture copy are a multiple of 256 bytes apart.
   const stride = Math.ceil((width * 4) / 256) * 256;
   const buffer = device.createBuffer({
@@ -613,9 +617,11 @@ export async function render(
   // Wakes the wait for frames below on every change in how far decoding is.
   const decoding = { changed: () => {} };
   const compositor = createCompositor(device, context, format);
+  const consumer = createConsumer(ring);
   const output = createVideoOutput(ring, p, {
     compositor,
     wasm: rings?.decoders ?? wasm,
+    consumer,
     changed: () => decoding.changed(),
   });
   const shown: { drawn: boolean; id: number }[] = [];
@@ -666,6 +672,7 @@ export async function render(
     }
   } finally {
     output.close();
+    consumer.close();
     await demuxed;
     device.destroy();
   }

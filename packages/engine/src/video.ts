@@ -11,7 +11,7 @@ import { createRoute } from "./measure";
 import type { Picture } from "./pictures";
 import { createDecodeTracker } from "./decoding";
 import { createFrameQueue } from "./frames";
-import { createConsumer, END, FAILED, KEY_FLAG, NO_TIMESTAMP, type Packet } from "./ring";
+import { type createConsumer, CUT, END, FAILED, KEY_FLAG, NO_TIMESTAMP, type Packet } from "./ring";
 import type { createWasmVideo, DecodedFrame, Decoder, DecoderEvents } from "./wasm-video";
 
 /**
@@ -57,21 +57,23 @@ const frameBytes = (frame: DecodedFrame) =>
 export interface VideoOutputOptions {
   compositor: ReturnType<typeof createCompositor>;
   wasm: ReturnType<typeof createWasmVideo>;
+  /** The packet ring's consumer, which outputs read from in turn and which it never closes. */
+  consumer: ReturnType<typeof createConsumer>;
   changed?: () => void;
-  freed?: () => void;
   from?: number;
 }
 
 function createState(from: number) {
   return {
     shown: undefined as Picture | undefined,
-    // Whether the canvas is black, outside a clip, with no picture shown.
-    blank: false,
+    // Whether its last record, END or CUT, has been read; and whether the decoder has decoded
+    // every packet before it.
+    read: false,
     ended: false,
     // Waiting for a packet, the ring being empty.
     waiting: false,
-    // The media time last shown. Decoding runs `TIME_AHEAD` past it or past `first`, the first
-    // frame's timestamp, whichever is later.
+    // The media time last shown. Decoding runs `TIME_AHEAD` past it, past `first`, the first
+    // frame's timestamp, or past `from`, whichever is latest.
     at: -Infinity,
     // The latest frame taken as due: the ones before it are closed, so it goes up once it is
     // uploaded even if the time then stops short of it, as a pause stops the clock short of
@@ -87,6 +89,8 @@ function createState(from: number) {
     // Where it plays from, which a scrub moves on, and whether a scrub has moved it.
     from,
     moved: false,
+    // Whether the clock has passed it, so it reads on to its last record without decoding.
+    passed: false,
     closed: false,
   };
 }
@@ -214,9 +218,10 @@ function decoderEvents(o: Shared): DecoderEvents {
 }
 
 // Whether every frame is decoded to TIME_AHEAD past the media time: measured from what the
-// decoder has let out, not its latest frame, so a frame it holds back is never cut off.
+// decoder has let out, not its latest frame, so a frame it holds back is never cut off. Before a
+// clip is shown, it decodes past its `from`, however far after the keyframe that is.
 const far = ({ decoding, state }: Shared) =>
-  decoding.decodedTo() > Math.max(state.at, state.first) + TIME_AHEAD;
+  decoding.decodedTo() > Math.max(state.at, state.first, state.from) + TIME_AHEAD;
 
 function woken(o: Shared) {
   const wake = Promise.withResolvers<void>();
@@ -236,7 +241,7 @@ async function room(o: Output) {
   const { state } = o;
 
   for (;;) {
-    if (state.closed) return;
+    if (state.closed || state.passed) return;
     state.far = far(o);
     if (!state.far && !o.queue.full() && o.decoder.queued() < DECODE_AHEAD) return;
     if (state.far) o.changed();
@@ -300,16 +305,30 @@ async function run(o: Output) {
     }
 
     if (packet.stream === END) break;
+
+    // Left in the ring for the next clip's output to read on from.
+    if (packet.stream === CUT) {
+      consumer.release();
+      break;
+    }
+
     // The media worker reports why, to the main thread, which stops this play.
     if (packet.stream === FAILED) return;
 
+    if (state.passed) {
+      consumer.release();
+      continue;
+    }
+
     hand(o, packet);
     await read(o);
-    // `release` does nothing once the output has closed.
+    // `release` does nothing once the ring has closed.
     consumer.release();
   }
 
-  await decoder.flush();
+  state.read = true;
+  // A passed output's frames never show, and its decoder may have had no packet to configure it.
+  if (!state.passed) await decoder.flush();
   o.decoding.end();
   state.ended = true;
   o.changed();
@@ -341,7 +360,6 @@ function present(o: Output, time: number) {
     const replaced = state.shown;
     // Owned before drawing, so a draw that throws leaves it for close.
     state.shown = picture;
-    state.blank = false;
 
     try {
       o.compositor.draw(picture, o.p.matrix);
@@ -354,19 +372,9 @@ function present(o: Output, time: number) {
   return picture !== undefined;
 }
 
-function blank(o: Output) {
-  const { state } = o;
-  if (state.blank) return;
-  o.compositor.clear();
-  state.shown?.close();
-  state.shown = undefined;
-  state.blank = true;
-}
-
 function close(o: Output) {
   const { state } = o;
   state.closed = true;
-  o.consumer.close();
   o.decoder.close();
   o.queue.clear();
   state.shown?.close();
@@ -377,20 +385,18 @@ function close(o: Output) {
 }
 
 /**
- * `done` resolves once the last packet is decoded, the producer has failed (it reports why
- * itself) or the output is closed, and rejects if decoding fails. `changed` runs on each event
- * that may change how far decoding is: a frame decoded, the decoder taking a packet, a wait for
- * packets or the media time begun, the end decoded, and the media worker blocking while
- * `watch`ed. `freed` runs as the ring frees room for a waiting producer, and as it closes
- * (src/ring.ts). It plays from `from` (microseconds), its packets starting at a keyframe before
- * it; of the frames before `from`, only the last, the one due then, is kept.
+ * The video of one clip, read from `consumer` up to its END or CUT record. `done` resolves once
+ * the last packet is decoded, the producer has failed (it reports why itself) or the output is
+ * closed, and rejects if decoding fails. `changed` runs on each event that may change how far
+ * decoding is: a frame decoded, the decoder taking a packet, a wait for packets or the media time
+ * begun, and the end decoded. It plays from `from` (microseconds), its packets starting at a
+ * keyframe before it; of the frames before `from`, only the last, the one due then, is kept.
  */
 export function createVideoOutput(
   ring: SharedArrayBuffer,
   p: VideoParams,
-  { compositor, wasm, changed = () => {}, freed = () => {}, from = 0 }: VideoOutputOptions,
+  { compositor, wasm, consumer, changed = () => {}, from = 0 }: VideoOutputOptions,
 ) {
-  const consumer = createConsumer(ring, changed, freed);
   const shared = createShared(p, compositor, changed, from);
   const events = decoderEvents(shared);
   const decoder =
@@ -414,8 +420,6 @@ export function createVideoOutput(
   return {
     done,
     present: (time: number) => present(o, time),
-    /** Shows black, outside a clip; the next frame `present` takes goes up as usual. */
-    blank: () => blank(o),
     /**
      * Goes on to `to` (microseconds), later than where it plays from: the frames before it are
      * dropped as from a seek, and the latest due up to it goes up as it is decoded.
@@ -436,6 +440,16 @@ export function createVideoOutput(
     decodedTo: decoding.decodedTo,
     /** Whether the decoder has decoded every packet. */
     ended: () => state.ended,
+    /** Whether it has read all its packets, up to its END or CUT record. */
+    read: () => state.read,
+    /**
+     * Reads on to its last record without decoding, as the clock has passed it, so the next
+     * clip's output reads on from there; close it once `done`.
+     */
+    pass() {
+      state.passed = true;
+      o.wake.room();
+    },
     prepare: (time: number) => prepare(o, time),
     /**
      * Whether the frame queue is full or far enough ahead, so decoding waits for the media time.
@@ -443,12 +457,5 @@ export function createVideoOutput(
     full: () => o.queue.full() || far(o),
     /** Whether it waits for packets with nothing left to decode. */
     starved: () => state.waiting && decoder.queued() === 0,
-    /** Whether the packet ring's producer waits for room. */
-    blocked: () => consumer.producerWaiting(),
-    /**
-     * Has `changed` run the next time the media worker blocks. Call it before reading `blocked`,
-     * so a block just after that read still runs `changed`.
-     */
-    watch: () => consumer.watch(),
   };
 }
