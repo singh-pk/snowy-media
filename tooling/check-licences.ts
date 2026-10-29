@@ -11,8 +11,10 @@ import { $ } from "bun";
 
 const ROOT = join(import.meta.dir, "..");
 const SNOWY = "LicenseRef-Snowy-License-1.0";
+// REUSE-IgnoreStart
 const HEADER = /^\W*SPDX-License-Identifier: (\S+)/m;
 const OURS = /^\W*SPDX-FileCopyrightText: \d{4} (The Snowy Authors|Pratik Kumar Singh)\b/m;
+// REUSE-IgnoreEnd
 
 function expected(file: string) {
   if (file.startsWith("packages/ffmpeg/")) return "LGPL-2.1-or-later";
