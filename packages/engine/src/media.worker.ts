@@ -44,13 +44,16 @@ type Media = ReturnType<typeof createState>;
 type Ring = ReturnType<typeof createProducer>;
 type DemuxRequest = Pick<
   Extract<ToMedia, { type: "demux" }>,
-  "ring" | "streams" | "from" | "pcm" | "audio"
+  "ring" | "streams" | "from" | "pcm" | "audio" | "clip"
 >;
+type Clip = NonNullable<DemuxRequest["clip"]>;
 
 // `ahead` runs before packet `pkt` of `stream` is offered, `placed` once it is in the ring.
+// `ended` once no more packets come.
 interface Reach {
   ahead: (stream: number) => void;
   placed: () => void;
+  ended: () => void;
 }
 
 function post(message: FromMedia) {
@@ -263,24 +266,52 @@ function offer({ core, pkt }: Media, ring: Ring, stream: number) {
 interface Pumped {
   audio?: Audio | undefined;
   reach?: Reach | undefined;
+  until?: Until | undefined;
+}
+
+type Until = ReturnType<typeof createUntil>;
+
+// Where a clip's demux stops: `past` says whether the packet in `pkt`, of a stream read, is at
+// or after `until` (microseconds), by its dts, so every packet after it in the stream is too;
+// and `done`, whether every stream read has got there.
+function createUntil({ core, ctx, pkt }: Media, until: number, streams: number[]) {
+  const passed = new Uint8Array(core._sny_nb_streams(ctx));
+  const left = { count: streams.length };
+
+  function past(stream: number) {
+    if (passed[stream]) return true;
+    const [pts, dts] = [core._sny_packet_pts(pkt), core._sny_packet_dts(pkt)];
+    const time = dts === AV_NOPTS_VALUE ? pts : dts;
+    if (time === AV_NOPTS_VALUE) return false;
+    const st = core._sny_stream(ctx, stream);
+    const [num, den] = [core._sny_stream_tb_num(st), core._sny_stream_tb_den(st)];
+    if ((Number(time) * num * 1e6) / den < until) return false;
+    passed[stream] = 1;
+    left.count--;
+    return true;
+  }
+
+  return { past, done: () => left.count === 0 };
 }
 
 // What tells the clock in PCM ring `pcm` how far the packets placed reach, so it runs on past
-// the audio, or without any, to the end of the video. Without audio it also says so, and
-// starts the clock at the first packet where that is after `from` (seconds), the time the ring
-// was made with: a file whose video starts late, as an MPEG-TS file's may start hours in,
-// starts there, played from the start or sought to before it, as audio starts it at its first
-// sample. It starts the clock before the packet is offered, so the render worker never sees
-// one before the start.
+// the audio, or without any, to the end of the video; for a clip (`clip`), up to its `until`,
+// and once no more packets come, on to the composition's `end`, through the gap after the clip.
+// Without audio it also says so, and, but for a clip, whose gap before it runs, starts the clock
+// at the first packet where that is after `from` (seconds), the time the ring was made with: a
+// file whose video starts late, as an MPEG-TS file's may start hours in, starts there, played
+// from the start or sought to before it, as audio starts it at its first sample. It starts the
+// clock before the packet is offered, so the render worker never sees one before the start.
 // A packet of unknown duration reaches only to its pts.
 function createReach(
   { core, ctx, pkt }: Media,
   pcm: ReturnType<typeof createPcmProducer>,
-  { audio, from }: { audio: boolean; from: number },
+  { audio, from, clip }: { audio: boolean; from: number; clip: Clip | undefined },
 ): Reach {
   if (!audio) pcm.finish();
+  const until = (clip?.until ?? Infinity) / 1e6;
   // `end`: how far the packet being offered reaches, in seconds, or -1 without a timestamp.
-  const at = { pending: !audio, end: -1 };
+  const at = { pending: !audio && !clip, end: -1 };
 
   function ahead(stream: number) {
     const [pts, dts] = [core._sny_packet_pts(pkt), core._sny_packet_dts(pkt)];
@@ -297,10 +328,14 @@ function createReach(
   }
 
   function placed() {
-    if (at.end >= 0) pcm.reach(at.end);
+    if (at.end >= 0) pcm.reach(Math.min(at.end, until));
   }
 
-  return { ahead, placed };
+  function ended() {
+    if (clip) pcm.reach(clip.end / 1e6);
+  }
+
+  return { ahead, placed, ended };
 }
 
 // Writes the packets of `streams` into `ring` and queues those of `audio`, decoding them into
@@ -309,7 +344,7 @@ function createReach(
 // early once the packet ring's consumer closes it; once the PCM ring's does, the audio stops
 // and the packets go on. It waits only when neither ring has room for what comes next: on the
 // PCM ring's doorbell, which both rings' consumers ring, or with no audio on the packet ring.
-function pump(m: Media, ring: Ring, streams: number[], { audio, reach }: Pumped) {
+function pump(m: Media, ring: Ring, streams: number[], { audio, reach, until }: Pumped) {
   const { core, check, pkt } = m;
   const ctx = demuxer(m, streams);
   const selected = new Uint8Array(core._sny_nb_streams(ctx));
@@ -347,6 +382,16 @@ function pump(m: Media, ring: Ring, streams: number[], { audio, reach }: Pumped)
         check(ret, "read");
         at.stream = core._sny_packet_stream(pkt);
         if (at.stream !== audio?.stream && !selected[at.stream]) continue;
+        const past = until?.past(at.stream);
+
+        if (past && until?.done()) {
+          at.eof = true;
+          audio?.end();
+          moved = true;
+          break;
+        }
+
+        if (past) continue;
         at.held = true;
       }
 
@@ -365,6 +410,7 @@ function pump(m: Media, ring: Ring, streams: number[], { audio, reach }: Pumped)
     }
 
     if (at.eof && !at.ended && !at.held) {
+      reach?.ended();
       at.ended = ring.offerEnd();
       if (ring.closed()) return arm(false);
       moved ||= at.ended;
@@ -436,7 +482,7 @@ function firstPacket({ core, ctx, check, pkt }: Media, stream: number) {
 // pump, and on an error fails the ring, so the thread reading it stops too; the
 // error itself goes to whoever asked. `buffered` runs once the audio is buffered ahead.
 function demux(m: Media, request: DemuxRequest, buffered: () => void) {
-  const { ring, streams, from, pcm, audio } = request;
+  const { ring, streams, from, pcm, audio, clip } = request;
   const producer = createProducer(ring);
   let decoder: Audio | undefined;
 
@@ -451,12 +497,20 @@ function demux(m: Media, request: DemuxRequest, buffered: () => void) {
     const sought = first !== undefined && seek(m, first, from);
     m.read = true;
 
-    if (audio && !pcm)
-      throw new RangeError(`demux: audio stream ${audio.stream} without a PCM ring`);
+    if ((audio || clip) && !pcm) throw new RangeError("demux: audio or a clip without a PCM ring");
 
     if (audio && pcm) {
       const ctx = audioDemuxer(m, audio.stream);
-      decoder = createAudio({ ffmpeg: m, ctx, request: audio, pcm, from, sought, buffered });
+      decoder = createAudio({
+        ffmpeg: m,
+        ctx,
+        request: audio,
+        pcm,
+        from,
+        start: clip ? clip.start : sought ? from : undefined,
+        until: clip?.until ?? Infinity,
+        buffered,
+      });
     }
 
     const reach =
@@ -464,10 +518,14 @@ function demux(m: Media, request: DemuxRequest, buffered: () => void) {
       createReach(m, createPcmProducer(pcm), {
         audio: Boolean(audio),
         from: from / 1e6,
+        clip,
       });
     // Without audio, there is none to buffer.
     if (pcm && !audio) buffered();
-    pump(m, producer, streams, { audio: decoder, reach });
+    const audioStreams = audio ? [audio.stream] : [];
+    // copy: the streams read, the audio among them, once a demux.
+    const until = clip && createUntil(m, clip.until, [...streams, ...audioStreams]);
+    pump(m, producer, streams, { audio: decoder, reach, until });
   } catch (e) {
     producer.fail();
     throw e;

@@ -22,7 +22,9 @@ export type Missing = [feature: PlatformFeature, reason: string];
 
 // After init, the render worker plays video stream packets from `ring` (src/ring.ts), with
 // parameters `params`, timed by the clock in PCM ring `pcm` (src/pcm.ts), until it stops. It
-// plays from `from`, in microseconds: of the frames before, only the last is shown.
+// plays from `from`, in microseconds: of the frames before, only the last is shown. A clip's
+// play (`window`) shows its frames only from `in` to `out`, and black before and after, where
+// the clock may start, from `start`: its video plays from `in` at the earliest.
 // An error while it plays is reported once, with the play's `id`, and it stops. Until it has
 // drawn a frame by the running clock (`shown`, the last report), it reports each change in
 // how far decoding is, as it happens: a quarter second or all of it decoded (`ahead`), or no
@@ -37,6 +39,7 @@ export type ToRender =
       params: VideoParams;
       pcm: SharedArrayBuffer;
       from: number;
+      window?: { start: number; in: number; out: number };
     }
   // The play `id`, paused, goes on to `to` (microseconds) by decoding on: a scrub forward.
   | { type: "scrub"; id: number; to: number }
@@ -92,8 +95,11 @@ export interface MediaInfo {
 // media worker writes how far the packets reach into it, and that no audio comes. Unless it
 // fails or the PCM ring closes first, it says once, before it replies, that the audio is
 // buffered (`buffered`): `preroll` frames of it, a full ring, all of it, or at once without
-// audio. It replies once it has written all the audio and the
-// END record, or once a consumer has closed its ring. On an error it ends the ring with FAILED
+// audio. A clip's demux (`clip`) reads up to `until`, past which no packet is written and no
+// audio decoded, and its clock starts at `start`, before `from` in a gap before the clip, with
+// silence up to the clip's audio; once it is past `until`, the clock runs on to `end`. It
+// replies once it has written all the audio and the END record, or once a consumer has closed
+// its ring. On an error it ends the ring with FAILED
 // and replies with the error, the only report of it.
 export type ToMedia =
   | { type: "open"; id: number; file: File }
@@ -106,6 +112,8 @@ export type ToMedia =
       pcm?: SharedArrayBuffer;
       // Its audio before `from` is dropped. Needs `pcm`.
       audio?: { stream: number; preroll: number };
+      // Needs `pcm`.
+      clip?: { start: number; until: number; end: number };
     };
 
 export type FromMedia =

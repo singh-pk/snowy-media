@@ -178,7 +178,13 @@ function clear() {
   state.compositor.clear();
 }
 
-function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" }>) {
+// Whether media time `at` (microseconds) is outside a clip's `window`, where the canvas is black.
+const outside = (window: Window | undefined, at: number) =>
+  window !== undefined && (at < window.in || at >= window.out);
+
+type Window = Extract<ToRender, { type: "play" }>["window"];
+
+function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type: "play" }>) {
   stop();
   if (!state.compositor) throw new Error("play before init");
   const clock = createPcmControl(pcm);
@@ -191,7 +197,8 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
     freed: clock.wakeProducer,
     from,
   });
-  const playing = createPlaying(id, output, from);
+  // In a gap before a clip, the clock starts before its video does.
+  const playing = createPlaying(id, output, window?.start ?? from);
   const timing = createTiming();
 
   // Reports the first failure of this play, unless it has stopped.
@@ -212,10 +219,15 @@ function play({ id, ring, params, pcm, from }: Extract<ToRender, { type: "play" 
       const seen = clock.heard(performance.timeOrigin + time + refresh);
       // The clock starts up to a sample before `from`: the frame shown is never one before.
       const at = Math.max(Math.round(seen * 1e6), playing.target);
-      const drawn = output.present(at);
+      const black = outside(window, at);
+      if (black) output.blank();
+      // Before the clip, its first frame goes up ahead, to be up when due.
+      if (black && window && at < window.in) void output.prepare(window.in);
+      const drawn = black || output.present(at);
       // Shown by the running clock once a frame is up and none due by it is still going up,
-      // not just as it runs; a decoder slower than the clock still lets it be shown.
-      const shown = running && output.current(at);
+      // not just as it runs; a decoder slower than the clock still lets it be shown. Black is
+      // shown at once.
+      const shown = running && (black || output.current(at));
       const reached = output.reached(playing.target) ? playing.target : playing.reached;
 
       if ((drawn && !playing.drawn) || (shown && !playing.shown) || reached !== playing.reached) {
