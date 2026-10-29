@@ -25,13 +25,14 @@ export type Control = {
   mediaUs: number;
   /** A moment on the source's clock: wall time in whole microseconds. */
   atUs: number;
-  /** Playback reached the end: every peer stops, so it never plays. */
+  /** Playback reached the end, so every peer stops; an ended record is never `playing`. */
   ended: boolean;
 };
 
 const controlKey = (epoch: number) => `control@${epoch}`;
 
-// A control record in canonical shape: its fields in order.
+// `value` as a control record in canonical shape, its fields in order; throws an
+// `InvalidRecordError` for anything else.
 function checkControl(value: unknown): Control {
   if (!isRecord(value)) throw new InvalidRecordError("not an object");
   onlyFields(value, FIELDS);
@@ -46,8 +47,8 @@ function checkControl(value: unknown): Control {
 }
 
 /**
- * Signs a control record with the session key. Returns its object key and bytes. Throws an
- * `InvalidRecordError` for a malformed one.
+ * Signs a control record with the session key. Resolves to its object key and bytes. Rejects
+ * with an `InvalidRecordError` for a malformed one.
  */
 export async function encodeControl(session: CryptoKeyPair, control: Control) {
   const canonical = checkControl(control);

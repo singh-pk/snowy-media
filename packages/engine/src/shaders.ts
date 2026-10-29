@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The compositor's shaders, and the render pipelines made of them: drawing a picture into the
-// canvas from its Y′CbCr planes or from RGB, converting a frame with Chromium's conversion, and
-// measuring both conversions of a frame against each other (src/measure.ts).
+// The compositor's shaders (docs/architecture.md#colour), and the render pipelines made of them:
+// drawing a picture into the canvas from its Y′CbCr planes or from RGB, converting a frame with
+// Chromium's conversion, and measuring both conversions of a frame against each other
+// (src/measure.ts).
 
 const VERTEX = /* wgsl */ `
 struct View {
@@ -107,7 +108,7 @@ fn srgbDecode(c: vec3f) -> vec3f {
 @fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
   let uv = clip * vec2f(0.5, -0.5) + 0.5;
   let rgb = textureSampleBaseClampToEdge(frame, linear, uv).rgb;
-  // Mirrored about 0, as Chromium encodes a value below 0: the matrix after mixes the channels.
+  // Mirrored about 0, as Chromium encodes values below 0, which \`undo\` needs: it mixes channels.
   let undone = sign(rgb) * pow(srgbDecode(abs(rgb)), vec3f(1.0 / 1.961));
   let encoded = select(rgb, undone, apple);
   return vec4f((undo * vec4f(encoded, 1.0)).rgb, 1.0);

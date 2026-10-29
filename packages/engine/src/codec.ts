@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// WebCodecs decoder configs. The codec string is built as its spec defines it, from the stream's
-// configuration record (avcC, hvcC, av1C), also the config's description, or where the container
-// has none (MPEG-TS, raw streams) from the parameter sets in band.
+// WebCodecs decoder configs (docs/architecture.md#video-decoder-configs). The codec string is
+// built as each spec below defines it, from the stream's configuration record (avcC, hvcC, av1C),
+// which is also the config's `description`, or, where the container has none (MPEG-TS, raw
+// streams), from the parameter sets in band.
 //
 // - H.264: ISO/IEC 14496-15 §5.3.3 and RFC 6381 §3.3, avc1.PPCCLL.
 // - HEVC: ISO/IEC 14496-15 Annex E.3, hvc1 or hev1, then profile, compatibility, tier and
@@ -11,12 +12,14 @@
 // - VP9: the VP9 codec string spec, vp09.PP.LL.DD, from the keyframe's uncompressed header.
 // - AV1: the AV1 ISO-BMFF binding §5, av01.P.LLT.DD.
 
-/** The codecs WebCodecs decodes, by FFmpeg's name; FFmpeg decodes the rest (src/video.worker.ts). */
+/**
+ * The codecs WebCodecs decodes, by FFmpeg's name; FFmpeg decodes the rest (src/video.worker.ts).
+ */
 export const WEBCODECS = new Set(["h264", "hevc", "vp8", "vp9", "av1"]);
 
-// FFmpeg's colour names, as VideoColorSpace names them; any other leaves it unstated.
-// TypeScript's DOM types know fewer of these than Chromium takes (PQ, HLG, BT.2020), so they
-// are strings here, checked by the guards below.
+// FFmpeg's colour names mapped to VideoColorSpace's; a name not listed leaves that field
+// unstated. TypeScript's DOM types know fewer of these than Chromium takes (PQ, HLG, BT.2020), so
+// they are strings here, checked by the guards below.
 const PRIMARIES: Record<string, string> = {
   bt709: "bt709",
   bt470bg: "bt470bg",
@@ -48,8 +51,8 @@ const isTransfer = (v = ""): v is VideoTransferCharacteristics =>
 const isMatrix = (v = ""): v is VideoMatrixCoefficients => Object.values(MATRICES).includes(v);
 
 /**
- * The VideoColorSpace of a stream or frame whose colour FFmpeg names so (`sny_color_*_name`),
- * stating only what it names and WebCodecs knows.
+ * The VideoColorSpace for the colour names FFmpeg gives a stream or frame (`sny_color_*_name`),
+ * with only the fields that FFmpeg names and WebCodecs knows.
  */
 export function colorSpace(names: {
   primaries: string;
@@ -73,7 +76,7 @@ export interface VideoParams {
   /** FFmpeg's codec name. */
   codec: string;
   /**
-   * What decodes it: WebCodecs for the codecs in WEBCODECS, otherwise the FFmpeg module that
+   * What decodes it: WebCodecs for the codecs in `WEBCODECS`, otherwise the FFmpeg module that
    * holds its decoder, or nothing.
    */
   decoder: "webcodecs" | "video" | "video-ext" | "none";
@@ -89,7 +92,7 @@ export interface VideoParams {
   level: number;
   /** The width of a pixel over its height, as a fraction; 0/1 when unknown. */
   sampleAspect: [number, number];
-  /** Its colour, as the container or codec parameters state it (colorSpace). */
+  /** Its colour, as the container or codec parameters state it (`colorSpace`). */
   colorSpace: VideoColorSpaceInit;
   /** The stream's time base, as a fraction of a second. */
   timeBase: [number, number];
@@ -102,7 +105,7 @@ export interface VideoParams {
 const hex = (b: number) => b.toString(16).toUpperCase().padStart(2, "0");
 const pad = (n: number) => String(n).padStart(2, "0");
 
-// A big-endian bit reader over `data`.
+// A bit reader over `data`, most significant bit first.
 function createBits(data: Uint8Array) {
   let at = 0;
 
@@ -159,7 +162,8 @@ function unescape(nal: Uint8Array) {
   return new Uint8Array(out);
 }
 
-// The first NAL unit that `match`es in the extradata, then in the keyframe, as Annex B.
+// The first NAL unit that `match` accepts, in the extradata and then in the keyframe, both read
+// as Annex B; throws if neither has one.
 function findNal(p: VideoParams, keyframe: Uint8Array, match: (nal: Uint8Array) => boolean) {
   const found = nalUnits(p.extradata).find(match) ?? nalUnits(keyframe).find(match);
   if (!found) throw new Error(`${p.codec}: no configuration record and no parameter sets`);
@@ -194,8 +198,8 @@ export function hevcCodec(prefix: string, ptl: Uint8Array) {
 }
 
 // Whether an HEVC stream's extradata is a configuration record, with its packets' NAL units
-// length-prefixed; if not, they are Annex B. FFmpeg's test: some writers leave
-// configurationVersion 0.
+// length-prefixed; if not, they are Annex B. This is FFmpeg's test, which also accepts
+// configurationVersion 0, since some writers leave it so.
 function hevcRecord(p: VideoParams) {
   const [v = 0, b1 = 0, b2 = 0] = p.extradata;
   return p.extradata.length >= 23 && (v > 0 || b1 > 0 || b2 > 1);
@@ -256,7 +260,11 @@ const VP9_LEVELS = [
   [60, 35_651_584],
 ] as const;
 
-/** The VP9 codec string for a keyframe of a `width` × `height` stream at `level`, if known. */
+/**
+ * The VP9 codec string for a keyframe of a `width` × `height` stream at `level`, or, when
+ * `level` is not positive, the smallest level that fits the picture. Throws if `keyframe` is not
+ * a VP9 keyframe.
+ */
 export function vp9Codec(keyframe: Uint8Array, width: number, height: number, level: number) {
   const bits = createBits(keyframe);
   if (bits.read(2) !== 2) throw new Error("vp9: the first packet is not a frame");
@@ -351,7 +359,7 @@ function av1ObuCodec(data: Uint8Array) {
     let size = data.length - at;
 
     if ((header >> 1) & 1) {
-      // leb128
+      // The OBU has a size field, as leb128.
       size = 0;
 
       for (let i = 0; i < 8; i++) {
@@ -395,14 +403,15 @@ export function makesFrame(p: VideoParams, data: Uint8Array) {
 
 /**
  * The VideoDecoderConfig of a stream with parameters `p` whose first packet, a keyframe, is
- * `keyframe`. Throws for a codec WebCodecs does not decode.
+ * `keyframe`. Throws for a codec WebCodecs does not decode, or a stream with neither a
+ * configuration record nor parameter sets.
  */
 export function videoConfig(p: VideoParams, keyframe: Uint8Array): VideoDecoderConfig {
   const [num, den] = p.sampleAspect;
   const isSquare = !(num > 0 && den > 0 && num !== den);
   // The colour the container states: without it, Chromium takes a VP9 stream, whose bitstream
-  // states no transfer, for BT.709 SDR, HDR included. What the stream leaves out is as FFmpeg
-  // takes it, so a frame Chromium converts matches the compositor's (docs/architecture.md#colour).
+  // states no transfer, for BT.709 SDR, HDR included. The rest defaults to what FFmpeg assumes,
+  // so a frame Chromium converts matches the compositor's (docs/architecture.md#colour).
   // copy: once per stream, the stated colour over the defaults.
   const colour: VideoColorSpaceInit = {
     primaries: "bt709",

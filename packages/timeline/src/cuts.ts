@@ -129,9 +129,10 @@ function splitPoint(records: Records, { id, clip, sequence, at, piece }: Split) 
 }
 
 /**
- * Splits a clip at a timeline time: it keeps what is before, and a new clip, `piece`, takes what
- * is after. Where the piece's anchor lands, rounded to its anchor's units and snapped to a frame,
- * is where the split falls, so the two pieces always meet. Returns the items changed.
+ * Splits a clip at timeline time `at`, in flicks: it keeps what is before, and a new clip,
+ * `piece`, takes what is after. Where the piece's anchor lands, rounded to its anchor's units and
+ * snapped to a frame, is where the split falls, so the two pieces always meet. Returns the items
+ * changed.
  */
 export function splitClip(records: Records, id: ItemId, at: number, piece: ItemId) {
   if (records.items.has(piece)) skip("stale", `${piece} exists`);

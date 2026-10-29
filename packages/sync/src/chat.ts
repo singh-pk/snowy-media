@@ -47,7 +47,7 @@ export type ChatMessage = {
   /** The hash of the author's previous message, or "" for seq 1. */
   prev: string;
   hlc: Hlc;
-  /** The sender's playhead when sending. */
+  /** The sender's playhead when sending, in microseconds of media time. */
   mediaUs: number;
   kind: ChatKind;
   target?: ChatTarget;
@@ -173,7 +173,8 @@ export async function messageHash(message: ChatMessage) {
   return new Uint8Array(hash).toBase64({ alphabet: "base64url", omitPadding: true });
 }
 
-// A domain prefix, so a checkpoint signature can't pass for anything else the peer key signs.
+// The bytes a checkpoint signs start with a domain prefix, so that its signature can't pass for
+// anything else the peer key signs.
 function checkpointBytes({ author, seq, head }: Omit<Checkpoint, "sig">) {
   const body = encoder.encode(JSON.stringify({ author, seq, head }));
   const bytes = new Uint8Array(CHECKPOINT_DOMAIN.byteLength + body.byteLength);
@@ -224,12 +225,13 @@ export function checkCheckpoint(value: unknown): Checkpoint | undefined {
 }
 
 /**
- * The messages a checkpoint proves: its own, then each earlier one its successor's `prev`
- * names, stopping at the first missing or mismatched seq, in seq order. Messages after the
- * checkpoint wait for a later one. Pass the messages held for the author too, so a chain can
- * run through them, and `since`, the author's highest seq already shown: the walk stops once
- * it links to that message. Several messages for one seq are fine; only the one whose hash
- * the chain names counts, so a forged copy can't hide the real one.
+ * The messages a checkpoint proves, in seq order: the one it names, then each earlier one that
+ * the `prev` of the message after it names, stopping at the first seq missing or not matching.
+ * A checkpoint that doesn't verify proves none, and messages after it wait for a later one. Pass
+ * every message held for the author, so a chain can run through them, and `since`, the author's
+ * highest seq already shown: the walk stops once it links to that message, which is left out.
+ * Several messages for one seq are fine; only the one whose hash the chain names counts, so a
+ * forged copy can't hide the real one.
  */
 export async function proven(messages: ChatMessage[], checkpoint: Checkpoint, since = 0) {
   const valid = await verifyCheckpoint(checkpoint);

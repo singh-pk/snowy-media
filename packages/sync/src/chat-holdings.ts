@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// What a peer holds of each author's chat, to answer repairs (docs/architecture.md#gaps-and-repair).
-// The highest checkpoint of each run of chained seqs proves every message in it. Runs join only
-// where a message's `prev` names the one held below, so a forked chain stays separate runs.
+// What a peer holds of each author's chat, to answer repairs
+// (docs/architecture.md#gaps-and-repair). The highest checkpoint of each run of chained seqs proves
+// every message in it. Runs join only where a message's `prev` names the one held below, so a
+// forked chain stays separate runs.
 
 import type { ChatBatch } from "./chat-batch";
 import { messageHash, type ChatMessage, type Checkpoint } from "./chat";
@@ -16,7 +17,7 @@ type Author = {
   newest: number;
 };
 
-/** Inclusive. */
+/** A run of chained seqs, from `first` to `last` inclusive. */
 type Run = { first: number; last: number };
 
 export function createChatHoldings() {
@@ -124,7 +125,7 @@ export function createChatHoldings() {
     return ordered;
   };
 
-  /** The highest seq held from an author, or 0. */
+  /** The highest seq any checkpoint from an author has named, proven or not, or 0. */
   const newest = (author: KeyId) => authors.get(author)?.newest ?? 0;
 
   return { add, restore, repair, after, checkpoints, newest };
@@ -175,7 +176,9 @@ function highestPerRun(held: Author) {
   return kept;
 }
 
-// Only a forked chain leaves messages past a run's checkpoint; they can't be proven.
+// The messages from `from` to its run's checkpoint, or undefined if `from` isn't held or no
+// checkpoint at or above it proves it: only a forked chain leaves messages past a run's
+// checkpoint, and those can't be proven.
 function batchFrom(held: Author, from: number): ChatBatch | undefined {
   if (!held.messages.has(from)) return undefined;
 

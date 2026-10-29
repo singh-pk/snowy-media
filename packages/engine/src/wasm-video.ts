@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render worker's decoders for the video streams WebCodecs does not decode, each standing in
-// for a VideoDecoder. The decode worker (src/video.worker.ts) is started once and kept, so a seek
-// or another file does not load its FFmpeg module again; it copies a packet's bytes itself.
+// Stand-ins for `VideoDecoder` for the video streams WebCodecs does not decode, which hand their
+// packets to the decode worker, src/video.worker.ts (docs/architecture.md#video-output). That
+// worker is started once and kept, so a seek or another file does not load its module again.
 
 import type { VideoParams } from "./codec";
 import {
@@ -27,11 +27,11 @@ import {
   type Place,
 } from "./ring";
 
-// The ring to the worker: small records only, a packet's place and never its bytes. It holds
-// one packet's at a time, as the decode loop waits for it to be taken, and the frames shown
-// meanwhile going back, 32 bytes each. The ring back holds small records only too.
+// The ring to the worker carries small records only: a packet's place, never its bytes. It holds
+// one packet's place at a time, as the decode loop waits for each to be taken, and the 32-byte
+// records of the frames shown meanwhile going back. The ring back carries small records too.
 const TO_CAPACITY = 1 << 20;
-// A frame's `packed` word as the record's pts.
+// A frame's `packed` word (0 or 1), as the release record's `pts`.
 const PACKED = [0n, 1n] as const;
 const FROM_CAPACITY = 1 << 16;
 
@@ -40,8 +40,9 @@ const FORMATS: ReadonlySet<string | undefined> = new Set(PIXEL_FORMATS);
 const isFormat = (v: string | undefined): v is VideoPixelFormat => FORMATS.has(v);
 
 /**
- * A frame FFmpeg decoded, its planes still in `memory`, the decoding module's, where `layout`
- * says: uploaded from there, it is never copied on the CPU. Closing it hands it back.
+ * A frame FFmpeg decoded, whose planes stay in the decoding module's `memory` at the offsets in
+ * `layout`. It is uploaded to the GPU from there, so it is never copied on the CPU. Closing it
+ * hands it back to the module to free.
  */
 interface SharedFrame {
   readonly format: VideoPixelFormat;
@@ -68,23 +69,23 @@ export interface DecoderEvents {
 /** A video decoder, as src/video.ts uses one. */
 export interface Decoder {
   /**
-   * For a decoder that copies its packets out of the packet ring itself: where the record handed
-   * next is, which src/video.ts peeks into it (peekPlace) and hands on unread. None for one that
-   * takes a packet's bytes.
+   * Set only on a decoder that copies its packets out of the packet ring itself: src/video.ts
+   * writes the place of the record it hands on next into it (with `peekPlace`), and hands the
+   * record on unread. Undefined on a decoder that takes a packet's bytes.
    */
   readonly place?: Place;
   /**
-   * Decodes `packet`, whose frame is due at `pts`, in the stream's time base: at `timestamp`,
-   * for `duration`, in microseconds. `pts` is the packet's, or its dts where it has none.
-   * Whether the decoder now has all of a packet: one in pieces comes a record at a time, at
-   * `place`, and only its last piece completes it.
+   * Decodes `packet`, whose frame is due at `pts` in the stream's time base (the packet's pts, or
+   * its dts where it has none), and at `timestamp` for `duration`, in microseconds. Returns
+   * whether the decoder now has all of a packet: a packet in pieces comes one record at a time,
+   * at `place`, and only its last piece completes it.
    */
   decode(packet: Packet, pts: bigint, timestamp: number, duration: number): boolean;
   /** Resolves once every packet is decoded and its frames are out. */
   flush(): Promise<void>;
   /** Packets handed over and not yet decoded. */
   queued(): number;
-  /** Whether it still reads the record last handed, which is freed only once it has not. */
+  /** Whether it is still reading the record last handed to it, which is not freed until then. */
   reading(): boolean;
   close(): void;
 }
@@ -92,7 +93,7 @@ export interface Decoder {
 interface Open {
   events: DecoderEvents;
   queued: number;
-  // Made by a flush, so a close without one rejects nothing no one awaits.
+  // Made only by a flush, so a close rejects a promise only when a flush awaits it.
   flushed?: PromiseWithResolvers<void>;
   // A packet ring record handed over and not yet copied out.
   reading: boolean;
@@ -109,15 +110,15 @@ interface Wasm {
   open: Map<number, Open>;
   /** Posts `message` to the worker, started first if it is not. */
   post: (message: ToVideo) => void;
-  /** The record to fill, of `stream`, its other fields cleared, for `put`. */
+  /** A record of `stream`, its other fields cleared, to fill and `put`. */
   record: (stream: number) => OutgoingPacket;
-  /** Writes a record that must go: one that does not fit means the ring is full. */
+  /** Writes a record that must go; throws if the ring has no room for it. */
   put: (packet: OutgoingPacket) => void;
 }
 
 // The frame in the payload that `words` and `doubles` view, from the module whose memory is
-// `memory`, as a frame that goes back to it with `giveBack` once closed. Pointers are unsigned,
-// past 2 GiB too.
+// `memory`, as a frame that goes back to it with `giveBack` once closed. Pointers are read
+// unsigned, as they may lie past 2 GiB.
 function sharedFrame(
   words: Int32Array,
   doubles: Float64Array,
@@ -156,7 +157,8 @@ function sharedFrame(
     allocationSize: () => size,
     close() {
       if (own.closed) return;
-      // Closed once it has gone: a ring that has no room for it throws, and leaves it open.
+      // Marked closed only once given back: if the ring has no room, `giveBack` throws and the
+      // frame stays open.
       giveBack(frame, packed, module);
       own.closed = true;
     },
@@ -270,7 +272,7 @@ function createDecoder(
   const id = state.next++;
   const opened: Open = { events, queued: 0, reading: false };
   open.set(id, opened);
-  // Before the open, which waits for it.
+  // Posted before the open record, as the worker's open waits for the ring.
   post({ type: "packets", id, ring });
   const [num, den] = p.timeBase;
   const opening = record((id << KIND_BITS) | TO_VIDEO.open);
@@ -287,7 +289,7 @@ function createDecoder(
 
   return {
     place,
-    // The record at `place` goes as where it is.
+    // Sends where the record at `place` is, not its bytes.
     decode({ dts, duration, flags }, pts) {
       const packet = record((id << KIND_BITS) | TO_VIDEO.packet);
       packet.flags = flags;
@@ -322,9 +324,10 @@ function createDecoder(
 }
 
 /**
- * The decoders, in the worker `start` starts: the bundled src/video.worker.ts next to this
- * file, written out as is so that a bundler finds the worker. Records go to it through a ring of
- * `capacity` bytes, a packet's as where it is in its packet ring.
+ * Makes decoders that run in the worker `start` starts, by default the bundled `video.worker.js`
+ * next to this file; its `new URL` is written out in full so that a bundler finds the worker.
+ * Records go to the worker through a ring of `capacity` bytes, a packet's as its place in its
+ * packet ring.
  */
 export function createWasmVideo(
   start = () => new Worker(new URL("./video.worker.js", import.meta.url), { type: "module" }),

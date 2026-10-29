@@ -4,8 +4,9 @@
 // Where each chunk comes from (docs/architecture.md#choosing-where-each-chunk-comes-from). A link
 // takes requests only while it has room, so no link holds a film's worth queued.
 //
-// A burst of events plans once, in a microtask, and a pass skips whole ranges held, coming live or
-// advertised by no one, so its work follows what changed, not the film's length.
+// A burst of events plans once, in a microtask, and a pass skips whole ranges of chunks that are
+// held, coming live or advertised by no one, so its work follows what changed, not the film's
+// length.
 
 import { chunkKey, type ChunkSlot } from "./chunk";
 import { chunkAt, type JoinedIndex } from "./chunk-index";
@@ -36,7 +37,7 @@ export type FetchPlanOptions = {
   holders(slot: ChunkSlot): KeyId[];
   /** The links open now, the source's among them while it is online, with their measures. */
   links(): ReadonlyMap<KeyId, LinkMeasures>;
-  /** The time, in milliseconds, on the clock playhead updates are given in. */
+  /** The time, in milliseconds, on the clock that playhead updates are given in. */
   now(): number;
   ask(fetch: Fetch): void;
   cancel(fetch: Fetch): void;
@@ -48,7 +49,8 @@ type Span = [number, number];
 
 const RANK: Record<FetchPriority, number> = { urgent: 0, ahead: 1, background: 2 };
 const PRIORITIES: FetchPriority[] = ["urgent", "ahead", "background"];
-// One chunk arriving and the next already asked, so a link never waits a round trip between them.
+// Requests a link may have out whatever its throughput: one chunk arriving and the next already
+// asked, so the link never waits a round trip between them.
 const LINK_DEPTH = 2;
 // The source answers `busy` beyond this many requests from one peer.
 const SOURCE_HOLDS = 4;
@@ -135,7 +137,7 @@ function createWants(listing: Listing, changed: () => void) {
     changed();
 
     return {
-      /** Moves the interest to a new range: nothing to do if it covers the same chunks. */
+      /** Moves the interest to a new range; a range that covers the same chunks plans nothing. */
       move(fromUs: number, toUs: number) {
         held.want.fromUs = fromUs;
         held.want.toUs = toUs;
@@ -262,7 +264,9 @@ function createRoom(options: FetchPlanOptions, out: Map<string, Request>) {
   // Links that answered `busy`, which gain no room until their next delivery is done.
   const blocked = new Set<KeyId>();
 
-  // Whether a link takes another request: fewer than 2 out, or bytes out under throughput × RTT.
+  // Whether a link takes another request: fewer than `LINK_DEPTH` out, or bytes out under
+  // throughput × RTT. The source is never sent more than `SOURCE_HOLDS`, past which it answers
+  // `busy`.
   function room(peer: KeyId) {
     const measures = options.links().get(peer);
     if (measures === undefined || blocked.has(peer)) return false;
@@ -281,9 +285,9 @@ function createRoom(options: FetchPlanOptions, out: Map<string, Request>) {
     return lower.reduce<[string, Request] | undefined>((_, entry) => entry, undefined);
   }
 
-  // Milliseconds a link is expected to take to finish `own`: a round trip, then the rest of the
-  // chunk on the wire and the requests of the same or higher priority asked before it, then its
-  // own bytes yet to arrive. `own` is asked after every request out unless it is one of them.
+  // Milliseconds `peer` is expected to take to finish `own`: a round trip, then what is left of the
+  // chunks already arriving and of earlier requests of the same or higher priority, then `own`'s
+  // bytes yet to arrive. `own` counts as asked after every request out unless it is one of them.
   function finish(peer: KeyId, own: Request) {
     const { rttMs, bytesPerMs } = options.links().get(peer)!;
     let earlier = true;
@@ -333,7 +337,7 @@ type Requests = ReturnType<typeof createRequests>;
 type Room = ReturnType<typeof createRoom>;
 type Wants = ReturnType<typeof createWants>;
 
-// Places chunks on links that have room, by the tree, in each priority's order.
+// Places chunks on links that have room, by the docs' decision tree, in each priority's order.
 function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room, wants: Wants) {
   const forwarders = () =>
     options
@@ -346,8 +350,8 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
     return sourceTakes || forwarders().some((peer) => room.takes(peer, priority));
   }
 
-  // Asks for a chunk by the tree. Returns false when a link the tree allows for it has no room,
-  // so the chunks after it wait their turn; true when it was asked, or is left out to wait.
+  // Asks for a chunk as the decision tree says. Returns false when a link the tree allows for it
+  // has no room, so the chunks after it wait their turn; true when it was asked, or left to wait.
   function place(slot: ChunkSlot, priority: FetchPriority, bytes: number) {
     const key = chunkKey(slot);
     const links = options.links();
@@ -414,8 +418,8 @@ function createClock(
 
   const playheadAt = (now: number) => state.us + (state.playing ? (now - state.at) * 1000 : 0);
 
-  // When a chunk must have arrived, in milliseconds: none while paused, or for a chunk that ends
-  // at or before the playhead, and now for the one holding it.
+  // When a chunk must have arrived, in milliseconds: `now` for the chunk holding the playhead, and
+  // undefined while paused or for a chunk that ends at or before the playhead.
   function deadline(index: number, now: number) {
     const { bounds } = listing.read().index;
     const atUs = playheadAt(now);
@@ -423,8 +427,9 @@ function createClock(
     return now + Math.max(0, bounds[index]! - atUs) / 1000;
   }
 
-  // Whether a request to a forwarder should go to the source instead: urgent, nothing of it sent
-  // yet, expected after its deadline, and the source online with room would finish it sooner.
+  // Whether a request to a forwarder should go to the source instead: it is urgent, nothing of it
+  // has arrived, it is expected after its deadline, and the source, online and with room, would
+  // finish it sooner.
   function late([key, request]: [string, Request], now: number) {
     if (request.priority !== "urgent" || request.started || request.peer === options.source)
       return false;
@@ -439,8 +444,8 @@ function createClock(
   }
 
   /**
-   * The playhead was at `us` at time `at`, playing or not. Gives the chunks ahead deadlines or
-   * takes them away; nothing is placed or cancelled.
+   * The playhead was at `us` at time `at`, in milliseconds on the `now()` clock, playing or not.
+   * Gives the chunks ahead deadlines or takes them away; nothing is placed or cancelled.
    */
   function playhead(us: number, at: number, playing: boolean) {
     Object.assign(state, { us, at, playing });
@@ -450,7 +455,8 @@ function createClock(
   function progress() {
     const now = options.now();
 
-    // A request moved to the source is set again under its key, after the rest, and isn't late.
+    // A request moved to the source goes back into `out` under the same key, so this loop reaches
+    // it again at the end; it isn't late then, being the source's.
     for (const entry of requests.out) {
       if (!late(entry, now)) continue;
       const [key, request] = entry;
@@ -535,7 +541,9 @@ export function createFetchPlan(options: FetchPlanOptions) {
       if (requests.end(peer, slot)) requests.refuse(slot, peer);
       stale();
     },
-    /** The link to `peer` closed, or the source went offline: its requests go back into the plan. */
+    /**
+     * The link to `peer` closed, or the source went offline: its requests go back into the plan.
+     */
     closed(peer: KeyId) {
       requests.closed(peer);
       room.unblock(peer);

@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The hybrid logical clock that orders chat (docs/architecture.md#order): wall ms (48 bits) then a
-// counter (16 bits) in fixed-width hex, so comparing two as strings compares them as numbers. It
-// moves on every message sent and received, so a reply sorts after what it answers.
+// The hybrid logical clock that orders chat (docs/architecture.md#order): the wall clock in
+// milliseconds (48 bits), then a counter (16 bits), in fixed-width hex, so comparing two values as
+// strings compares them as numbers. It moves on every message sent and received, so a reply sorts
+// after what it answers.
 
 const WALL_DIGITS = 12;
 const COUNTER_DIGITS = 4;
@@ -37,7 +38,7 @@ function format({ wall, counter }: Parts): Hlc {
   );
 }
 
-// Whole ms, whatever clock `now` reads.
+// Whole milliseconds, even if the clock `now` reads has fractions.
 const wallTime = (now: () => number) => Math.floor(now());
 
 // A counter past 16 bits carries into the wall clock instead of wrapping, so the clock never
@@ -46,7 +47,7 @@ const carried = ({ wall, counter }: Parts): Parts =>
   counter > COUNTER_MAX ? { wall: wall + 1, counter: 0 } : { wall, counter };
 
 /**
- * A peer's clock. `now` reads the wall clock in ms; `last` is the value stored before a
+ * A peer's clock. `now` reads the wall clock in milliseconds; `last` is the value stored before a
  * reload, so the clock never goes back across one, even if the wall clock did.
  */
 export function createClock(now: () => number = Date.now, last?: Hlc) {

@@ -28,7 +28,8 @@ export function createProject(initial?: Snapshot) {
   return {
     /**
      * Applies a batch's operations in order, skipping any that doesn't fit the document. `history`
-     * resolves reverts and merges; without it they, and the other branch operations, are skipped.
+     * resolves reverts and merges; without it, reverts, merges and the other branch operations are
+     * skipped.
      */
     apply: (batch: Pick<Batch, "author" | "seq" | "ops">, history?: Resolver) =>
       apply(records, batch, history),
@@ -56,7 +57,7 @@ export function createProject(initial?: Snapshot) {
     itemBefore: (id: ItemId) => query.itemBefore(records, id),
     /** The live transitions on the end of a storyline item, by id. */
     transitions: (cut: ItemId) => query.transitions(records, cut),
-    /** A sequence's length: its storyline's, in flicks. */
+    /** A sequence's length in flicks: its storyline's duration, or 0 for an unknown sequence. */
     length: (sequence: ItemId) => records.sequences.get(sequence)?.storyline.duration() ?? 0,
     /** The time base a clip's source points are in: its stream's, or flicks'. */
     timeBase: (record: ItemRecord) => timeBaseOf(records, record),

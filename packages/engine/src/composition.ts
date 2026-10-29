@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// What a composition is to the engine: the shape of the plan it reads, which the render plan of
-// @snowy-media/timeline fits, and the one clip of a plan it plays, checked. Times on the
-// composition are microseconds; a source point is in its stream's time base.
+// What a composition is to the engine (docs/architecture.md#compositions): the shape of the plan
+// it reads, which the render plan of @snowy-media/timeline fits, and the one clip of a plan it
+// plays, checked. Times on the composition are microseconds; a source point is in its stream's
+// time base.
 
 /** A rational number, `[numerator, denominator]`. */
 export type Ratio = [number, number];
@@ -32,7 +33,7 @@ export interface PlanVideoLayer extends PlanLayer {
   transform: { x: unknown; y: unknown; scaleX: unknown; scaleY: unknown; rotation: unknown };
 }
 
-/** Faded in up to `fadeIn` and out from `fadeOut`. */
+/** An audio layer, faded in from `start` up to `fadeIn` and out from `fadeOut` to `end`. */
 export interface PlanAudioLayer extends PlanLayer {
   gainDb: unknown;
   pan: unknown;
@@ -59,7 +60,7 @@ export interface Composition {
   duration: number;
   /** What plays from `from` to `to`, in microseconds. */
   plan(from: number, to: number): Plan;
-  /** The file asset `asset` is in. */
+  /** The handle of the file that holds `asset`. */
   source(asset: string): FileSystemFileHandle | Promise<FileSystemFileHandle>;
 }
 
@@ -151,8 +152,9 @@ function inStep(v: PlanVideoLayer, a: PlanAudioLayer) {
 /**
  * The one clip `plan` plays within `duration` microseconds, or undefined for a plan that plays
  * nothing there. Throws a NotSupportedError for what the engine does not play: more than one
- * layer of video or audio, video and audio that are not of one file in step, a transition, an
- * effect, a speed, and any opacity, blend, transform, gain, pan or fade but the plain one.
+ * layer of video or audio, video and audio that are not of one file in step, a source other than
+ * a file, a transition, an effect, a speed other than 1, and any opacity, blend, transform, gain,
+ * pan or fade but the plain one.
  */
 export function clipOf(plan: Plan, duration: number): Clip | undefined {
   const { video, audio } = layersOf(plan);
@@ -165,7 +167,7 @@ export function clipOf(plan: Plan, duration: number): Clip | undefined {
   const first = v ?? a;
   if (!first || !("asset" in first.source)) return undefined;
   if (v && a && !inStep(v, a)) throw unsupported("video and audio that are not in step");
-  // What of the clip plays within the composition, in the file.
+  // The part of the clip that plays within the composition, in the file's time.
   const { offset, ...place } = placeOf(first);
   const from = Math.max(place.in, -offset);
   const to = Math.min(place.out, duration - offset);

@@ -18,7 +18,7 @@ export type LinkEvents = {
   message(value: unknown): unknown;
   /** An object the peer sent this one on request. */
   object(key: string, bytes: Bytes): unknown;
-  /** The link closed, from either end. Nothing more arrives on it, and nothing sent goes. */
+  /** The link closed, from either end. Nothing more arrives on it, and nothing sent on it goes. */
   close(): unknown;
 };
 

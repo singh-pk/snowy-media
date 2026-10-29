@@ -5,7 +5,7 @@
 // the selected audio, then video, so every track of a moment arrives before the next moment.
 //
 // The source asks for the next chunk whenever its stream will accept more, so pushing runs as
-// fast as its upload, and on nothing else. It holds at most 4 requests per peer, so it stays
+// fast as its upload allows, with no clock. It holds at most 4 requests per peer, so it stays
 // bounded whatever a peer sends.
 
 import type { Catalog } from "./catalog";
@@ -23,7 +23,7 @@ export const SOURCE_ROOM = 4;
 /** A chunk to send: live on its `media/<track>`, or to one peer through its `deliver`. */
 export type Send = { to: "track"; slot: ChunkSlot } | { to: "peer"; peer: KeyId; slot: ChunkSlot };
 
-// A peer's request, and when it was first asked, counted.
+// A peer's request. `at` orders requests by when they were first asked, as a count, not a time.
 type Request = { peer: KeyId; slot: ChunkSlot; at: number };
 
 export type PushQueueOptions = {
@@ -58,7 +58,8 @@ const countOf = (requests: Request[], peer: KeyId) =>
   requests.reduce((count, r) => (r.peer === peer ? count + 1 : count), 0);
 
 function createCuts() {
-  // Each chunk ends where the next begins, as in the chunk index.
+  // `bounds` holds each chunk's start and then the last one's end, as the chunk index does: each
+  // chunk ends where the next begins.
   const state = { bounds: [] as number[], ended: false };
   const count = () => Math.max(0, state.bounds.length - 1);
 
@@ -159,7 +160,7 @@ function createLive(tracks: Catalog["tracks"], cuts: Cuts) {
     return track === undefined ? undefined : { track, index };
   }
 
-  // Forgets the target once all its chunks have gone.
+  // The seek target's next unsent chunk. Forgets the target once all its chunks have gone.
   function target(): ChunkSlot | undefined {
     if (state.targetUs === undefined) return undefined;
     const index = cuts.covering(state.targetUs);

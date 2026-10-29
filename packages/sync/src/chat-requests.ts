@@ -12,7 +12,10 @@ import { isKeyId, type Bytes, type KeyId } from "./crypto";
 type ChatRequest = { type: "chat-request"; author: KeyId; firstSeq: number };
 /** The responder holds none of what a `chat-request` asked for. */
 type ChatGone = { type: "chat-gone"; author: KeyId; firstSeq: number };
-/** Asks for every message beyond these seqs, each the highest held with none missing below. */
+/**
+ * Asks for every message after these seqs: for each author, the highest seq the asker holds with
+ * none missing below it.
+ */
 type ChatVersions = { type: "chat-versions"; versions: Record<KeyId, number> };
 
 export type ChatControl = ChatRequest | ChatGone | ChatVersions;
@@ -20,7 +23,7 @@ export type ChatControl = ChatRequest | ChatGone | ChatVersions;
 const isVersions = (value: unknown): value is Record<KeyId, number> =>
   isRecord(value) && Object.entries(value).every(([a, seq]) => isKeyId(a) && isCount(seq, 0));
 
-/** A chat message received from a peer, checked, or undefined for anything else. */
+/** A chat repair message received from a peer, checked, or undefined for anything else. */
 export function checkChatControl(value: unknown): ChatControl | undefined {
   if (!isRecord(value)) return undefined;
 
@@ -49,9 +52,9 @@ export type ChatResponderOptions = {
 export function createChatResponder(options: ChatResponderOptions) {
   const { holdings } = options;
 
-  // A reply sealed, or undefined if there is none or sealing it failed: a stored message that
-  // no longer checks, say. Repair moves only on events, so a reply that can't be sent must
-  // still answer, with chat-gone.
+  // A reply sealed, or undefined if there is none or it fails to seal, as when a stored message no
+  // longer checks. Repair moves only on events, so a request whose reply can't be sent must still
+  // be answered, with `chat-gone`.
   async function sealed(reply: ChatBatch | undefined) {
     if (reply === undefined) return undefined;
 

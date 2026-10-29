@@ -52,8 +52,9 @@ const grantBytes = ({ session, rights, to, by, chain }: Omit<Fields, "sig">) =>
 
 /**
  * A grant of `rights` in `session`, signed by `signer`: the project key's, or a peer's passing on
- * rights from `chain`, the grant it holds. Leave out `to` only for an invite. Throws for rights
- * that leave out one another needs, or a chain that isn't a grant.
+ * rights from `chain`, the grant it holds. Leave out `to` only for an invite. Rejects with a
+ * `TypeError` if `rights` is empty or leaves out one that another needs, such as `edit` without
+ * `propose`, or if `chain` isn't a grant.
  */
 export async function signGrant(
   signer: CryptoKeyPair,
@@ -72,8 +73,8 @@ export async function signGrant(
   return ordered({ session, rights, to, by, chain, sig: base64url(sig) });
 }
 
-// Rights in their one spelling: the first of RIGHTS and any after it, each needing the one
-// before, so `view` alone, then with `propose`, then with `edit`.
+// Rights in their one canonical spelling, a prefix of `RIGHTS`: `view`, then `view` and `propose`,
+// then all three.
 function readRights(value: unknown): Right[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > RIGHTS.length) return undefined;
   // copy: the grant's own rights, neither the caller's array nor the frozen RIGHTS.
@@ -104,9 +105,9 @@ function readGrantAt(value: unknown, depth: number): Grant | undefined {
 const grantSigned = (grant: Grant) => signedBy(grant.by, grant.sig, grantBytes(grant));
 
 /**
- * Whether a grant gives its rights in `session`: signed by the project key, or by a peer that
- * names its holder in `to` and passes on no more than the valid project grant in its `chain`
- * gives the peer, as its `to` or as an invite. It reads the grant back first, so a grant parsed
+ * Whether a grant gives its rights in `session`. It does if the project key signed it, or if a
+ * peer signed it with a `to` and its `chain` is a valid project-key grant to that peer, or an
+ * invite, holding every right it passes on. It reads the grant back first, so a grant parsed
  * with its keys in another order checks the same, and one in no shape at all gives nothing.
  */
 export async function verifyGrant(grant: Grant, session: KeyId): Promise<boolean> {

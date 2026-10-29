@@ -26,7 +26,10 @@ type BranchId = Batch["branch"];
 type Merge = Extract<Operation, { op: "branch.merge" }>;
 type Project = ReturnType<typeof createProject>;
 
-/** `concurrent` is whether its author couldn't see a change. */
+/**
+ * An entry applied. `concurrent` is whether its batch, or what a merge in it brought, clashes with
+ * a change on the branch that its author hadn't seen (docs/architecture.md#concurrent-edits).
+ */
 type Entered = {
   entry: Entry;
   hash: string;
@@ -37,10 +40,10 @@ type Entered = {
 };
 
 /**
- * The batches a merge brings, from the branch it names; the last entry of this branch their
- * authors could see, if that branch started from this one; and which batches they had seen,
- * those of the branch's document at the last entry merged. "missing" while this peer doesn't
- * have every entry it names; "stale" for entries it never will.
+ * Finds what a merge brings from the branch it names: its `batches`; `since`, the last entry of
+ * this branch their authors could see, when that branch started from this one; and `saw`, whether
+ * a batch is in that branch's document at the last entry merged. Returns "missing" while this peer
+ * lacks an entry the merge names, and "stale" for one it never will have.
  */
 export type Merging = (
   op: Merge,
@@ -98,8 +101,8 @@ export const SNAPSHOT_EVERY = 512;
 
 const keyOf = (ref: { author: KeyId; seq: number }) => `${ref.author} ${ref.seq}`;
 
-// The provisional order of pending batches: by clock, then author, by code unit, then seq, and
-// last by hash, for an author who signed two batches with one seq.
+// The provisional order of pending batches: by clock, then by author compared by code unit, then
+// by seq, and last by hash, for an author who signed two batches with one seq.
 function byClock(a: Held, b: Held) {
   const ka = `${a.batch.hlc} ${a.batch.author}`;
   const kb = `${b.batch.hlc} ${b.batch.author}`;
@@ -124,7 +127,7 @@ function record(change: Change, applied: Pick<Applied, "changed" | "ranges">) {
   widen(change.ranges, applied.ranges);
 }
 
-/** Adds what `more` changed to `change`. */
+/** Adds what `more` changed to `change`, widening each sequence's range to cover both. */
 export function combine(change: Change, more: Change) {
   record(change, more);
   change.entered.push(...more.entered);
@@ -242,7 +245,8 @@ function undoState(state: State, author: KeyId) {
   return { mine, undone, isUndo };
 }
 
-// A batch of only reverts and branch operations is passed over: reverting to before it undoes it.
+// Passes over a batch with nothing an undo takes back: only skipped operations, reverts and
+// branch operations, which `undoBatch` leaves alone.
 function undoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone } = undoState(state, author);
   const found = mine.find(
@@ -256,7 +260,8 @@ function undoable(state: State, author: KeyId): BatchRef | undefined {
   return found === undefined ? undefined : { author, seq: found.batch.seq };
 }
 
-// None once the author edits after their undo; a redo is an undo of an undo, so never redone.
+// Undefined once the author edits after their undo. A redo is an undo of an undo, so it is passed
+// over and never itself redone.
 function redoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone, isUndo } = undoState(state, author);
 
@@ -483,8 +488,8 @@ async function sequenceNow(state: State, peer: CryptoKeyPair) {
   if (self !== state.sequencer) throw new RangeError("only the sequencer appends");
   const change = emptyChange();
   const made: Entry[] = [];
-  // Entries it signed that wait for their batches, as after opening a project with a log that
-  // didn't read, hold numbers it must not sign again.
+  // While entries wait for their batches, as after opening a project with a log that could not
+  // all be read, their numbers are taken, so the sequencer signs nothing.
   if (state.early.size > 0) return { entries: made, change };
   const queue = waiting(state);
   const isReady = (each: Held) => ready(state, each);

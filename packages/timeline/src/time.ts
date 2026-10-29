@@ -5,7 +5,10 @@
 // Every conversion is computed exactly, as a fraction of integers in BigInt, then rounded once,
 // halves upwards, so every peer gets the same integer whatever its floating point does.
 
-/** Flicks per second: one frame at every common video rate, and one sample at every common audio rate, is a whole number of them. */
+/**
+ * Flicks per second. One frame at every common video rate, and one sample at every common audio
+ * rate, is a whole number of flicks.
+ */
 export const FLICKS_PER_SECOND = 705_600_000;
 
 const FLICKS = BigInt(FLICKS_PER_SECOND);
@@ -56,7 +59,10 @@ export function frameFlicks([num, den]: Ratio) {
   return safe((FLICKS * d) / n);
 }
 
-/** `value` units of `timeBase` seconds, in flicks. */
+/**
+ * `value` units of a time base of `num / den` seconds, in flicks, rounded to the nearest, halves
+ * upwards.
+ */
 export function toFlicks(value: number, [num, den]: Ratio) {
   return roundHalfUp(
     integer(value, "value") * positive(num, "time base") * FLICKS,

@@ -27,8 +27,8 @@ export type ChatSenderOptions = {
    */
   pending?: ChatMessage[] | undefined;
   /**
-   * Hands a batch to the stream; `writable()` is called once the stream takes more. A throw
-   * keeps the batch's messages queued for then.
+   * Hands a batch to the stream. No other batch is handed over until `writable()` is called again,
+   * once the stream takes more; a throw keeps the batch's messages queued until then.
    */
   publish(key: string, bytes: Bytes): void;
 };
@@ -43,7 +43,7 @@ export function createChatSender(options: ChatSenderOptions) {
   const queue: ChatMessage[] = options.pending ?? [];
   const batches = createBatches(options, queue);
   const state: { last?: ChatMessage | undefined } = { last: options.last };
-  // Writes run one after another: each chains to the one before.
+  // Writes run one after another, since each message's `prev` is the hash of the one before.
   let written: Promise<unknown> = Promise.resolve();
 
   /**
@@ -131,8 +131,8 @@ function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
   }
 
   function putBack(messages: ChatMessage[]) {
-    // copy: `unshift` takes the messages as arguments, a batch's few: those written while the
-    // stream was busy.
+    // copy: `unshift` takes the messages as arguments, which is cheap for a batch's few: those
+    // written while the stream was busy.
     queue.unshift(...messages);
   }
 
@@ -170,7 +170,7 @@ function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
 
   /**
    * The stream takes more: the event that sends what has queued. Resolves once the batch is
-   * handed over; rejects, keeping the messages queued, if it couldn't be sealed.
+   * handed over; rejects, keeping the messages queued, if it couldn't be sealed or published.
    */
   function writable() {
     state.writable = true;

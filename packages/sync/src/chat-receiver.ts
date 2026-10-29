@@ -81,7 +81,7 @@ export function createChatReceiver(options: ChatReceiverOptions) {
     for (const { messages } of records.values()) {
       for (const message of messages) {
         clock.receive(message.hlc);
-        // Shown before: none of them is late now.
+        // These were shown in an earlier visit, so none of them is late now.
         log.add(message, NOT_LATE);
       }
     }

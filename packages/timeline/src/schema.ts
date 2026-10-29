@@ -3,7 +3,7 @@
 //
 // Schemas for canonical JSON (docs/architecture.md#batches): a checked value comes back with its
 // fields in schema order, absent ones left out, and an open record's keys in code-point order, so
-// JSON.stringify of it is the canonical bytes, and re-encoding gives back only canonical bytes.
+// `JSON.stringify` of it is the canonical bytes, and re-encoding gives back only canonical bytes.
 
 /** Thrown for a value that doesn't fit its schema. */
 export class InvalidError extends Error {
@@ -146,7 +146,7 @@ export function record(fields: Fields): Schema<Record<string, unknown>> {
 function byCodePoint(a: string, b: string) {
   let i = 0;
 
-  // Equal so far, so both strings are at the same index i.
+  // Equal so far, so both strings are at the same index `i`.
   while (i < a.length && i < b.length) {
     const left = a.codePointAt(i) ?? 0;
     const right = b.codePointAt(i) ?? 0;
@@ -157,7 +157,10 @@ function byCodePoint(a: string, b: string) {
   return a.length - b.length;
 }
 
-/** An open record: keys matching `key`, in code-point order, each value checked by `value`. */
+/**
+ * An open record of at most `max` keys, each matching `key`, returned in code-point order, with
+ * each value checked by `value`.
+ */
 export function map<T>(
   key: RegExp,
   value: Schema<T>,

@@ -34,7 +34,10 @@ export function clipAnchorStart(clip: AnchorClip, at: number, rate?: Ratio) {
   return rate === undefined ? start : snapToFrame(start, rate);
 }
 
-/** Where an item connected to a sequence's start at `at` flicks starts; video snaps to a frame. */
+/**
+ * Where an item connected to a sequence's start at `at` flicks starts. A video item passes its
+ * sequence's `rate` and is snapped down to a frame.
+ */
 export function originAnchorStart(at: number, rate?: Ratio) {
   return rate === undefined ? flicks(at) : snapToFrame(at, rate);
 }
@@ -62,9 +65,11 @@ function byStartThenId(a: Connected, b: Connected) {
 }
 
 /**
- * By start, then id, each item takes the lane it prefers if free over its whole range, else the
- * nearest free lane above. Earlier items all start at or before it, so a lane is free once
- * everything in it has ended by its start.
+ * The lane of each item, by id. Taken by start, then id, each item gets the lane it prefers if
+ * that lane is free over its whole range, or else the nearest free lane above. The items before it
+ * all start at or before it, so a lane is free once everything in it has ended by its start.
+ * Throws a RangeError for a lane or duration that isn't a non-negative safe integer, or a start
+ * or end that isn't a time in flicks.
  */
 export function assignLanes(items: Connected[]) {
   const ends = new Map<number, number>();

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render worker's queue of decoded frames, in presentation order whatever order the
-// decoder emits them in, and bounded by the bytes they hold, so memory stays bounded at any
-// resolution (AGENTS.md rule 4).
+// The render worker's queue of decoded frames (docs/architecture.md#video-output). It keeps them in
+// presentation order whatever order the decoder emits them in, and is bounded by the bytes they
+// hold, so memory stays bounded at any resolution (the engine's AGENTS.md, rule 4).
 
 /** What the queue needs of a frame: a VideoFrame, or a stand-in in a test. */
 export interface QueuedFrame {
@@ -24,7 +24,8 @@ export function createFrameQueue<F extends QueuedFrame>(
   /** Takes ownership of `frame`. */
   function push(frame: F) {
     // Frames nearly always arrive in order, so the search starts from the end.
-    // Shifted in place, not spliced, so nothing is allocated per frame.
+    // Later frames move up in place rather than through `splice`, so nothing is allocated per
+    // frame.
     let at = frames.length;
     const n = size(frame);
 
@@ -49,8 +50,8 @@ export function createFrameQueue<F extends QueuedFrame>(
   }
 
   /**
-   * Closes the frames due at `time` (microseconds) but the latest: they would never be shown
-   * in time, as at a seek's target.
+   * Closes every frame due at `time` (microseconds) except the latest, since they would never be
+   * shown in time, as when a seek reaches its target.
    */
   function drop(time: number) {
     let due = 0;

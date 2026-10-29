@@ -62,9 +62,9 @@ export class RelayRequestError extends Error {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-// Ranks by a track name's first segment, highest first (docs/architecture.md#mapping-to-moq):
-// control, then inbox, then chat, then the records, then init, then media, then probe. The order
-// among media tracks, by kind, comes with the source, which knows each track's kind.
+// Ranks by a track name's first segment, highest first (docs/architecture.md#mapping-to-moq). A
+// name not listed here, such as `probe`, ranks last. Every media track ranks alike, since the
+// source's push queue (src/push-queue.ts) already sends a moment's tracks in order of kind.
 const RANK: Record<string, number> = {
   control: 0,
   ctl: 1,
@@ -307,8 +307,9 @@ function createSubscribe(remote: Moq.Origin.Producer, state: { closed: boolean }
 
 type RelayContext = {
   self: KeyId;
-  /** What this peer publishes, and what the relay announces to it, relative to the session. */
+  /** What this peer publishes, relative to the session's root. */
   local: Moq.Origin.Producer;
+  /** What the relay announces to this peer, relative to the session's root. */
   remote: Moq.Origin.Producer;
   events: ReturnType<typeof emitter<RelayEvents>>;
   /** The current link to each peer: a link leaves it as it shuts. */
@@ -320,8 +321,8 @@ type RelayContext = {
 type RelayLink = {
   link: Link;
   /**
-   * Whether this link's inbox from the peer has been announced, which a withdrawal of an
-   * earlier one, coming late, mustn't close.
+   * Whether the peer's inbox for this link has been announced. Until it has, a withdrawal can
+   * only be a late one for an earlier link's inbox, and must not close this link.
    */
   seen: { inbox: boolean };
   /** The other end has announced its side: subscribe, then say this end is listening. */
@@ -349,9 +350,9 @@ type LinkEnds = {
 };
 
 // This end's side of a link, `inbox/<peer>/<self>`. Its tracks exist before the broadcast is
-// announced, so the other end finds both when it subscribes on seeing it. An earlier link to the
-// peer has withdrawn its broadcast at this path already: a link leaves `links`, which is the only
-// way to a new one, as it shuts.
+// announced, so the other end finds both when it subscribes on seeing it. No earlier link's
+// broadcast is still at this path: a link leaves `links` as it shuts, and only a link missing
+// from `links` is made anew.
 function outbox(local: Moq.Origin.Producer, peer: KeyId, self: KeyId) {
   const broadcast = local.createBroadcast(Moq.Path.from("inbox", peer, self));
   const ctl = publisher(broadcast, "ctl");

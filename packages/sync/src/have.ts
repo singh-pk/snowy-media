@@ -5,14 +5,12 @@
 // may publish its broadcast, and a direct link is the peer's own. `n` starts from the publisher's
 // creation time in ms, so it grows across reconnects and reloads, and an update from before one,
 // arriving late on another path, can never pass for a newer one.
-//
-// A forwarder publishes when its stream will accept more, so a burst of stores becomes one update.
 
 import { isCount, isRecord } from "./chat";
 import type { ChunkSlot } from "./chunk";
 import { seal, unseal, type Bytes, type KeyId, type SealedObject } from "./crypto";
 
-/** One track's ranges: each `[start, end)` of indexes, in order, apart from each other. */
+/** One track's ranges: each `[start, end)` of indexes, in increasing order, with gaps between. */
 export type TrackRanges = { track: number; ranges: [number, number][] };
 
 export type Have = { n: number; tracks: TrackRanges[] };
@@ -145,7 +143,10 @@ function parsed(bytes: Bytes): unknown {
 }
 
 export type HavePublisherOptions = {
-  /** What this forwarder holds now, read from the store when an update goes, leaving out tracks holding nothing. */
+  /**
+   * What this forwarder holds now, read from the store as each update goes, leaving out tracks
+   * that hold nothing.
+   */
   tracks(): TrackRanges[];
   /** Publishes an update: on the `have` track, and to the peers linked directly. */
   send(have: Have): void;
@@ -153,7 +154,8 @@ export type HavePublisherOptions = {
 
 /**
  * Publishes this forwarder's ranges: the first as soon as the stream will accept it, then one
- * whenever the store has changed and the stream will accept more.
+ * whenever the store has changed and the stream will accept more, so a burst of stores becomes one
+ * update.
  */
 export function createHavePublisher(options: HavePublisherOptions) {
   const state = { n: Date.now(), changed: true, writable: false };

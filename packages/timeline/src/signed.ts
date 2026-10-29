@@ -3,7 +3,7 @@
 //
 // Signed objects (docs/architecture.md#batches): canonical JSON, at most 1 MiB, refused unless it
 // re-encodes to its bytes, so every peer hashes and verifies the same bytes. A signature covers a
-// domain naming the kind, then the bytes without `sig`: it can't pass for anything else a key signs.
+// domain naming the kind, then the bytes without `sig`, so it can't pass for another kind.
 
 import type { KeyId } from "./ids";
 import { InvalidError, string, type Schema } from "./schema";
@@ -51,7 +51,10 @@ export function signedFormat<S extends { sig: string }>(options: {
   /** An object's canonical bytes. Throws an `InvalidError` for a malformed or oversized one. */
   const encode = (value: S) => bytesOf(check(value));
 
-  /** Reads an object's bytes, refusing any that aren't its canonical bytes. */
+  /**
+   * Reads an object's bytes. Throws an `InvalidError` for bytes that are over 1 MiB, malformed, or
+   * not the object's canonical bytes.
+   */
   function decode(bytes: Uint8Array): S {
     if (bytes.byteLength > MAX_SIGNED_BYTES) throw new InvalidError("", `${noun} over 1 MiB`);
     const value = check(parseJson(bytes));

@@ -31,7 +31,7 @@ const SETTABLE: Record<string, ReadonlySet<string>> = {
 };
 
 /**
- * The fields of a clip a keyframe may animate: its picture, its sound and its generator's
+ * The paths of the clip fields a keyframe may animate: its picture, its sound and its generator's
  * parameters, never its timing or its place.
  */
 export const ANIMATED = /^(video|audio|source\.params)\./;
@@ -41,7 +41,8 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 /**
  * `record` with the leaf at `path` set to `value`, as a new object to check against its schema.
- * A clip's generator parameters are reached as `source.params.<name>`.
+ * A clip's generator parameters are reached as `source.params.<name>`. Skips the operation as
+ * malformed if `*.set` may not change `path`, or `path` runs through a value that is not an object.
  */
 export function withLeaf(record: object, kind: string, path: string, value: Value) {
   const segments = path.split(".");

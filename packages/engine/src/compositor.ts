@@ -32,7 +32,7 @@ interface Gpu {
   readonly sampler: GPUSampler;
   // The view uniform every picture's bind group reads, written before each draw.
   readonly viewBuffer: GPUBuffer;
-  // The import's `undo`, written before each frame imported.
+  // The route's `undo` for an imported frame, written before each import.
   readonly undoBuffer: GPUBuffer;
   readonly pool: Pool;
 }
@@ -159,7 +159,7 @@ function makeImported(gpu: Gpu, key: string, width: number, height: number): Slo
   return gpu.pool.makeSlot({ key, textures: [picked], bindGroup, imported });
 }
 
-// Converts `frame` into a picture with Chromium's conversion, undoing Apple's gamma (`apple`)
+// Converts `frame` into a picture with Chromium's conversion, undoing Apple's gamma where `apple`
 // and then mapping it by `undo`.
 function uploadImported(gpu: Gpu, frame: VideoFrame, apple: boolean, undo: Float32Array) {
   const { device, pipelines, pool } = gpu;
@@ -212,10 +212,10 @@ export function createCompositor(
   const uploads = { last: Promise.resolve() };
 
   /**
-   * Uploads `frame`, which it takes and closes, into a picture, the way its stream's `route`
-   * goes, converting it by the colour the stream states: a decoder fills in what the stream leaves
-   * out its own way. A frame whose planes cannot be read (a 10-bit hardware frame) is imported.
-   * Uploads complete in the order they are called.
+   * Uploads `frame` into a picture the way its stream's `route` says, and closes the frame. It
+   * converts by the colour the stream states, not the frame's, as each decoder fills in what a
+   * stream leaves out its own way. A frame whose planes cannot be read (a 10-bit hardware frame)
+   * is imported. Uploads complete in the order they are called.
    */
   async function upload(frame: DecodedFrame, route: Route): Promise<Picture> {
     const before = uploads.last;

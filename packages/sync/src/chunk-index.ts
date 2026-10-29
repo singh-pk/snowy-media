@@ -39,7 +39,10 @@ const pageKey = (page: number, count: number) => `index/${page}@${count}`;
 
 export const listed = ({ bounds }: IndexPage) => bounds.length - 1;
 
-/** Whether `bounds`, as `joinedIndex` gives them, list a chunk of `page`: no page before it is missing. */
+/**
+ * Whether `bounds`, as `joinedIndex` gives them, list a chunk of `page`, so no page before it is
+ * missing.
+ */
 export const reachesPage = (bounds: number[], page: number) =>
   bounds.length - 1 > page * INDEX_PAGE;
 
@@ -79,7 +82,10 @@ function checkPage(value: unknown): IndexPage {
   return { page, bounds, bytes: checkSizes(value.bytes, bounds.length - 1) };
 }
 
-/** Throws an `InvalidRecordError` for a malformed page. */
+/**
+ * Signs an index page with the session key. Resolves to its object key and bytes. Rejects with an
+ * `InvalidRecordError` for a malformed page.
+ */
 export async function encodeIndexPage(session: CryptoKeyPair, page: IndexPage) {
   const canonical = checkPage(page);
   const bytes = await signRecord(session, DOMAIN, canonical);

@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Audio output on the main thread: the AudioWorklet (src/audio.worklet.ts) that plays a PCM
-// ring into an AudioContext and keeps the clock.
+// Audio output on the main thread (docs/architecture.md#audio-and-clock): the AudioWorklet
+// (src/audio.worklet.ts) that plays a PCM ring into an AudioContext and keeps the clock.
 
 import { AUDIO_PROCESSOR, type AudioOptions, pcmFormat } from "./pcm";
 
 /**
- * Plays PCM ring `ring` on `context`, from when the context runs, with the worklet module at
- * `worklet` (a page that bundles this file elsewhere passes it).
+ * Plays PCM ring `ring` on `context` once the context runs, through the worklet module at
+ * `worklet`, which a page that bundles this file elsewhere passes. Rejects with a `RangeError`
+ * if the ring's sample rate is not the context's.
  */
 export async function createAudioOutput(
   context: BaseAudioContext,

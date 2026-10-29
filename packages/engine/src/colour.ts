@@ -20,9 +20,10 @@ export function identity(out: Float32Array) {
 }
 
 /**
- * Writes into `out` the map from R′G′B′ as Chromium converts `depth`-bit planes it takes for
- * `assumed` to R′G′B′ as the stream states, `stated`: back through the one matrix to the planes,
- * and on through the other. Both are affine, so the map is too.
+ * Writes into `out` the map that undoes Chromium's conversion: from R′G′B′ as Chromium made it
+ * from `depth`-bit planes it took for colour space `assumed`, to R′G′B′ as the stream's stated
+ * colour space `stated` makes it. It goes back through `assumed`'s matrix to the planes and on
+ * through `stated`'s; both are affine, so the map is too.
  */
 export function undoMatrix(
   out: Float32Array,
@@ -108,7 +109,7 @@ export function yuvMatrix(out: Float32Array, space: VideoColorSpaceInit, depth: 
 
   const [kr, kb] = LUMA[space.matrix ?? "bt470bg"] ?? [0.299, 0.114];
   const kg = 1 - kr - kb;
-  // R = y′ + vr c′r, G = y′ - ub c′b - vr2 c′r, B = y′ + ub2 c′b.
+  // R = y′ + vr c′r, G = y′ - ug c′b - vg c′r, B = y′ + ub2 c′b.
   const vr = 2 * (1 - kr);
   const ub2 = 2 * (1 - kb);
   const ug = (ub2 * kb) / kg;

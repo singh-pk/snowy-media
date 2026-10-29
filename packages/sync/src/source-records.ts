@@ -74,7 +74,7 @@ async function opened(content: CryptoKey, { key, sealed }: SealedObject) {
 }
 
 /**
- * Signs and seals one of the source's records, for the source to publish. Throws an
+ * Signs and seals one of the source's records, for the source to publish. Rejects with an
  * `InvalidRecordError` for a malformed one.
  */
 export async function sealSourceRecord(
@@ -102,8 +102,8 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     setups: Map<number, Held<CodecSetup>>;
   } = { setups: new Map(), pages: new Map() };
 
-  // Keeps a record if it is newer than what is held, checked once it is read, since another
-  // object may have been kept meanwhile. A track's setup is fixed for the session, so the first
+  // Keeps a record if it is newer than what is held, checked only once it is decoded, since
+  // another may have been kept meanwhile. A track's setup is fixed for the session, so the first
   // is kept and a later one, which can only repeat it, is not.
   function keep(record: SourceRecord, object: SealedObject) {
     if (record.kind === "catalog") {
@@ -138,7 +138,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
   }
 
   // Tells `onRecord`, reporting what it throws rather than rejecting `receive`: the record is
-  // kept already, and a later copy of it, kept no more, would never reach `onRecord` again.
+  // kept already, and a later copy of it would not be kept, so would never reach `onRecord`.
   function report(record: SourceRecord) {
     try {
       options.onRecord?.(record);
@@ -180,7 +180,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
   /**
    * Whether this peer holds the whole state a joiner needs: a catalog, a control record, the setup
    * of every track in the catalog, and no page of the index missing before the last it holds. A
-   * full page never goes again, so a peer that missed one finds it only by asking for the state.
+   * full page is never sent again, so a peer that missed one gets it only by asking for the state.
    */
   function complete() {
     const { catalog, control } = held;

@@ -41,7 +41,10 @@ const refusalFields = {
 const unsignedRefusal = record(refusalFields);
 const signedRefusal = record({ ...refusalFields, sig: signature });
 
-/** A batch a sequencer refused, which settles its seq on the branch. */
+/**
+ * A batch a sequencer refused. It settles that seq on the branch, so the author's next batch can
+ * follow it.
+ */
 export type Refusal = ReturnType<typeof signedRefusal>;
 
 /** Entries' bytes, signatures and hashes, as `prev` and an `EntryRef` name them. */

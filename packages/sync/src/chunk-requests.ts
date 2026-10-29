@@ -101,7 +101,8 @@ export function createChunkServer(options: ChunkServerOptions) {
     }
   }
 
-  // A chunk cancelled while it was read isn't sent.
+  // Sends the asker's waiting chunks one at a time, most urgent first, until none is left. A
+  // chunk cancelled while it was being read isn't sent.
   async function drain(peer: KeyId, asker: Asker) {
     for (let next = first(asker.waiting); next !== undefined; next = first(asker.waiting)) {
       if (askers.get(peer) !== asker) return;

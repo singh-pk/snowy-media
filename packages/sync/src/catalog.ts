@@ -119,7 +119,8 @@ function checkCatalog(value: unknown): Catalog {
 
 const COUNTS = ["codedWidth", "codedHeight", "sampleRate", "numberOfChannels"] as const;
 
-// A codec setup as signed, in canonical shape with its description as base64url, and as read.
+// Checks a codec setup and returns it twice: `record` as signed, in canonical shape with its
+// description as base64url, and `setup` as read, with the description as bytes.
 function checkSetup(value: Record<string, unknown>) {
   onlyFields(value, SETUP_FIELDS);
 
@@ -167,7 +168,7 @@ function descriptionBytes(description: unknown) {
 }
 
 /**
- * Signs a catalog with the session key. Returns its object key and bytes. Throws an
+ * Signs a catalog with the session key. Resolves to its object key and bytes. Rejects with an
  * `InvalidRecordError` for a malformed one.
  */
 export async function encodeCatalog(session: CryptoKeyPair, catalog: Catalog) {
@@ -189,8 +190,8 @@ export async function decodeCatalog(sessionKey: CryptoKey, key: string, bytes: B
 }
 
 /**
- * Signs a track's codec setup with the session key. Returns its object key and bytes. Throws an
- * `InvalidRecordError` for a malformed one.
+ * Signs a track's codec setup with the session key. Resolves to its object key and bytes.
+ * Rejects with an `InvalidRecordError` for a malformed one.
  */
 export async function encodeSetup(session: CryptoKeyPair, setup: CodecSetup) {
   const { description, ...rest } = setup;

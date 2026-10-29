@@ -36,7 +36,7 @@ export type Snapshot = {
 
 const byId = (state: { id: ItemId }) => state.id;
 
-// Adds to `target`'s states those only `now` has, removed, so a revert keeps their ids taken.
+// `target`'s states, plus each one only `now` has, marked removed, so a revert keeps its id taken.
 function withRemoved<T extends { removed: boolean }>(
   target: T[],
   now: T[],
@@ -79,8 +79,8 @@ export function snapshotOf(records: Records): Snapshot {
 }
 
 /**
- * Takes a snapshot's state into an empty document, building the indexes and storylines again; a
- * removed storyline item has no length, as removing it left it.
+ * Takes a snapshot's state into an empty document, building the indexes and storylines again. A
+ * removed storyline item gets a length of 0, as removing it had left it.
  */
 export function load(records: Records, state: Snapshot) {
   records.name = state.name;

@@ -24,9 +24,12 @@ export interface Slot extends Picture {
   readonly key: string;
   readonly textures: GPUTexture[];
   readonly colour: GPUBuffer | undefined;
-  // The view of a picture Chromium converts into, made once.
+  /**
+   * For a frame imported as an external texture, the view that Chromium's conversion of it is
+   * drawn into, made once.
+   */
   readonly imported: GPUTextureView | undefined;
-  // Where each plane is written, made once.
+  /** Where each plane is written, made once so that an upload allocates none. */
   readonly destinations: { texture: GPUTexture }[];
 }
 
@@ -90,7 +93,10 @@ export function planesOf(format: VideoPixelFormat, width: number, height: number
   };
 }
 
-// FFmpeg's frames are their visible part.
+/**
+ * A frame's visible size. A frame FFmpeg decoded holds only its visible part, so its coded size
+ * is its visible size.
+ */
 export const visibleWidth = (frame: DecodedFrame) =>
   frame instanceof VideoFrame ? (frame.visibleRect?.width ?? frame.codedWidth) : frame.codedWidth;
 export const visibleHeight = (frame: DecodedFrame) =>

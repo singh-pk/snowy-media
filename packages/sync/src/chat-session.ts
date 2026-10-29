@@ -90,8 +90,8 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   const writing: Pending = new Set();
   const state: State = { closed: false, catchUp: [] };
 
-  // A peer whose links have all gone, though an ask was ranked to it: the ask moves on, as on
-  // close.
+  // The peer's newest open link. For a peer whose links have all gone, though an ask was ranked
+  // to it, the ask moves on, as when a link closes.
   function linked(peer: KeyId) {
     if (state.closed) return undefined;
 
@@ -124,7 +124,6 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     try {
       await receiver.receive(key, bytes, from);
     } catch {
-      // Refused: nothing to do.
       return;
     }
 
@@ -190,7 +189,8 @@ type OwnChatOptions = {
   take(key: string, bytes: Bytes): Promise<void>;
 };
 
-// Messages the store holds that may never have been published go first.
+// This peer's own chat. Messages the store holds that may never have been published are sent
+// first.
 function createOwnChat(options: OwnChatOptions) {
   const { chat, self, store, log, state, writing } = options;
   // This peer's own batches on their way into the holdings, for `writable` to wait for.

@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render worker. It checks the baseline only a worker can see: WebGPU on an OffscreenCanvas,
-// WebCodecs, and importing a VideoFrame as a GPU texture, the path every WebCodecs frame takes.
-// Then each animation frame shows the frame due when it reaches the screen, by the audio clock.
+// The render worker (docs/architecture.md#playback). It checks the baseline only a worker can see:
+// WebGPU on an OffscreenCanvas, WebCodecs, and importing a VideoFrame as a GPU texture, the path
+// every WebCodecs frame takes. Then, on each animation frame, it shows the frame due when that
+// animation frame reaches the screen, by the audio clock.
 
 import { createCompositor } from "./compositor";
 import { createPcmControl } from "./pcm";
@@ -17,9 +18,9 @@ interface Gpu {
   format: GPUTextureFormat;
 }
 
-// An animation frame's length until two have been timed, and the longest one counted: a
-// longer gap is a stall, not the display's rate. The refresh is the shortest of the last
-// GAPS gaps, so one late animation frame does not move the next frame's target.
+// The refresh is the shortest of the last GAPS gaps between animation frames, so one late
+// animation frame does not move the next frame's target; until GAPS gaps are timed, the rest
+// count as REFRESH. A gap of LONGEST_REFRESH or more is a stall, not the display's rate.
 const REFRESH = 1000 / 60;
 const LONGEST_REFRESH = 50;
 const GAPS = 8;
@@ -55,9 +56,9 @@ function createPlaying(id: number, output: ReturnType<typeof createVideoOutput>,
     ahead: false,
     stuck: false,
     shown: false,
-    // Where it plays from, which a scrub moves on. Whether the frame due at the start is drawn,
-    // and the last target reached, or -1, as the GPU has drawn them and as sent to it; and
-    // whether the GPU is being waited on.
+    // `target` is where it plays from, which a scrub moves on. `drawn` and `reached` (-1 for
+    // none) say whether the start's frame is drawn and the last target reached, once the GPU has
+    // done them; `sent` holds the same as sent to the GPU; `waiting`, whether the GPU is waited on.
     target: from,
     drawn: false,
     reached: -1,
@@ -96,9 +97,9 @@ function report(playing: Playing) {
   post({ type: "video", id, ahead, stuck, drawn, shown, reached });
 }
 
-// Reports the start's frame drawn and a scrub's target reached, as sent, once the GPU has done
-// them: a paused seek and a scrub resolve on them, and a GPU that compiles a draw the first time
-// it runs, as one in software does, may take many refreshes to.
+// Once the GPU has done the work sent to it, reports the start's frame drawn and a scrub's target
+// reached as they were when sent. A paused seek and a scrub resolve on these, and a GPU that
+// compiles a draw the first time it runs, as a software one does, may take many refreshes.
 async function reportDone(
   playing: Playing,
   compositor: ReturnType<typeof createCompositor>,
@@ -211,8 +212,8 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
   if (!state.compositor) throw new Error("play before init");
   const compositor = state.compositor;
   const clock = createPcmControl(pcm);
-  // Its events all come in later tasks, once `playing` below is made. The media worker waits on
-  // the PCM ring's doorbell for room in either ring (src/pcm.ts).
+  // `changed` and `freed` fire only in later tasks, once `playing` below exists. The media worker
+  // waits on the PCM ring's doorbell for room in either ring (src/pcm.ts).
   const output = createVideoOutput(ring, params, {
     compositor,
     wasm,
@@ -236,20 +237,20 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
     const refresh = refreshAt(timing, time);
 
     try {
-      // Read first: if the timestamp ran then, the time heard below was carried forward by it,
-      // so the frame put up is the latest due.
+      // Read before `heard`: if the timestamp was running then, the time heard below was carried
+      // forward from it, so the frame put up is the latest due.
       const running = clock.outputRunning();
       const seen = clock.heard(performance.timeOrigin + time + refresh);
-      // The clock starts up to a sample before `from`: the frame shown is never one before.
+      // The clock starts up to a sample before the target; no frame due before the target shows.
       const at = Math.max(Math.round(seen * 1e6), playing.target);
       const black = outside(window, at);
       if (black) output.blank();
-      // Before the clip, its first frame goes up ahead, to be up when due.
+      // Before the clip, its first frame is uploaded ahead, so it is up when due.
       if (black && window && at < window.in) void output.prepare(window.in);
       const drawn = black || output.present(at);
-      // Shown by the running clock once a frame is up and none due by it is still going up,
-      // not just as it runs; a decoder slower than the clock still lets it be shown. Black is
-      // shown at once.
+      // Shown by the running clock once a frame is up and none due by then is still going up,
+      // not merely while the clock runs, so a decoder slower than the clock still gets there.
+      // Black counts as shown at once.
       const shown = running && (black || output.current(at));
       const { sent } = playing;
       sent.drawn ||= drawn;
@@ -269,16 +270,16 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
     playing.frame = self.requestAnimationFrame(draw);
   }
 
-  // For the main thread's preroll, until a frame is shown by the running clock. Stuck needs the
-  // media worker blocked first, on a PCM ring full while the context is held or a full packet
-  // ring; after that, video starved or full gets no further.
+  // Reports progress for the main thread's preroll, until a frame is shown by the running clock.
+  // Video is stuck only once the media worker is blocked, on a full PCM ring while the context is
+  // held or on a full packet ring, and video then starves or fills its frame queue.
   function update() {
     if (state.playing !== playing || playing.shown) return;
     // Watched first, so the media worker blocking after the read below runs this again.
     output.watch();
     const blocked = clock.producerWaiting() || output.blocked();
     const decoded = output.decodedTo();
-    // From the target: the frames before it are decoded, and all but one dropped.
+    // Preroll counts from `from`: the frames before it are decoded, and all but the last dropped.
     if (Number.isNaN(playing.first) && decoded > -Infinity) playing.first = Math.max(decoded, from);
     playing.ahead = decoded - playing.first >= PREROLL || output.ended();
     playing.stuck = blocked && (output.starved() || output.full());

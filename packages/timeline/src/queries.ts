@@ -112,7 +112,7 @@ export function rolesOf(records: Records, sequence: ItemId) {
     );
 }
 
-/** By param, then source point. */
+/** The keyframes of `target`, by param, then source point. */
 export function keyframesOf(records: Records, target: ItemId) {
   return [...(records.keyframes.get(target)?.values() ?? [])].toSorted((a, b) =>
     a.param === b.param ? a.at - b.at : byCodeUnit(a.param, b.param),

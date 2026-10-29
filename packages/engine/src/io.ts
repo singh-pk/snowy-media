@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Serves the FFmpeg core module's reads from a File, synchronously with FileReaderSync, so
-// FFmpeg reads a file as it reads a disk. Workers only: FileReaderSync blocks.
+// Serves the FFmpeg core module's reads from a `File` synchronously with `FileReaderSync`, so
+// FFmpeg reads a file as it reads a disk (docs/architecture.md#threads). It runs only in a worker,
+// as `FileReaderSync` blocks.
 
 import {
   AVERROR_EINVAL,
@@ -39,8 +40,8 @@ export function createFileSource(core: CoreModule) {
     return read;
   };
 
-  // whence is SEEK_SET (0), SEEK_CUR (1), SEEK_END (2) or AVSEEK_SIZE; FFmpeg masks off
-  // AVSEEK_FORCE before calling.
+  // `whence` is `SEEK_SET` (0), `SEEK_CUR` (1), `SEEK_END` (2) or `AVSEEK_SIZE`; FFmpeg masks
+  // off `AVSEEK_FORCE` before calling.
   core.snySeek = (_io, offset, whence) => {
     if (whence === AVSEEK_SIZE) return BigInt(file.size);
     const next = Number(offset) + (whence === 1 ? pos : whence === 2 ? file.size : 0);

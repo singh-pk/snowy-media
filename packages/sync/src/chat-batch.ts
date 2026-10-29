@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The chat batch (docs/architecture.md#sending). A batch always empties the author's queue, so it
-// ends with the author's checkpoint at its last message and proves itself: a batch checks out
-// wherever it came from.
+// The chat batch (docs/architecture.md#sending). A batch always empties the author's queue and
+// ends with the author's checkpoint at its last message, so it checks out on its own, wherever it
+// came from.
 
 import {
   checkCheckpoint,
@@ -34,7 +34,8 @@ export const batchKey = (author: KeyId, firstSeq: number, lastSeq: number) =>
 
 /**
  * Seals the author's queued messages, in seq order, as one batch with a checkpoint at the last,
- * signed with the author's key. Returns the object key and its bytes.
+ * signed with the author's key. Resolves with the object key and the sealed bytes; rejects with a
+ * `RangeError` for no messages.
  */
 export async function encodeBatch(
   peer: CryptoKeyPair,
@@ -50,7 +51,8 @@ export async function encodeBatch(
 
 /**
  * Seals a batch from messages and a checkpoint already signed: how any peer that holds them
- * answers a repair. The messages are one author's, consecutive, ending at the checkpoint.
+ * answers a repair. The messages must be one author's, consecutive and ending at the checkpoint,
+ * or it rejects with a `RangeError`; it rejects with an `InvalidMessageError` for a malformed one.
  */
 export async function sealBatch(content: CryptoKey, { messages, checkpoint }: ChatBatch) {
   const first = messages[0];
@@ -114,8 +116,8 @@ function checkBody(value: unknown, author: string, firstSeq: number, lastSeq: nu
 
 /**
  * Opens and checks a batch: it decrypts under its key, holds exactly the author's messages the
- * key names, and its checkpoint proves every one. Rejects with an `InvalidBatchError`, or an
- * `InvalidMessageError` for a malformed message, for anything else.
+ * key names, and its checkpoint proves every one. Rejects with an `InvalidMessageError` for a
+ * malformed message, and with an `InvalidBatchError` for any other failure.
  */
 export async function decodeBatch(
   content: CryptoKey,

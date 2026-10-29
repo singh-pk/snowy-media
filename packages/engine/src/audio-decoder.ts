@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media worker's audio decoder: an audio stream decoded with the FFmpeg core and resampled
-// into a PCM ring (src/pcm.ts) as the ring has room, from a queue of its compressed packets.
+// The media worker's audio decoder (docs/architecture.md#audio-and-clock): an audio stream decoded
+// with the FFmpeg core and resampled into a PCM ring (src/pcm.ts) as the ring has room, from a
+// queue of its compressed packets.
 
 import {
   AV_NOPTS_VALUE,
@@ -17,8 +18,8 @@ import type { ToMedia } from "./protocol";
 type AudioRequest = NonNullable<Extract<ToMedia, { type: "demux" }>["audio"]>;
 
 // How many bytes of compressed audio the media worker queues ahead of the PCM ring: minutes of
-// AAC or Opus, tens of seconds of FLAC. It lets the demuxer run ahead of the audio clock, to the
-// video packets and the end of the file long before they are due.
+// AAC or Opus, tens of seconds of FLAC. It lets the demuxer run ahead of the audio clock, so it
+// reaches the video packets, and the end of the file, long before they are due.
 const AUDIO_AHEAD = 1 << 22;
 // What a queued packet costs besides its payload: the AVPacket, its buffer and their padding,
 // counted so that small or empty packets are bounded too.
@@ -30,10 +31,11 @@ export interface Audio {
   stream: number;
   /**
    * Moves a packet of the stream out of `pkt` into the queue, or drops it once decoding is over,
-   * as at a clip's end; false while the queue is full.
+   * as at a clip's end, or the ring's consumer has closed it. Returns false while the queue is
+   * full.
    */
   queue(pkt: Ptr): boolean;
-  /** Decodes into the PCM ring as far as it has room; whether anything moved. */
+  /** Decodes into the PCM ring as far as it has room, and returns whether anything moved. */
   feed(): boolean;
   /** No more packets come: the decoder drains once the queue is empty. */
   end(): void;
@@ -69,7 +71,7 @@ export interface AudioOptions {
   start: number | undefined;
   /** Microseconds: the audio from here on is dropped. */
   until: number;
-  /** Runs once the ring holds the preroll, is full, or has all the audio. */
+  /** Called once, when the ring first holds the preroll, is full, or has all the audio. */
   buffered: () => void;
 }
 
@@ -230,8 +232,8 @@ function resample(a: State, input: Ptr) {
   pending.skip -= skipped;
 }
 
-// Writes pending frames into the ring; false once it is full. A full ring holds a second and
-// more, more than any preroll.
+// Writes pending frames into the ring; false once the ring is full. A full ring holds more than a
+// second, more than any preroll, so being full also counts as buffered.
 function write(a: State) {
   const { pending, producer } = a;
 
@@ -244,8 +246,8 @@ function write(a: State) {
   }
 
   const silent = pending.silence > 0;
-  // HEAPF32 is read for each write: the heap's buffer changes when memory grows.
   const room = a.told.most - a.told.written;
+  // HEAPF32 is read for each write: the heap's buffer changes when memory grows.
   const n = silent
     ? producer.offer(a.zeros, 0, Math.min(pending.silence, SILENCE, room))
     : producer.offer(a.ffmpeg.core.HEAPF32, pending.at, Math.min(pending.left, room));
@@ -272,15 +274,15 @@ function write(a: State) {
   return true;
 }
 
-// Starts the clock at the first decoded frame: the audio before `from` is dropped; given a
-// start, silence fills from it to where the audio starts, so the clock starts there: after a
-// seek, where Opus, for one, drops its first frames, and in a gap before a clip.
+// Starts the clock at the first decoded frame. The audio before `from` is dropped. Given a `start`,
+// silence fills from it to where the audio starts, so the clock starts at `start`: after a seek,
+// where Opus, for one, drops its first frames, and in a gap before a clip.
 function startClock(a: State) {
   const { from, rate, pending, timeBase } = a;
   const pts = a.ffmpeg.core._sny_frame_pts(a.decoder.frame);
   const first = pts === AV_NOPTS_VALUE ? 0 : (Number(pts) * timeBase.num) / timeBase.den;
   const late = (first - from / 1e6) * rate;
-  // Rounded down: the clock starts no later than `from`, so it shows no frame due after.
+  // Rounded down, so the first frame kept starts no later than `from`, and so does the clock.
   pending.skip = Math.max(0, Math.floor(-late));
   const kept = first + pending.skip / rate;
   const clock = a.start === undefined ? kept : Math.min(kept, a.start / 1e6);
@@ -324,7 +326,7 @@ function feed(a: State) {
     }
   }
 
-  // Done or closed counted once, on the pass that got there.
+  // Done or closed: the pass that gets there returns true, and any later one moves nothing.
   return moved;
 }
 

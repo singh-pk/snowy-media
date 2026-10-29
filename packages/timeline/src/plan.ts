@@ -33,7 +33,8 @@ type PlannedEffect = { id: ItemId; kind: string; params: Record<string, Animated
 /**
  * How a layer reads its source: the clip's in-point in its stream's `timeBase` (flicks for a
  * generator or a sequence), played from `start` on the timeline, in microseconds, at `speed`.
- * A source time is `in + (t − start) × speed`, in seconds converted to `timeBase`.
+ * The source time at timeline time `t` is `in + (t − start) × speed`, with `t − start`
+ * converted from microseconds to `timeBase`.
  */
 type Layer = {
   clip: ItemId;
@@ -44,7 +45,7 @@ type Layer = {
   in: number;
   timeBase: Ratio;
   start: number;
-  /** Where the clip ends on the timeline, in microseconds; a transition can play it past that. */
+  /** Where the clip ends, in microseconds; a transition can play it past either end. */
   end: number;
   speed: Ratio;
   effects: PlannedEffect[];
@@ -96,9 +97,9 @@ type Plan = {
   next: Array<VideoLayer | AudioLayer>;
 };
 
-// A clip as placed: where it starts and ends, where it plays, which a transition can widen, and
-// what orders it among the others: the storyline first, then each role in order, then each lane
-// from the lowest up.
+// A clip as placed, in flicks: `start` and `end` on the timeline, `from` and `to` where it plays,
+// which a transition can widen, and `order`, its place in compositing order: the storyline first,
+// then each role in order, then each lane from the lowest up.
 type Placed = {
   clip: Clip & { id: ItemId };
   start: number;
@@ -276,7 +277,7 @@ function crossingsOf(
     const cut = item.start + item.duration;
     let after = stories[i + 1];
 
-    // The item after the last one in the range, which the transition can reach back into it.
+    // The item after the last one in the range: the transition can play it early, inside the range.
     if (after === undefined) {
       const [found] = document.storyline(sequence, { from: cut, to: cut });
       after = found && { item: found, placed: take(found.id, found.start, [0]) };

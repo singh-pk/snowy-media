@@ -3,22 +3,21 @@
 //
 // Relay authorization (docs/architecture.md#authorization), and the server moq-relay asks through
 // `--auth-url`. It keeps nothing: each answer comes from the token, the dialed path and the app's
-// `admit` alone. It is a `fetch` handler on Web Crypto, so it runs wherever that does:
-// `Bun.serve({ fetch: authServer })`, or a Worker.
+// `admit` alone.
 
 import { isRecord } from "./chat";
 import { RIGHTS, readGrant, verifyGrant, type Grant, type Right } from "./grant";
 import { base64url, isKeyId, keyId, sign, signedBy, type KeyId } from "./crypto";
 
-/** How long a token admits a connection after it is made. */
+/** How long after it is made a token admits a new connection, in milliseconds: 5 minutes. */
 export const TOKEN_AGE = 5 * 60_000;
-/** How far ahead of the auth server's clock a token may be made. */
+/** How far ahead of the auth server's clock a token may be made, in milliseconds: 1 minute. */
 export const TOKEN_SKEW = 60_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** The session key's leave for anyone holding the invite to join: it goes in the invite link. */
+/** The session key's permission for anyone with the invite to join, carried in the invite link. */
 export type JoinGrant = { session: KeyId; rights: "viewer"; sig: string };
 
 /** What a peer signs to connect: who it is, the session, and when, in milliseconds. */
@@ -31,7 +30,8 @@ type Token =
   | { kind: "editor"; grant: Grant; request: ConnectionRequest; sig: string }
   | { kind: "owner"; request: ConnectionRequest; sig: string; sessionSig: string };
 
-// What the session key signs, besides the peer's own request, in each kind's token.
+// The prefix under which the session key (the project key, for an owner) signs the peer's
+// request in a source's or owner's token.
 const SESSION_PREFIX = { source: "snowy source v1", owner: "snowy owner v1" } as const;
 
 /** What the relay lets a connection do: moq-relay's grant, patterns relative to the dialed path. */
@@ -93,7 +93,10 @@ export async function editorToken(grant: Grant, peer: CryptoKeyPair) {
   return encode({ kind: "editor", grant, request, sig });
 }
 
-/** The project owner's token for an edit session's relay, signed by the project key and its peer key. */
+/**
+ * The project owner's token for an edit session's relay, signed by both the project key and its
+ * own peer key.
+ */
 export const ownerToken = (project: CryptoKeyPair, peer: CryptoKeyPair) =>
   keyHolderToken("owner", project, peer);
 
@@ -251,9 +254,9 @@ export async function authorize(
 /**
  * A connection whose token checked out: the relay's id for it, its session and peer, the token's
  * kind (`source` and `peer` in a watch session, `owner` and `editor` in an edit session) and
- * the rights it carries, `view` alone in a watch session. An editor's `grant` says who gave
- * those rights: the project key, or in its `chain`, the person whose agent the peer is. An
- * invite's grant names no one, so the app asks the peer itself who it is.
+ * the rights it carries, `view` alone in a watch session. An editor's `grant` says in its `by`
+ * who gave those rights: the project key, or the peer key of the person whose agent this peer is. A
+ * grant from an invite names no one, so an app that needs to know who holds it asks in its own way.
  */
 export type Connection = {
   id: string;
@@ -267,19 +270,20 @@ export type Connection = {
 /**
  * An admitted connection the relay closed: its id, why, and the bytes the relay counted to and
  * from its peer over its whole life. The relay counts bytes only over QUIC, and reports zeros for
- * a connection it closes as `refused`, `expired`, `invalid` or `dropped`, so those have no
- * `bytes`.
+ * a connection it closes as `refused`, `expired`, `invalid` or `dropped`, so a connection over
+ * another transport, or closed for one of those reasons, has no `bytes`.
  */
 export type Ended = { id: string; reason?: string; bytes?: { toPeer: number; fromPeer: number } };
 
 /**
- * The app's say in who the relay admits, beyond what the keys allow (docs/architecture.md#admission).
+ * The app's say in who the relay admits, beyond what the keys allow
+ * (docs/architecture.md#admission).
  * The package keeps no state for it: an app that counts connections keeps them by `id`.
  */
 export type Admission = {
   /** Whether to admit a connection whose token checked out, asked on `connect` and `revalidate`. */
   admit?: (connection: Connection) => boolean | Promise<boolean>;
-  /** The relay reports an admitted connection closed; one refused on `connect` has no end. */
+  /** Told when the relay closes an admitted connection; one refused on `connect` gets no `end`. */
   end?: (ended: Ended) => void | Promise<void>;
 };
 
@@ -289,8 +293,8 @@ const status = (code: number) => new Response(null, { status: code });
 // whatever the connection moved.
 const RELAY_CLOSED = new Set(["refused", "expired", "invalid", "dropped"]);
 
-// Bytes are `{ sent, received }` as the relay sees them. moq-relay reads them from QUIC
-// (WebTransport included) and reports zeros for its other transports, which a peer may choose.
+// moq-relay reports bytes as `{ sent, received }` from its own side, so `sent` is what it sent to
+// the peer. It counts them only over QUIC (WebTransport included) and reports zeros otherwise.
 function endOf(id: string, { reason, transport, bytes }: Record<string, unknown>): Ended {
   const ended: Ended = { id };
   if (typeof reason === "string") ended.reason = reason;

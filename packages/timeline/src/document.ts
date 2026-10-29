@@ -188,7 +188,7 @@ export const effect = record({
   params,
 });
 
-// A bezier's two control points, x1, y1, x2, y2, as in CSS.
+// A bezier is its two control points, `[x1, y1, x2, y2]`, as in CSS `cubic-bezier()`.
 const ease = either(
   [oneOf("hold", "linear"), record({ bezier: array(finite, 4, 4) })],
   "not hold, linear or a bezier",

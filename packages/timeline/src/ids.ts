@@ -12,10 +12,15 @@ export type KeyId = string;
 /** The id of an item: `<author>.<seq>.<index>`. */
 export type ItemId = string;
 
-// 32 bytes are 43 characters, the last carrying 4 bits and two zero bits: only these spell a
-// key, so one key has one id.
+/**
+ * A key id. 32 bytes are 43 base64url characters, and the last carries 4 bits and 2 zero bits, so
+ * only these 16 characters may end one and each key has a single spelling.
+ */
 export const KEY_ID = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
-// seq from 1, index from 0, in decimal without leading zeros, so each id has one spelling.
+/**
+ * An item id: `seq` from 1 and `index` from 0, in decimal without leading zeros, so each id has
+ * one spelling.
+ */
 export const ITEM_ID = /^([A-Za-z0-9_-]{42}[AEIMQUYcgkosw048])\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 
 export function isKeyId(value: string) {

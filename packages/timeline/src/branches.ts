@@ -31,10 +31,10 @@ const readOnly = (history: History) => ({
 
 const none = (): Changes => new Map();
 
-/** `from` is undefined for main. */
 export type Branch = {
   id: BranchId;
   name: string;
+  /** The branch and entry it was created at, whose document it starts from; undefined for main. */
   from?: { branch: BranchId; entry: EntryRef };
   sequencer: KeyId;
   closed: boolean;
@@ -103,7 +103,7 @@ function follow(state: State, branch: BranchId, entered: Change["entered"][numbe
     }
 
     if (op.op !== "branch.create") continue;
-    // The document at the entry, the whole batch applied.
+    // The new branch starts from the document at this entry, with its whole batch applied.
     const at = { n: entry.n, hash };
     const id = itemId(batch.author, batch.seq, index);
     open(

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Chat in the local store (docs/architecture.md#local-store). Sync access handles, so it runs in
-// a dedicated worker. An append counts once written and flushed; one that fails is cut back off.
-// A crash tears only the log's end, cut off on open; a record after a bad line is corruption,
-// refused rather than dropped, since dropping it could give a published seq to another message.
-// The store is this origin's own, so records are checked for shape, not signatures.
+// Chat in the local store (docs/architecture.md#local-store). It writes through OPFS sync access
+// handles, so it runs in a dedicated worker. The store is this origin's own, so records are
+// checked for shape, not signatures.
 
 import { checkCheckpoint, checkMessage, type ChatMessage, type Checkpoint } from "./chat";
 import { isKeyId, type KeyId } from "./crypto";
@@ -20,7 +18,7 @@ export class CorruptChatLogError extends Error {
   override name = "CorruptChatLogError";
 }
 
-/** With the seqs written, so nothing is written twice. */
+/** An author's open log, with the seqs written to it, so that none is written twice. */
 type Log = {
   handle: FileSystemSyncAccessHandle;
   size: number;

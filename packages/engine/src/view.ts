@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Where the compositor draws a picture in the canvas: turned by the stream's display matrix,
-// scaled to fit and centred, as the uniform its shaders map clip space by.
+// Where the compositor draws a picture in the canvas (docs/architecture.md#video-output): turned
+// by the stream's display matrix, scaled to fit and centred, as the uniform its shaders map clip
+// space by.
 
 // FFmpeg's identity display matrix: 16.16 fixed point, and 2.30 in the last column.
 const IDENTITY = [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30];

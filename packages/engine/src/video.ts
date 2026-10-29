@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Decoding waits while the frame queue is full, its frames are a second ahead of the media
-// time, or the decoder has enough packets in hand, so neither memory nor its backlog grows.
+// The render worker's video output (docs/architecture.md#video-output). Decoding waits while the
+// frame queue is full, its frames are a second ahead of the media time, or the decoder has enough
+// packets in hand, so neither memory nor the decoder's backlog grows.
 
 import { isRasl, makesFrame, type VideoParams, videoConfig } from "./codec";
 import type { createCompositor } from "./compositor";
@@ -15,10 +16,10 @@ import type { createWasmVideo, DecodedFrame, Decoder, DecoderEvents } from "./wa
 
 /**
  * The bytes of decoded frames the queue holds: enough for a few 4K 10-bit frames, and many
- * more of smaller ones (docs/architecture.md#frame-queue).
+ * more of smaller ones (docs/architecture.md#video-output).
  */
 const FRAME_BUDGET = 1 << 26;
-// Packets handed to the decoder and not yet decoded.
+// The most packets handed to the decoder and not yet decoded before decoding waits.
 const DECODE_AHEAD = 8;
 // How far ahead of the media time shown, in microseconds, frames are decoded: the packets come
 // far further ahead, and decoding all of them would hold hundreds of frames, far past the
@@ -35,8 +36,8 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
   return {
     decode(packet, _pts, timestamp, duration) {
       if (decoder.state === "unconfigured") decoder.configure(videoConfig(p, packet.data));
-      // The chunk copies the data, so the packet can be released at once.
       const type = packet.flags & KEY_FLAG ? "key" : "delta";
+      // The chunk copies the data, so the packet can be released at once.
       decoder.decode(new EncodedVideoChunk({ type, timestamp, duration, data: packet.data }));
       return true;
     },
@@ -49,7 +50,7 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
   };
 }
 
-// A frame's bytes, or as an RGBA texture when the decoder keeps it on the GPU (no format).
+// A frame's bytes. A frame with no `format`, which the decoder keeps on the GPU, counts as RGBA.
 const frameBytes = (frame: DecodedFrame) =>
   frame.format ? frame.allocationSize() : frame.codedWidth * frame.codedHeight * 4;
 
@@ -69,7 +70,8 @@ function createState(from: number) {
     ended: false,
     // Waiting for a packet, the ring being empty.
     waiting: false,
-    // The media time last shown, and the first frame's: decoding runs TIME_AHEAD past the later.
+    // The media time last shown. Decoding runs `TIME_AHEAD` past it or past `first`, the first
+    // frame's timestamp, whichever is later.
     at: -Infinity,
     // The latest frame taken as due: the ones before it are closed, so it goes up once it is
     // uploaded even if the time then stops short of it, as a pause stops the clock short of
@@ -78,18 +80,18 @@ function createState(from: number) {
     first: -Infinity,
     // Waiting for the media time to reach the frames decoded.
     far: false,
-    // Whether the decoder has had a packet, and is just past the first, where pictures that
-    // lead it are left out.
+    // Whether the decoder has had a packet, and whether it is still among the pictures that lead
+    // the first, which are left out.
     started: false,
     leading: false,
-    // Where it plays from, which a scrub moves on, and whether one has.
+    // Where it plays from, which a scrub moves on, and whether a scrub has moved it.
     from,
     moved: false,
     closed: false,
   };
 }
 
-// What an output's parts share, but its decoder and its ring.
+// What an output's parts share: everything but its decoder and its ring.
 function createShared(
   p: VideoParams,
   compositor: VideoOutputOptions["compositor"],
@@ -155,7 +157,8 @@ function send(o: Shared, frame: DecodedFrame) {
 function prepare(o: Shared, time: number) {
   const { state, queue, decoding, uploads } = o;
   // From a seek, nothing goes up until the frame due at its target is decoded: the frames
-  // before it come first, and would flash by. Its end, as at a seek to the end, has them all.
+  // before it come first, and would flash by. At the end of the stream, as after a seek to the
+  // end, every frame is decoded.
   const sought = state.shown || state.ended || decoding.decodedTo() >= state.from;
   if (!sought) return uploads.done;
   // Before the stream's first frame, as at a seek to the start of a file whose video starts
@@ -167,12 +170,12 @@ function prepare(o: Shared, time: number) {
     send(o, due);
   }
 
-  // A scrub holds the time at its target, where it moves on far past the frames after it:
-  // one ahead, not to hold up the upload of the frame due at the next target.
+  // A scrub holds the time at its target, then moves on far past the frames after it, so only one
+  // goes up ahead there and the upload of the frame due at the next target doesn't wait for more.
   const ahead = time > state.from || !state.moved ? AHEAD : 1;
 
-  // Only frames decoded in order: one after a gap may yet have an earlier frame decoded before
-  // it.
+  // Only frames decoded in order go up: a frame after a gap may still have an earlier one decoded
+  // before it.
   while (o.pictures.count() + uploads.stamps.length < ahead) {
     const next = queue.first();
     if (!next || next.timestamp > decoding.decodedTo()) break;
@@ -192,12 +195,12 @@ function decoderEvents(o: Shared): DecoderEvents {
     output(frame) {
       decoding.out(frame.timestamp);
       if (state.first === -Infinity) state.first = frame.timestamp;
-      // Out after a later frame went up, or on its way, it could only take video back.
+      // A frame out after a later one went up, or is uploading, would take video back.
       if (frame.timestamp <= o.uploads.latest) frame.close();
       else queue.push(frame);
       if (frame.timestamp < state.from) queue.drop(state.from);
-      // Decoded up to the time shown, or a scrub's target, the frame due then is known: it goes
-      // up at once, not on the next animation frame.
+      // Once frames are decoded up to the time shown, or a scrub's target, the frame due then is
+      // known, so it goes up at once rather than on the next animation frame.
       const at = Math.max(state.at, state.from);
       if (decoding.decodedTo() >= at) void prepare(o, at);
       o.changed();
@@ -241,8 +244,8 @@ async function room(o: Output) {
   }
 }
 
-// Whether `packet` is a picture to leave out: started at a CRA, as after a seek, the RASL
-// pictures after it refer to pictures the decoder never had.
+// Whether `packet` is a picture to leave out: when decoding starts at an HEVC CRA, as after a
+// seek, the RASL pictures that follow it refer to pictures the decoder never had.
 function leftOut(o: Output, packet: Packet) {
   const { state, p } = o;
   const first = !state.started;
@@ -286,8 +289,8 @@ async function run(o: Output) {
     const packet = decoder.place ? consumer.peekPlace(decoder.place) : consumer.peek();
 
     if (!packet) {
-      // Closed by the main thread, as a seek or an open stops this play, no packet comes; a
-      // wait would return at once, and again, starving the stop message behind it.
+      // Once the main thread closes the ring, as a seek or an open stops this play, no packet
+      // comes: a wait would return at once, again and again, starving the stop message behind it.
       if (consumer.closed()) return;
       state.waiting = true;
       o.changed();
@@ -302,7 +305,7 @@ async function run(o: Output) {
 
     hand(o, packet);
     await read(o);
-    // Nothing once the output has closed.
+    // `release` does nothing once the output has closed.
     consumer.release();
   }
 
@@ -323,14 +326,15 @@ async function finish(o: Output) {
 
 /**
  * Shows the latest picture due at media time `time` (microseconds), if it is not already on
- * screen, and closes the one it replaces; then prepares the next. Whether a new frame went
- * up: one due but still uploading goes up on a later call.
+ * screen, and closes the one it replaces; then prepares the next. Returns whether a new frame
+ * went up: one due but still uploading goes up on a later call.
  */
 function present(o: Output, time: number) {
   const { state } = o;
   state.at = time;
   const picture = o.pictures.take(Math.max(time, o.start, state.due));
-  // Waiting for the media time, only its nearing lets decoding on.
+  // While decoding waits for the media time, only the time nearing the frames decoded lets it go
+  // on; otherwise a frame shown makes room.
   if (state.far ? !far(o) : picture) o.wake.room();
 
   if (picture) {
@@ -379,7 +383,7 @@ function close(o: Output) {
  * packets or the media time begun, the end decoded, and the media worker blocking while
  * `watch`ed. `freed` runs as the ring frees room for a waiting producer, and as it closes
  * (src/ring.ts). It plays from `from` (microseconds), its packets starting at a keyframe before
- * it: of the frames before, it keeps only the last, the one due then.
+ * it; of the frames before `from`, only the last, the one due then, is kept.
  */
 export function createVideoOutput(
   ring: SharedArrayBuffer,
@@ -412,13 +416,15 @@ export function createVideoOutput(
     present: (time: number) => present(o, time),
     /** Shows black, outside a clip; the next frame `present` takes goes up as usual. */
     blank: () => blank(o),
-    // Goes on to `to` (microseconds), later than where it plays from: the frames before it are
-    // dropped as from a seek, and the latest due up to it goes up as it is decoded.
+    /**
+     * Goes on to `to` (microseconds), later than where it plays from: the frames before it are
+     * dropped as from a seek, and the latest due up to it goes up as it is decoded.
+     */
     moveTo(to: number) {
       state.from = to;
       state.moved = true;
       o.queue.drop(to);
-      // Decoded already, the frame due goes up at once, not on the next animation frame.
+      // If the frame due is decoded already, it goes up at once, not on the next animation frame.
       if (decoding.decodedTo() >= to) void prepare(o, to);
     },
     current,
@@ -431,13 +437,18 @@ export function createVideoOutput(
     /** Whether the decoder has decoded every packet. */
     ended: () => state.ended,
     prepare: (time: number) => prepare(o, time),
-    /** Whether the frame queue is full or far enough ahead, so decoding waits for the media time. */
+    /**
+     * Whether the frame queue is full or far enough ahead, so decoding waits for the media time.
+     */
     full: () => o.queue.full() || far(o),
     /** Whether it waits for packets with nothing left to decode. */
     starved: () => state.waiting && decoder.queued() === 0,
     /** Whether the packet ring's producer waits for room. */
     blocked: () => consumer.producerWaiting(),
-    /** Has `changed` run when the media worker next blocks; before reading whether it is. */
+    /**
+     * Has `changed` run the next time the media worker blocks. Call it before reading `blocked`,
+     * so a block just after that read still runs `changed`.
+     */
     watch: () => consumer.watch(),
   };
 }

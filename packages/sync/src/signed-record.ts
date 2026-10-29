@@ -31,7 +31,10 @@ export function onlyFields(value: Record<string, unknown>, fields: Set<string>) 
 const signedBytes = (domain: string, session: KeyId, record: object) =>
   encoder.encode(`${domain}\n${JSON.stringify({ session, ...record })}`);
 
-/** A record in canonical shape, signed with the session key under `domain`, as bytes. */
+/**
+ * The JSON bytes of `record` with `sig`, the session key's signature of it under `domain`.
+ * `record` must already be in canonical shape, since its fields are signed in the order given.
+ */
 export async function signRecord(session: CryptoKeyPair, domain: string, record: object) {
   const id = await keyId(session.publicKey);
   const sig = await sign(session.privateKey, signedBytes(domain, id, record));
@@ -47,7 +50,10 @@ function parseJson(bytes: Bytes): unknown {
   }
 }
 
-/** The record in `bytes`, split into its signature and the rest, or an `InvalidRecordError`. */
+/**
+ * The record in `bytes`, split into its signature and the rest, neither checked. Throws an
+ * `InvalidRecordError` for bytes that aren't a UTF-8 JSON object.
+ */
 export function parseRecord(bytes: Bytes) {
   const value = parseJson(bytes);
   if (!isRecord(value)) throw new InvalidRecordError("not an object");

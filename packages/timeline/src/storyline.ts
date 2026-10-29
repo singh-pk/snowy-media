@@ -216,7 +216,11 @@ function* itemsIn(root: Node | undefined): Generator<Placed> {
   }
 }
 
-/** An empty storyline. Items are identified by id; each id is in it at most once. */
+/**
+ * Makes an empty storyline, in which each item id is at most once. Giving `insert` an id already
+ * in it, or any other method but `has` an id not in it, throws a `RangeError`, as does a duration
+ * that is not a non-negative safe integer or a storyline longer than a number holds exactly.
+ */
 export function createStoryline() {
   let root: Node | undefined;
   const nodes = new Map<ItemId, Node>();
@@ -252,7 +256,10 @@ export function createStoryline() {
     nodes.delete(id);
   }
 
-  /** Moves an item to `position`; what it leaves closes up, and what follows where it lands moves along. */
+  /**
+   * Moves an item to `position`: the gap it leaves closes up, and what follows where it lands
+   * moves along.
+   */
   function move(id: ItemId, position: PositionKey) {
     const { duration } = node(id);
     remove(id);
@@ -275,7 +282,7 @@ export function createStoryline() {
     setDuration,
     /** Where an item starts, in flicks from the sequence's start. */
     start: (id: ItemId) => startIn(root, node(id).position, id),
-    /** The item playing at `t` flicks: the one with `start <= t < start + duration`. */
+    /** The item at `t` flicks, the one with `start <= t < start + duration`, or undefined. */
     at: (t: number) => atIn(root, t),
     /** The smallest position key in the storyline after `position`, if there is one. */
     keyAfter: (position: PositionKey) => keyAfterIn(root, position),

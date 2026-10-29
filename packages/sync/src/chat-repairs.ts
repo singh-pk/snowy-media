@@ -23,8 +23,8 @@ export function createChatRepairs(send: (peer: KeyId, author: KeyId, firstSeq: n
   // One ask per author: an earlier gap replaces a later one, which it covers.
   const asks = new Map<KeyId, Ask>();
   const contiguous = new Map<KeyId, number>();
-  // Per author, a gap every candidate failed to fill, and who they were: not asked again, on the
-  // next gap event, until the candidates change or one of them has closed its link.
+  // Per author, a gap that every candidate failed to fill, and who they were. It is not asked
+  // again on the next gap event until the candidates change or one of them closes its link.
   const exhausted = new Map<KeyId, { firstSeq: number; candidates: string }>();
 
   function next(ask: Ask) {
@@ -45,9 +45,10 @@ export function createChatRepairs(send: (peer: KeyId, author: KeyId, firstSeq: n
   }
 
   /**
-   * A gap from `firstSeq` in an author's messages: asks the best-ranked candidate, the author
-   * itself if online and the peer's connected group peers. Replaces any earlier ask for the
-   * author that starts later.
+   * A gap from `firstSeq` in an author's messages: asks the best-ranked of `candidates`, which
+   * are the author itself if online and this peer's connected group peers. Replaces an ask for
+   * the author that starts later. Asks nothing if the gap is filled already, or if the same
+   * candidates all failed to fill it.
    */
   async function gap(author: KeyId, firstSeq: number, candidates: KeyId[]) {
     const ranked = await rank(candidates, author, firstSeq);
@@ -65,7 +66,7 @@ export function createChatRepairs(send: (peer: KeyId, author: KeyId, firstSeq: n
     next(ask);
   }
 
-  /** The asked peer holds none of it: ask the next. */
+  /** `peer`, asked for the gap from `firstSeq`, holds none of it: the next candidate is asked. */
   function gone(peer: KeyId, author: KeyId, firstSeq: number) {
     const ask = asks.get(author);
     if (ask?.firstSeq === firstSeq && ask.candidates[ask.asked] === peer) next(ask);

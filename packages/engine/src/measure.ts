@@ -9,46 +9,50 @@ import { identity, undoMatrix } from "./colour";
 import { planeViews, type Slot } from "./pictures";
 import { MEASURED } from "./shaders";
 
-// The points a frame is measured at, both conversions of each read back in 32-bit floats, a row
-// of them 2048 bytes, as a texture copy's rows are a multiple of 256 bytes.
+// The grid of points a frame is measured at. Each conversion of a point is read back as four
+// 32-bit floats, so a row is 2048 bytes, a multiple of the 256 bytes a texture copy's rows need.
 const GRID_WIDTH = 128;
 const GRID_HEIGHT = 72;
 const GRID_ROW = GRID_WIDTH * 16;
-// Of a measurement's channels, those neither near black nor near white tell the conversions
-// apart, and in a sharp frame, as colour bars, they are only along its edges; with fewer than
-// MIN_POINTS, as in a dark frame, the next frame is measured.
+// Only channels neither near black nor near white tell the two conversions apart, and in a sharp
+// frame, such as colour bars, those lie only along its edges. With fewer than MIN_POINTS of them,
+// as in a dark frame, the next frame is measured.
 const MIDTONES = [0.1, 0.9] as const;
 const MIN_POINTS = 300;
-// Of its points, those whose channels differ by more than this are coloured: only they tell a
-// matrix apart, and a frame with fewer than MIN_COLOURED, near grey, is not measured either.
+// A point is coloured when its channels differ by more than COLOURED. Only coloured points tell
+// one matrix from another, so a near-grey frame, with fewer than MIN_COLOURED, decides nothing.
 const COLOURED = 0.1;
 const MIN_COLOURED = 400;
-// The frames measured before giving up on a stream, as in a dark, grey or muted one, or one
-// Chromium clips: its planes are read back from then on, as when there is no measurement.
+// How many frames are measured before giving up on a stream, such as a dark, grey or muted one,
+// or one Chromium clips. Its planes are then read back, as for a stream that is never measured.
 const MAX_TRIES = 60;
-// How far Chromium's conversion may be from this one's, at the median and the 95th percentile of
-// the points: the two filter differently at edges, and Apple's gamma moves a midtone by 11 levels
-// of 255.
+// How far Chromium's conversion may be from the compositor's, at the median and the 95th
+// percentile of the points: the two filter differently at edges, and Apple's gamma moves a
+// midtone by 11 levels of 255.
 const MEDIAN_OFF = 1.5 / 255;
 const P95_OFF = 6 / 255;
-// Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped: shown by at
-// least BEYOND_POINTS channels further than BEYOND below 0, and as many above 1, as one clip may
-// be at one end only. A frame whose colours all fit decides nothing; a later one is measured.
+// Undoing a matrix mixes the channels, so it needs Chromium's conversion unclipped, as shown by
+// at least BEYOND_POINTS channels more than BEYOND below 0 and as many above 1 (a clip may be at
+// one end only). A frame whose colours all fit inside decides nothing; a later one is measured.
 const BEYOND = 2 / 255;
 const BEYOND_POINTS = 10;
 
 /**
- * How a stream's frames whose planes can be read go up, worked out from its own frames
- * (docs/architecture.md#colour): read back and converted here until measured; then imported, as
- * Chromium converts them, as they are (`imported`) or with Apple's gamma undone (`apple`), and
- * through `undo` where Chromium took another matrix or range; or read back still where none of
- * these matches (`read`).
+ * How the frames of a stream whose planes can be read go up, decided from its own frames
+ * (docs/architecture.md#colour). While `via` is `unmeasured`, the planes are read back and
+ * converted by the compositor. Once measured, `imported` draws Chromium's conversion as it is and
+ * `apple` with Apple's gamma undone, each through `undo` where Chromium took another matrix or
+ * range; `read` keeps reading the planes back, as where nothing matched or Chromium would
+ * convert the primaries or transfer.
  */
 export interface Route {
   readonly stated: VideoColorSpaceInit;
   via: "unmeasured" | "imported" | "apple" | "read";
   tries: number;
-  // From Chromium's R′G′B′, Apple's gamma undone where `apple`, to the stream's: column-major.
+  /**
+   * The column-major 4×4 affine map from Chromium's R′G′B′, with Apple's gamma undone where
+   * `apple`, to the stream's own.
+   */
   readonly undo: Float32Array;
 }
 
@@ -67,9 +71,9 @@ const ASSUMED: readonly VideoColorSpaceInit[] = [
   { matrix: "smpte170m", fullRange: true },
 ];
 
-// What Chromium converts as FFmpeg does, which converts neither primaries nor transfer: BT.709's
-// primaries, and the transfers it takes for sRGB's (src/codec.ts). Measuring tells a transfer and
-// a matrix apart, but not primaries, which only the most saturated colours would.
+// The primaries and transfers Chromium leaves as they are, as FFmpeg does, which converts neither:
+// BT.709's primaries, and the transfers it treats as sRGB's (src/codec.ts). Measuring tells
+// transfers and matrices apart, but not primaries, which only the most saturated colours show.
 const KEPT_PRIMARIES = new Set<VideoColorPrimaries | null | undefined>([undefined, "bt709"]);
 const KEPT_TRANSFERS = new Set<VideoTransferCharacteristics | null | undefined>([
   undefined,
@@ -95,12 +99,12 @@ function quantile(sorted: Float32Array, q: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? Infinity;
 }
 
-// How far Chromium's conversion of the points in `data` (see verdict), Apple's gamma undone
-// where `apple`, then mapped by `undo`, is from this one's: a difference for each midtone
-// channel, in `off`. Returns how many.
+// Writes into `off`, for each midtone channel of the grid in `data` (laid out as `verdict` says),
+// how far Chromium's conversion, Apple's gamma undone where `apple` and then mapped by `undo`, is
+// from the compositor's. Returns how many it wrote.
 function differences(data: Float32Array, apple: boolean, undo: Float32Array, off: Float32Array) {
   const read = GRID_HEIGHT * (GRID_ROW / 4);
-  // Mirrored about 0, as the shader undoes it.
+  // Undone mirrored about 0, as the shader does, since Chromium's values may fall below 0.
   const encode = (v: number) => (apple ? Math.sign(v) * srgbDecode(Math.abs(v)) ** (1 / 1.961) : v);
   let count = 0;
 
@@ -123,14 +127,14 @@ function differences(data: Float32Array, apple: boolean, undo: Float32Array, off
 }
 
 /**
- * Which way a stream goes, from a grid read back (`data`): Chromium's conversion of each point,
- * then this one's, in rows of GRID_ROW bytes. Undecided while too few channels are midtones or
+ * Decides how a stream goes up from a grid read back into `data`: Chromium's conversion of each
+ * point, then the compositor's, in rows of GRID_ROW bytes. `off` is scratch space for a
+ * difference per channel. Returns undefined, undecided, while too few channels are midtones or
  * too few points coloured. Chromium's conversion is tried as it is, then, where it is unclipped,
  * through each matrix and range it may have taken instead of `stream.stated`, each with and
- * without Apple's gamma undone; the first that matches is written into `stream.undo`. A frame
- * that matches neither as it is, and whose conversion does not go past both 0 and 1, is
- * undecided too: a later, more saturated one may show the matrix.
- * `off` holds a difference for each channel.
+ * without Apple's gamma undone; the first that matches is left in `stream.undo`, and `read` is
+ * returned if none does. A frame that matches neither way as it is, and whose conversion does not
+ * go past both 0 and 1, is undecided too, as a later, more saturated one may show the matrix.
  */
 export function verdict(
   data: Float32Array,
@@ -239,7 +243,7 @@ export function createMeasurer(gpu: MeasureGpu) {
     busy: false,
     targets: undefined as [GPUTexture, GPUTexture] | undefined,
     buffer: undefined as GPUBuffer | undefined,
-    // A difference for each channel of the grid.
+    // Scratch space for `verdict`: a difference for each channel of the grid.
     off: new Float32Array(GRID_WIDTH * GRID_HEIGHT * 3),
     // Resolved as the measurement under way ends, for the tests.
     done: Promise.withResolvers<void>(),
