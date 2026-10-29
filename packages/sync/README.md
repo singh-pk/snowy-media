@@ -40,4 +40,4 @@ A page served with cross-origin isolation (`Cross-Origin-Opener-Policy: same-ori
 
 ## Licence
 
-The [Snowy License 1.0](https://github.com/singh-pk/snowy-media/blob/main/LICENSES/LicenseRef-Snowy-License-1.0.txt): free for individuals, companies of up to 3 people, non-profits, education, open-source projects and evaluation. Larger companies using it in production need a company licence ([LICENSE.md](https://github.com/singh-pk/snowy-media/blob/main/LICENSE.md)).
+The [Snowy License 1.0](https://github.com/singh-pk/snowy-media/blob/main/LICENSES/LicenseRef-Snowy-License-1.0.txt). [LICENSE.md](https://github.com/singh-pk/snowy-media/blob/main/LICENSE.md) says who may use it free and when a company licence is needed.

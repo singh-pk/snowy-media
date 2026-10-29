@@ -43,6 +43,7 @@ Run `bun run check` before every commit; the hook runs it anyway.
 | `tooling/check-licences.ts` | that each SPDX header the project wrote names the licence of where its file lives, and that the sections the Snowy License names still exist (rule 9) |
 | `tooling/oxlint-dist.json` | the lint CI runs on FFmpeg's built modules: no `eval`, `new Function` or `javascript:` URL in what Emscripten emits (rule 7) |
 | `tooling/lint-edited.ts`, `tooling/comment-budget.ts` | the Claude Code hook that lints and format-checks each file an agent edits (`.claude/settings.json`), and holds the comment lines an edit adds to its budget (rule 7) |
+| `tooling/release.ts` | the steps every package's `scripts/release.ts` shares: the tag and changelog checks, the release notes, `LICENSE` copied from `LICENSES/`, and the npm tarball checked against its file list |
 | `scripts/` | repository scripts, such as `settings.ts`, which applies `.github/settings.yml` |
 | `.agents/skills/` | task playbooks, also linked into `.claude/skills` |
 | `brand/` | the logo, avatar and social preview, and the rules for using them; trademarks, not licensed ([TRADEMARKS.md](TRADEMARKS.md)) |
