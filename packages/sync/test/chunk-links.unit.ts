@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // A peer's chunk traffic on its links (src/chunk-links.ts), in Chromium, over links in memory: the
-// plan's requests go on the asked peer's newest link, and a request's cancel or re-ask on the link it went out on; chunks delivered
-// are stored and end their requests; `busy` and `gone` replies, a chunk that doesn't check out and
-// one storage has no room for each move a chunk on as the design says; a closed link's requests
-// are placed again; and other peers' requests are answered from the store.
+// plan's requests go on the asked peer's newest link, and a request's cancel or re-ask on the link
+// it went out on; chunks delivered are stored and end their requests; `busy` and `gone` replies,
+// a chunk that doesn't check out and one storage has no room for each move a chunk on as the
+// design says; a closed link's requests are placed again; and other peers' requests are answered
+// from the store.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -202,6 +203,23 @@ test("a request's cancel and urgent re-ask go on the link it went out on, not a 
   deliver(source, 1);
   await p.quiet();
   expect(p.at.heard.slice(3, 4)).toEqual(["one cancel 0:1"]);
+});
+
+test("a chunk turned urgent while its delivery is being stored isn't asked again", async () => {
+  const p = peer({ fwd: [0, 1, 2, 3] });
+  const fwd = p.link("fwd");
+  p.links.plan.want({ tracks: [0], fromUs: 0, toUs: 4 * SECOND, priority: "background" });
+  await p.quiet();
+  const gate = p.hold();
+  deliver(fwd, 0);
+  await gate.entered;
+  p.links.plan.want({ tracks: [0], fromUs: 0, toUs: 2 * SECOND, priority: "urgent" });
+  // The plan's pass runs in a microtask; the network can't settle while the store is held.
+  await Promise.resolve();
+  gate.release();
+  await p.quiet();
+  expect([...p.at.held.keys()]).toEqual(["media/0/0"]);
+  expect(p.at.heard).toEqual(["fwd request 0:0 background", "fwd request 0:1 background"]);
 });
 
 test("gone moves a chunk to the source, and busy holds a link until its next delivery", async () => {

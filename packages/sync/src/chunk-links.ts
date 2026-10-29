@@ -86,7 +86,6 @@ function createSent() {
 
 export function createChunkLinks(options: ChunkLinksOptions) {
   const links = new Map<KeyId, Link[]>();
-  // Each linked peer's newest link's measures, which asks go on.
   const measured = new Map<KeyId, LinkMeasures>();
   const newest = (peer: KeyId) => links.get(peer)?.at(-1);
   const sent = createSent();
@@ -134,7 +133,6 @@ export function createChunkLinks(options: ChunkLinksOptions) {
     if (typeof outcome === "object" && plan.storage(true)) options.stopped(outcome.error);
   }
 
-  // Each peer's newest link is the one asked, by its measures.
   function measure(peer: KeyId) {
     const link = newest(peer);
     if (link === undefined) measured.delete(peer);

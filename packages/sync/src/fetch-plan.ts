@@ -231,12 +231,13 @@ function createRequests(options: FetchPlanOptions) {
   }
 
   // Gives each request the priority its chunk is wanted at now: cancels those no interest
-  // covers, and asks the same link again for one turned urgent, so its request moves up.
+  // covers, and asks the same link again for one turned urgent, so its request moves up, unless
+  // its chunk has begun to arrive and the rest is on its way.
   function settle(priorityOf: (slot: ChunkSlot) => FetchPriority | undefined) {
     for (const [key, request] of out) {
       const priority = priorityOf(request.slot);
       if (priority === undefined) cancel(key, request);
-      else if (priority === "urgent" && request.priority !== "urgent") {
+      else if (priority === "urgent" && request.priority !== "urgent" && !request.started) {
         request.priority = priority;
         options.ask({ slot: request.slot, peer: request.peer, priority });
       } else request.priority = priority;
