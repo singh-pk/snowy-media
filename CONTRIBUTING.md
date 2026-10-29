@@ -103,7 +103,7 @@ Every new source file starts with SPDX headers naming the licence of where it li
 
 <!-- REUSE-IgnoreEnd -->
 
-Use `LGPL-2.1-or-later` in `packages/ffmpeg` and `MIT` for tooling. Code from elsewhere keeps its own copyright and licence in its headers, and is listed in the package's NOTICE. CI runs [REUSE](https://reuse.software) to check every file.
+Use `LGPL-2.1-or-later` in `packages/ffmpeg` and `MIT` for tooling. Code from elsewhere keeps its own copyright and licence in its headers, and is listed in the package's NOTICE. CI runs [REUSE](https://reuse.software) to check every file, and `bun run lint:licences` checks that each header names the licence of where its file lives.
 
 ## Conduct
 
