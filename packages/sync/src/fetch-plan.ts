@@ -218,18 +218,26 @@ function createRequests(options: FetchPlanOptions) {
     return true;
   }
 
+  function piece(slot: ChunkSlot, peer: KeyId, bytes: number) {
+    const request = out.get(chunkKey(slot));
+    if (request?.peer !== peer) return;
+    request.started = true;
+    request.arrived += bytes;
+  }
+
   function refuse(slot: ChunkSlot, peer: KeyId) {
     const key = chunkKey(slot);
     refused.set(key, (refused.get(key) ?? new Set()).add(peer));
   }
 
   // Gives each request the priority its chunk is wanted at now: cancels those no interest
-  // covers, and asks the same link again for one turned urgent, so its request moves up.
+  // covers, and asks the same link again for one turned urgent, so its request moves up, unless
+  // its chunk has begun to arrive and the rest is on its way.
   function settle(priorityOf: (slot: ChunkSlot) => FetchPriority | undefined) {
     for (const [key, request] of out) {
       const priority = priorityOf(request.slot);
       if (priority === undefined) cancel(key, request);
-      else if (priority === "urgent" && request.priority !== "urgent") {
+      else if (priority === "urgent" && request.priority !== "urgent" && !request.started) {
         request.priority = priority;
         options.ask({ slot: request.slot, peer: request.peer, priority });
       } else request.priority = priority;
@@ -241,6 +249,7 @@ function createRequests(options: FetchPlanOptions) {
     ask,
     cancel,
     end,
+    piece,
     refuse,
     settle,
     refuses: (key: string, peer: KeyId) => refused.get(key)?.has(peer) === true,
@@ -248,6 +257,10 @@ function createRequests(options: FetchPlanOptions) {
     /** Forgets what `peer` answered `gone` to: its ranges or capability record changed. */
     forgive(peer: KeyId) {
       for (const peers of refused.values()) peers.delete(peer);
+    },
+    /** Cancels every request that has sent nothing yet. */
+    halt() {
+      for (const [key, request] of out) if (!request.started) cancel(key, request);
     },
     /** Puts every request of a closed link back into the plan. */
     closed(peer: KeyId) {
@@ -469,8 +482,25 @@ function createClock(
   return { playheadAt, playhead, progress };
 }
 
+// Runs `work` once, in a microtask, however many times it is asked for in one task.
+function createBatch(work: () => void) {
+  const state = { queued: false };
+
+  return () => {
+    if (state.queued) return;
+    state.queued = true;
+
+    queueMicrotask(() => {
+      state.queued = false;
+      work();
+    });
+  };
+}
+
 export function createFetchPlan(options: FetchPlanOptions) {
-  const state = { stale: false, full: false };
+  const state = { full: false };
+  // Events in one task are planned once.
+  const stale = createBatch(pass);
   const requests = createRequests(options);
   const room = createRoom(options, requests.out);
   const listing = createListing(options);
@@ -482,14 +512,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
   const placer = createPlacer(options, requests, room, wants);
   const clock = createClock(options, listing, { requests, room, stale });
 
-  function stale() {
-    if (state.stale) return;
-    state.stale = true;
-    queueMicrotask(pass);
-  }
-
   function pass() {
-    state.stale = false;
     const { index, ended } = listing.read();
     wants.refresh(index.bounds, ended);
     requests.settle(wants.priorityOf);
@@ -511,12 +534,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
     },
     playhead: clock.playhead,
     /** A piece of `bytes` of a chunk arrived from `peer`. */
-    piece(slot: ChunkSlot, peer: KeyId, bytes: number) {
-      const request = requests.out.get(chunkKey(slot));
-      if (request?.peer !== peer) return;
-      request.started = true;
-      request.arrived += bytes;
-    },
+    piece: requests.piece,
     /**
      * A chunk was stored, from `from`, or live when that is undefined: its request is done, or,
      * if another peer was asked, cancelled.
@@ -528,6 +546,14 @@ export function createFetchPlan(options: FetchPlanOptions) {
       if (from !== undefined) room.unblock(from);
       if (request?.peer === from) requests.out.delete(key);
       else if (request !== undefined) requests.cancel(key, request);
+      stale();
+    },
+    /**
+     * A chunk arrived from `peer` but wasn't stored, such as when storage is full: its request
+     * ends, as a delivery done, and the chunk is placed again.
+     */
+    dropped(peer: KeyId, slot: ChunkSlot) {
+      if (requests.end(peer, slot)) room.unblock(peer);
       stale();
     },
     /** `peer` has no room for this peer now. */
@@ -563,12 +589,15 @@ export function createFetchPlan(options: FetchPlanOptions) {
       stale();
     },
     /**
-     * Storage filled, or freed by an eviction or a drop: nothing more is placed while it is full,
-     * or until an interest changes.
+     * Storage filled, or freed: nothing more is placed while full or until an interest changes,
+     * and requests that have sent nothing are cancelled. Returns whether this changed it.
      */
     storage(full: boolean) {
+      const changed = state.full !== full;
       state.full = full;
-      if (!full) stale();
+      if (full) requests.halt();
+      else stale();
+      return changed;
     },
     progress: clock.progress,
   };

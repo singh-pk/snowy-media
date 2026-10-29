@@ -408,10 +408,11 @@ test("nothing is placed while storage is full", async () => {
   plan.storage(false);
   await sends(at, ["ask source 0:0 urgent"]);
 
+  // Filling cancels the request that has sent nothing; a new interest ends the wait, as a chunk
+  // evicted would.
   plan.storage(true);
   plan.want(video(2, 4, "urgent"));
-  // A new interest ends the wait, as a chunk evicted would.
-  await sends(at, ["ask source 0:1 urgent"]);
+  await sends(at, ["cancel source 0:0 urgent", "ask source 0:0 urgent", "ask source 0:1 urgent"]);
 });
 
 test("events in one task are planned in one pass", async () => {
@@ -423,6 +424,36 @@ test("events in one task are planned in one pass", async () => {
   plan.announced();
   await sends(at, ["ask source 0:0 urgent"]);
   expect(at.reads).toBe(1);
+  // As much work as planning the interest alone.
+  const alone = world(10);
+  alone.at.links.set("source", FAST);
+  alone.plan.want(video(0, 2, "urgent"));
+  await sends(alone.at, ["ask source 0:0 urgent"]);
+  expect(at.misses).toBe(alone.at.misses);
+});
+
+test("storage filling cancels the requests that have sent nothing, and says when it changed", async () => {
+  const { plan, at } = world(10);
+  at.links.set("source", FAST);
+  plan.want(video(0, 4, "urgent"));
+  await sends(at, ["ask source 0:0 urgent", "ask source 0:1 urgent"]);
+  plan.piece({ track: 0, index: 0 }, "source", 1000);
+  expect(plan.storage(true)).toBe(true);
+  expect(plan.storage(true)).toBe(false);
+  await sends(at, ["cancel source 0:1 urgent"]);
+});
+
+test("a chunk dropped that its peer wasn't asked for leaves that peer busy", async () => {
+  const { plan, at } = world(10);
+  at.links.set("source", FAST);
+  plan.want(video(0, 2, "urgent"));
+  await sends(at, ["ask source 0:0 urgent"]);
+  plan.busy("source", { track: 0, index: 0 });
+  plan.dropped("source", { track: 0, index: 5 });
+  await sends(at, []);
+  // Heard from again, it has room.
+  plan.heard("source");
+  await sends(at, ["ask source 0:0 urgent"]);
 });
 
 test("a pass skips whole ranges held or advertised by no one", async () => {

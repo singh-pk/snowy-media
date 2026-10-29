@@ -26,6 +26,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/source-records.ts` | the source's records as a peer holds them: the newest catalog and control record, each track's setup and each page of the chunk index, sealed as they came |
 | `src/state-requests.ts` | getting the session's state on join: asking the source or the best-ranked peer for the source's records, and answering such asks |
 | `src/chunk-requests.ts` | the chunk request messages between peers, checked, and a forwarder's side that answers them, one chunk at a time on each link, most urgent first |
+| `src/chunk-links.ts` | a peer's chunk traffic on its links: the plan's requests sent, replies and delivered chunks taken into the plan and the store, and other peers' requests answered |
 | `src/fetch-plan.ts` | where each chunk comes from: which link to ask, by expected finish while it has room, and what to cancel or move to the source as replies, links and deadlines change |
 | `src/have.ts` | have ranges: what a forwarder holds, sealed and checked, published once per burst of store changes, and each forwarder's newest as a peer keeps them |
 | `src/push-queue.ts` | what the source sends next: seek targets, then requests, then chunks ahead of the playhead up to the push horizon, then background requests; and its answers to peers' requests, holding at most 4 from each |

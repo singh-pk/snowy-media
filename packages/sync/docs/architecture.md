@@ -98,7 +98,7 @@ type Link = {
 
 - A link is to one peer, and the transport opens it: over the relay's inbox tracks, or a direct connection's data channels. The peer's chat tracks are subscribed outside it.
 - Its `close` event fires once, whichever end closed it. Nothing arrives after it, including what was on its way.
-- A peer may have two links open at once, the relay's and a direct one. A request is answered on the link it came on, and an ask goes on the newest link. When any of a peer's links closes, what was asked of that peer moves on to the next candidate; if the reply comes anyway on another link, the first answer fills the gap.
+- A peer may have two links open at once, the relay's and a direct one. A request is answered on the link it came on, and an ask goes on the newest link, with its cancel or urgent re-ask on the link it went out on, whose end holds it. When any of a peer's links closes, what was asked of that peer moves on to the next candidate; if the reply comes anyway on another link, the first answer fills the gap.
 
 ## Identity, sessions and access
 
@@ -418,7 +418,7 @@ sync.interest({
 | `stored(key)` | A chunk is stored |
 | `evicted(key)` | A chunk was deleted because no interest covers it |
 | `complete(track)` | Every chunk of a track is stored. Needs `catalog.chunkCount`. |
-| `storage-full` | A write failed with `QuotaExceededError`. The chunk isn't stored, and the scheduler fetches nothing more until an interest changes or a chunk is evicted or dropped. The consumer decides what to release, narrow or drop. |
+| `storage-full` | A write failed with `QuotaExceededError`, or another error. The chunk isn't stored, the requests that have sent nothing are cancelled, and the scheduler fetches nothing more until an interest changes or a chunk is evicted or dropped. The consumer decides what to release, narrow or drop. |
 
 ### Player and editor
 
@@ -525,6 +525,9 @@ background (only while no urgent or ahead request is out), from the playhead to 
   | The link's `close` event, or the source going offline | Every request on that link goes back into the plan |
   | A `progress` event finds an urgent request to a forwarder that has sent no piece of it and whose expected finish passes its deadline, while the source is online with room and would finish it sooner | Cancel the forwarder request and ask the source |
   | A chunk asked at a lower priority becomes urgent | Ask the same link again, urgently, so its request moves up |
+  | A delivered chunk doesn't check out | As a `gone` reply from that peer |
+  | A delivered chunk arrives while another copy of it is being stored | The request ends, and the chunk is placed again |
+  | A delivered chunk can't be stored (`QuotaExceededError`, or another write error) | The request ends. Nothing more is placed, and the requests that have sent nothing are cancelled, until the consumer frees or mends storage ([Feedback to the consumer](#feedback-to-the-consumer)) |
 
 - **Requests are cancelled explicitly** with a `cancel` message, so the sender stops sending, such as one whose chunk no interest covers any more. A forwarder that answered `gone` for a chunk isn't asked for it again until its ranges or capability record change.
 - **Duplicates can't be stored twice:** a chunk that arrives after the same key was stored is thrown away unread, and its request is cancelled.
@@ -553,7 +556,7 @@ The scheduler does no work on a clock, and each event's work is bounded by what 
 | A link opens, or a forwarder's `caps` change | Places chunks on that link as for room; a forwarder heard from again may be asked for what it answered `gone` to |
 | A new page of the chunk index | Places only the newly listed chunks an interest covers |
 | `started` / `paused` | Gives the chunks ahead deadlines, or takes them away; nothing is placed or cancelled |
-| `storage-full` | Places nothing more until an interest changes or a chunk is evicted or dropped, which places as for room |
+| `storage-full` | Cancels the requests that have sent nothing, and places nothing more until an interest changes or a chunk is evicted or dropped, which places as for room |
 | The source's `announce` | Places what waited on the source |
 | `have` from a peer | Places only chunks it newly holds that are waiting; none, if it adds nothing waited on |
 | `progress` | Checks the deadlines of the urgent requests out, at most a few per link |
