@@ -8,7 +8,7 @@
 
 import { expect, test } from "../../../tooling/unit";
 import { generateKeyPair, keyId } from "../src/crypto";
-import { readGrant, signGrant, verifyGrant, type Grant } from "../src/grant";
+import { readGrant, signGrant, verifyGrant, type Grant, type Right } from "../src/grant";
 import { rejection } from "./support/rejection";
 
 async function setup() {
@@ -21,6 +21,24 @@ async function setup() {
     keyId(agent.publicKey),
   ]);
   return { project, person, agent, session, personId, agentId };
+}
+
+// A 3-long chain, which `signGrant` won't sign. Readers refuse its shape before any signature,
+// so the stand-in `sig` is never checked.
+const overChain = (chained: Grant, agentId: string, to: string): Grant => ({
+  session: chained.session,
+  rights: ["view"],
+  to,
+  by: agentId,
+  chain: chained,
+  sig: chained.sig,
+});
+
+// Rights as plain JavaScript might pass them, without the type's check.
+function unchecked(values: string[]): Right[] {
+  const rights: Right[] = [];
+  Object.assign(rights, values);
+  return rights;
 }
 
 // A grant as it arrives: JSON, read back.
@@ -75,9 +93,11 @@ test("a grant gives nothing in another session, or once anything it signs is cha
   const { project, person, session, personId, agentId } = await setup();
   const other = await setup();
   const own = await signGrant(project, { session, rights: ["view"], to: personId });
-  const [elsewhere, chained] = await Promise.all([
+  const [elsewhere, chained, chainedElsewhere] = await Promise.all([
     signGrant(other.project, { session: other.session, rights: ["view"], to: personId }),
     signGrant(person, { session, rights: ["view"], to: agentId, chain: own }),
+    // Passed on over this project's grant, but naming another project.
+    signGrant(person, { session: other.session, rights: ["view"], to: agentId, chain: own }),
   ]);
   const grants: Grant[] = [
     elsewhere,
@@ -86,6 +106,9 @@ test("a grant gives nothing in another session, or once anything it signs is cha
     { ...chained, chain: { ...own, rights: ["view", "propose"] } },
     { ...own, chain: own },
     { ...chained, chain: { ...own, session: other.session } },
+    chainedElsewhere,
+    // The peer's own signature no longer covers whom it passes its rights to.
+    { ...chained, to: personId },
     { ...own, by: personId },
   ];
   const checks = await Promise.all(grants.map((g) => verifyGrant(g, session)));
@@ -106,15 +129,10 @@ test("a peer's own signature over a chain it forged gives nothing", async () => 
 });
 
 test("a grant reads only in canonical shape, with a chain at most 2 long", async () => {
-  const { project, person, agent, session, personId, agentId } = await setup();
+  const { project, person, session, personId, agentId } = await setup();
   const own = await signGrant(project, { session, rights: ["view", "propose"], to: personId });
   const chained = await signGrant(person, { session, rights: ["view"], to: agentId, chain: own });
-  const tooLong = await signGrant(agent, {
-    session,
-    rights: ["view"],
-    to: personId,
-    chain: chained,
-  });
+  const tooLong = overChain(chained, agentId, personId);
   const values = [
     undefined,
     "grant",
@@ -124,6 +142,8 @@ test("a grant reads only in canonical shape, with a chain at most 2 long", async
     { ...own, rights: ["view", "edit"] },
     { ...own, rights: ["edit"] },
     { ...own, rights: ["viewer"] },
+    { ...own, rights: ["view", "propose", "edit", "edit"] },
+    { ...own, session: "not a key" },
     { ...own, to: "not a key" },
     { ...own, extra: 1 },
     { ...own, sig: 1 },
@@ -136,13 +156,16 @@ test("a grant reads only in canonical shape, with a chain at most 2 long", async
 });
 
 test("a chain longer than 2, or one on the project key's own grant, gives nothing", async () => {
-  const { project, person, agent, session, personId, agentId } = await setup();
+  const { project, person, session, personId, agentId } = await setup();
   const own = await signGrant(project, { session, rights: ["view"], to: personId });
   const chained = await signGrant(person, { session, rights: ["view"], to: agentId, chain: own });
-  const [tooLong, projectChained] = await Promise.all([
-    signGrant(agent, { session, rights: ["view"], to: personId, chain: chained }),
-    signGrant(project, { session, rights: ["view"], to: personId, chain: own }),
-  ]);
+  const tooLong = overChain(chained, agentId, personId);
+  const projectChained = await signGrant(project, {
+    session,
+    rights: ["view"],
+    to: personId,
+    chain: own,
+  });
   const checks = await Promise.all([tooLong, projectChained].map((g) => verifyGrant(g, session)));
   expect(checks).toEqual([false, false]);
 });
@@ -185,4 +208,17 @@ test("a grant is signed only with each right's predecessor, and with its chain a
   expect(read).toEqual(chained);
   const valid = await verifyGrant(chained, session);
   expect(valid).toBe(true);
+});
+
+test("a grant every reader would refuse isn't signed", async () => {
+  const { project, person, agent, session, personId, agentId } = await setup();
+  const own = await signGrant(project, { session, rights: ["view"], to: personId });
+  const chained = await signGrant(person, { session, rights: ["view"], to: agentId, chain: own });
+  const errors = await Promise.all([
+    rejection(signGrant(project, { session, rights: unchecked(["view", "admin"]), to: personId })),
+    rejection(signGrant(agent, { session, rights: ["view"], to: personId, chain: chained })),
+    rejection(signGrant(project, { session, rights: ["view"], to: "not a key" })),
+    rejection(signGrant(project, { session: "not a key", rights: ["view"] })),
+  ]);
+  expect(errors.map((e) => e instanceof TypeError)).toEqual([true, true, true, true]);
 });

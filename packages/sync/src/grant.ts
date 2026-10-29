@@ -53,24 +53,40 @@ const grantBytes = ({ session, rights, to, by, chain }: Omit<Fields, "sig">) =>
 /**
  * A grant of `rights` in `session`, signed by `signer`: the project key's, or a peer's passing on
  * rights from `chain`, the grant it holds. Leave out `to` only for an invite. Rejects with a
- * `TypeError` if `rights` is empty or leaves out one that another needs, such as `edit` without
- * `propose`, or if `chain` isn't a grant.
+ * `TypeError` for what every reader would refuse: a value that isn't a right, rights that leave
+ * out one another needs, such as `edit` without `propose`, a session or `to` that isn't a key
+ * id, or a `chain` that isn't a grant or is already 2 long.
  */
 export async function signGrant(
   signer: CryptoKeyPair,
   fields: { session: KeyId; rights: Right[]; to?: KeyId; chain?: Grant },
 ): Promise<Grant> {
-  const rights = readRights(RIGHTS.filter((r) => fields.rights.includes(r)));
-  if (rights === undefined)
-    throw new TypeError(`rights ${fields.rights.join(", ")} need the ones before them`);
-  // Signed as every verifier reads it back, whatever shape the caller's copy has.
-  const chain = fields.chain === undefined ? undefined : readGrant(fields.chain);
-  if (fields.chain !== undefined && chain === undefined)
-    throw new TypeError("the chain isn't a grant");
   const { session, to } = fields;
+  const rights = signableRights(fields.rights);
+  if (!isKeyId(session) || (to !== undefined && !isKeyId(to)))
+    throw new TypeError("the session and `to` must be key ids");
+  const chain = signableChain(fields.chain);
   const by = await keyId(signer.publicKey);
   const sig = await sign(signer.privateKey, grantBytes({ session, rights, to, by, chain }));
   return ordered({ session, rights, to, by, chain, sig: base64url(sig) });
+}
+
+function signableRights(given: Right[]) {
+  if (!given.every((r) => RIGHTS.includes(r)))
+    throw new TypeError(`rights ${given.join(", ")} aren't all rights`);
+  const rights = readRights(RIGHTS.filter((r) => given.includes(r)));
+  if (rights === undefined)
+    throw new TypeError(`rights ${given.join(", ")} need the ones before them`);
+  return rights;
+}
+
+// Read back, so it is signed as every verifier reads it whatever key order the caller's copy has.
+function signableChain(given: Grant | undefined) {
+  if (given === undefined) return undefined;
+  const chain = readGrant(given);
+  if (chain === undefined) throw new TypeError("the chain isn't a grant");
+  if (chain.chain !== undefined) throw new TypeError("a chain is at most 2 grants long");
+  return chain;
 }
 
 // Rights in their one canonical spelling, a prefix of `RIGHTS`: `view`, then `view` and `propose`,
