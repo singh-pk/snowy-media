@@ -133,6 +133,6 @@ Issues and pull requests are welcome, from people and from AI agents. Read [CONT
 
 It grew out of [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm) by Jerome Wu and contributors, whose Docker-based Emscripten build showed the way. [libav.js](https://github.com/Yahweasel/libav.js) and [web-demuxer](https://github.com/bilibili/web-demuxer) are prior art for module variants and demux-only builds. And of course [FFmpeg](https://ffmpeg.org) itself.
 
-## License
+## Licence
 
 [LGPL-2.1-or-later](https://github.com/singh-pk/snowy-media/blob/main/LICENSES/LGPL-2.1-or-later.txt), like FFmpeg. [NOTICE](NOTICE) lists the bundled third-party code and its licences.
