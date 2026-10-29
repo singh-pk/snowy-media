@@ -9,7 +9,7 @@ import { createAudioOutput } from "./audio";
 import type { VideoParams } from "./codec";
 import { type Clip, endOf } from "./composition";
 import { createPcmControl, createPcmProducer, createPcmRing } from "./pcm";
-import type { FromMedia, FromRender, ToMedia, ToRender, VideoClip } from "./protocol";
+import type { FromMedia, FromRender, Opened, ToMedia, ToRender, VideoClip } from "./protocol";
 import { closeRing, createRing, RING_CAPACITY } from "./ring";
 
 // The PCM ring's length at `rate`: the smallest power of two that holds a second, so the media
@@ -62,21 +62,26 @@ export interface PlaybackOptions {
   host: PlaybackHost;
   context: AudioContext;
   id: number;
-  /** The open file's video parameters, by stream; none for a composition without a file. */
+  /** The open file's video parameters, by stream; none for a composition. */
   opened: { video: Record<number, VideoParams> } | undefined;
   played: Played;
   /** The media time the play starts at, in microseconds. */
   from: number;
 }
 
+/** A composition's asset, opened: its file, and what the media worker found in it. */
+export interface Asset extends Opened {
+  file: File;
+}
+
 /**
  * What a play plays: the open file's streams, or a composition's clips (src/composition.ts) in
- * the order they play, on a composition that ends at `end`, in microseconds.
+ * the order they play, on a composition that ends at `end`, in microseconds, from `assets`.
  */
 export interface Played {
   video: number | undefined;
   audio: number | undefined;
-  track?: { clips: Clip[]; end: number } | undefined;
+  track?: { clips: Clip[]; end: number; assets: Record<string, Asset> } | undefined;
 }
 
 interface Reading {
@@ -103,22 +108,18 @@ function clipsFrom(clips: Clip[], from: number) {
 }
 
 // The clips of `clips` with video, as the render worker plays them.
-const videoOf = (clips: Clip[], video: Record<number, VideoParams>) =>
-  clips.flatMap(({ video: stream, ...place }): VideoClip[] => {
-    const params = stream === undefined ? undefined : video[stream];
+const videoOf = (clips: Clip[], assets: Record<string, Asset>) =>
+  clips.flatMap(({ asset, video: stream, ...place }): VideoClip[] => {
+    const params = stream === undefined ? undefined : assets[asset]?.video[stream];
     return params ? [{ params, in: place.in, out: place.out, offset: place.offset }] : [];
   });
 
 // Resolves once the media worker has read what the play plays, or at once with nothing to read,
 // as after the last clip, where the clock runs on in silence to the composition's `end`.
-function startTrack(
-  r: Reading,
-  end: number,
-  video: Record<number, VideoParams>,
-  buffered: () => void,
-) {
+function startTrack(r: Reading, track: NonNullable<Played["track"]>, buffered: () => void) {
   const { host, id, ring, pcm, from, clips } = r;
-  const shown = videoOf(clips, video);
+  const { end, assets } = track;
+  const shown = videoOf(clips, assets);
   if (shown.length > 0)
     host.render.postMessage({ type: "play", id, ring, pcm, from, clips: shown });
   else host.render.postMessage({ type: "clear" } satisfies ToRender);
@@ -131,7 +132,15 @@ function startTrack(
     return Promise.resolve();
   }
 
-  return host.demux({ type: "track", ring, pcm, from, clips, end, preroll: r.preroll }, buffered);
+  const files: Record<string, File> = {};
+
+  for (const { asset } of clips) {
+    const file = assets[asset]?.file;
+    if (file) files[asset] = file;
+  }
+
+  const { preroll } = r;
+  return host.demux({ type: "track", ring, pcm, from, clips, files, end, preroll }, buffered);
 }
 
 // A file's video and audio, read from `from`; its video plays as one clip to its end.
@@ -280,9 +289,7 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
     host.changed();
   };
 
-  const demuxed = track
-    ? startTrack(reading, track.end, video, buffered)
-    : startReading(reading, buffered);
+  const demuxed = track ? startTrack(reading, track, buffered) : startReading(reading, buffered);
 
   const frame = { id: 0 };
   const { output, publish } = createOutputClock(context, clock, host.changed);

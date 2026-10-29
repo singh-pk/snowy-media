@@ -125,7 +125,13 @@ export interface MediaInfo {
  * `error`, its only report.
  */
 export type ToMedia =
-  | { type: "open"; id: number; file: File }
+  | {
+      type: "open";
+      id: number;
+      file: File;
+      /** The composition's asset that `file` holds, so a `track` of it need not open it again. */
+      asset?: string | undefined;
+    }
   | {
       type: "demux";
       id: number;
@@ -150,10 +156,11 @@ export type ToMedia =
     }
   | {
       /**
-       * Reads a composition's clips of the open file in turn, each from its keyframe at or before
-       * its `in` to its `out`, for a clock on the composition's time that starts at `from` and
-       * runs on to `end`, all in microseconds. Each clip's video packets go into `ring`, followed
-       * by a CUT record, and its audio into `pcm`, with silence wherever no clip's audio plays.
+       * Reads a composition's clips in turn, each from the file of its asset in `files`, from its
+       * keyframe at or before its `in` to its `out`, for a clock on the composition's time that
+       * starts at `from` and runs on to `end`, all in microseconds. Each clip's video packets go
+       * into `ring`, followed by a CUT record, and its audio into `pcm`, with silence wherever no
+       * clip's audio plays.
        * `buffered` is sent once `pcm` holds `preroll` frames, is full or has all the audio.
        */
       type: "track";
@@ -162,6 +169,7 @@ export type ToMedia =
       pcm: SharedArrayBuffer;
       from: number;
       clips: Clip[];
+      files: Record<string, File>;
       end: number;
       preroll: number;
     };

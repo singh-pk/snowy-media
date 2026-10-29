@@ -72,7 +72,9 @@ function createState(core: CoreModule) {
     check,
     source: createFileSource(core),
     // The open file's demuxer, or 0, and whether it has read past its start since it opened.
+    // `asset` is the composition's asset it holds, if the main thread said.
     ctx: 0,
+    asset: undefined as string | undefined,
     read: false,
     pkt: core._sny_packet_alloc(),
   };
@@ -155,10 +157,11 @@ function videoParams(m: Media, id: number): VideoParams {
 function close(m: Media) {
   if (m.ctx) m.core._sny_close(m.ctx);
   m.ctx = 0;
+  m.asset = undefined;
 }
 
-function open(m: Media, file: File): Opened {
-  const { core, check, str } = m;
+function openInput(m: Media, file: File) {
+  const { core, check } = m;
   close(m);
   m.source.open(file);
   const out = core._malloc(4);
@@ -171,6 +174,13 @@ function open(m: Media, file: File): Opened {
   m.ctx = ctx;
   m.read = false;
   check(core._sny_find_stream_info(ctx), "find_stream_info");
+}
+
+function open(m: Media, file: File, asset: string | undefined): Opened {
+  const { core, str } = m;
+  openInput(m, file);
+  m.asset = asset;
+  const { ctx } = m;
   const tracks = Array.from({ length: core._sny_nb_streams(ctx) }, (_, i) => track(m, i));
   const duration = core._sny_duration(ctx);
   const video: Record<number, VideoParams> = {};
@@ -517,6 +527,7 @@ function demux(m: Media, request: DemuxRequest, buffered: () => void) {
 
 interface ClipRead {
   clip: Clip;
+  files: Record<string, File>;
   pcm: SharedArrayBuffer;
   // Where the PCM ring's audio is up to on the clock, in microseconds.
   at: number;
@@ -526,8 +537,17 @@ interface ClipRead {
 
 // Reads `clip` of a track: its video into `ring`, followed by a CUT record, and its audio, or
 // silence without any, into the PCM ring up to its end.
-function readClip(m: Media, ring: Ring, { clip, pcm, at, preroll, buffered }: ClipRead) {
-  const { video, audio, offset } = clip;
+function readClip(m: Media, ring: Ring, { clip, files, pcm, at, preroll, buffered }: ClipRead) {
+  const { asset, video, audio, offset } = clip;
+
+  // A file opens again only at a cut to another: one is open at a time (src/io.ts).
+  if (m.asset !== asset) {
+    const file = files[asset];
+    if (!file) throw new RangeError(`track: no file for asset ${asset}`);
+    openInput(m, file);
+    m.asset = asset;
+  }
+
   const streams = video === undefined ? [] : [video];
   demuxer(m, streams);
   const first = video ?? audio;
@@ -562,13 +582,13 @@ function readClip(m: Media, ring: Ring, { clip, pcm, at, preroll, buffered }: Cl
 // Reads a track's clips in turn (src/protocol.ts), on a clock that starts at `from` and runs on
 // in silence after the last to `end`; then writes the END record.
 function readTrack(m: Media, ring: Ring, request: TrackRequest, buffered: () => void) {
-  const { pcm, from, clips, end, preroll } = request;
+  const { pcm, from, clips, files, end, preroll } = request;
   const clock = createPcmProducer(pcm);
   clock.start(from / 1e6);
   const at = { time: from };
 
   for (const clip of clips) {
-    readClip(m, ring, { clip, pcm, at: at.time, preroll, buffered });
+    readClip(m, ring, { clip, files, pcm, at: at.time, preroll, buffered });
     if (ring.closed()) return;
     at.time = endOf(clip);
   }
@@ -600,7 +620,7 @@ function demuxTrack(m: Media, request: TrackRequest, buffered: () => void) {
 function createMedia(core: CoreModule) {
   const m = createState(core);
   return {
-    open: (file: File) => open(m, file),
+    open: (file: File, asset?: string) => open(m, file, asset),
     demux: (request: DemuxRequest, buffered: () => void) => demux(m, request, buffered),
     track: (request: TrackRequest, buffered: () => void) => demuxTrack(m, request, buffered),
   };
@@ -618,7 +638,7 @@ async function handle(message: ToMedia) {
     const media = await ready;
 
     if (message.type === "open") {
-      post(Object.assign(media.open(message.file), { type: "opened" as const, id }));
+      post(Object.assign(media.open(message.file, message.asset), { type: "opened" as const, id }));
     } else {
       const buffered = () => post({ type: "buffered", id });
       if (message.type === "track") media.track(message, buffered);

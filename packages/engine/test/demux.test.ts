@@ -111,13 +111,31 @@ test("a pump that fails ends the ring with FAILED", async () => {
         }
 
         const noStream = await demux(1 << 16, [7]);
+
+        // A track of an asset whose file it was not given.
+        async function trackOf(asset: string) {
+          const clip = { clip: "", asset, video: 0, audio: undefined, in: 0, out: 1e6, offset: 0 };
+          const ring = support.createRing(1 << 16);
+          const pcm = support.createPcmRing(1 << 16, 2, 48_000);
+          const read = { ring, pcm, from: 0, clips: [clip], files: {}, end: 1e6, preroll: 0 };
+
+          try {
+            await media.request({ type: "track", ...read });
+            return "replied";
+          } catch (e) {
+            return String(e);
+          }
+        }
+
+        const noFile = await trackOf("a");
         media.stop();
-        return { noStream };
+        return { noStream, noFile };
       },
       { page: PAGE, worker: MEDIA_WORKER },
     );
 
     expect(results.noStream).toEqual(["Error: demux: no stream 7", "failed"]);
+    expect(results.noFile).toBe("Error: track: no file for asset a");
   } finally {
     await browser.close();
   }

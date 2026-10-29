@@ -130,6 +130,17 @@ test("a layer that plays on into the next segment is one layer", () => {
   expect(clipsOf(two, DURATION).map((c) => [c.video, c.audio])).toEqual([[0, undefined]]);
 });
 
+test("clips of two files play one after another, each from its own", () => {
+  const two = plan(
+    segment({ video: [video({ ...LATER, clip: "c2" }), video({ end: 2_000_000 })] }),
+  );
+  const clips = clipsOf(two, DURATION).map((c) => [c.clip, c.asset, c.in, c.offset]);
+  expect(clips).toEqual([
+    ["c1", "a", 500_000, 500_000],
+    ["c2", "b", 500_000, 1_500_000],
+  ]);
+});
+
 test("a plan with no layers plays nothing", () => {
   expect(clipsOf(plan(segment()), DURATION)).toEqual([]);
   expect(clipsOf(plan(), DURATION)).toEqual([]);
@@ -142,10 +153,6 @@ test("what the engine does not play is a NotSupportedError that says what", () =
     [
       "more than one video layer at a time",
       plan(segment({ video: [video(), video({ clip: "c2", start: 2_000_000, end: 3_000_000 })] })),
-    ],
-    [
-      "clips of more than one file",
-      plan(segment({ video: [video({ end: 2_000_000 }), video({ ...LATER, clip: "c2" })] })),
     ],
     ["a transition", plan(segment({ transitions: [{}] }))],
     ["an effect", plan(segment({ video: [video({ effects: [{}] })] }))],

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // engine.compose in Chromium, through the public API alone: a composition of one clip of
-// h264-aac.mp4, read from 0.5 s and placed from 1 s to 3 s of 4 s, and one of three clips of it
-// cut back to back and with gaps. Played, the canvas is black outside the clips and shows,
-// within one, the frame due at the composition's time less the clip's offset, by native FFmpeg's
-// timestamps, and the clock runs on to the end; paused, a seek lands on black or on that frame,
-// with the clock at the target; an edit that moves the clip moves what is shown; and a plan the
-// engine does not play is refused.
+// h264-aac.mp4, read from 0.5 s and placed from 1 s to 3 s of 4 s, and one of three clips cut back
+// to back and with gaps, the middle one of vp9-opus.webm. Played, the canvas is black outside the
+// clips and shows, within one, the frame due at the composition's time less the clip's offset,
+// by native FFmpeg's timestamps, and the clock runs on to the end; paused, a seek lands on black
+// or on that frame, with the clock at the target; an edit that moves the clip moves what is shown;
+// and a plan the engine does not play is refused.
 // Usage: bun run test
 
 import { afterAll, expect, test } from "bun:test";
@@ -23,11 +23,19 @@ interface Video {
 }
 
 const FILE = "h264-aac.mp4";
+// Another container, codec and time base, so a clip read from the wrong file fails to decode.
+const SECOND = "vp9-opus.webm";
 const expected: Record<string, { video: Video; audio: { id: number; sampleRate: number } }> =
   await Bun.file(new URL("fixtures/expected.json", import.meta.url)).json();
-const { video, audio } = expected[FILE] ?? { video: { id: 0, timeBase: "1/1", pts: [] } };
-if (!audio) throw new Error(`no ${FILE} in expected.json`);
-const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
+
+// The video and audio streams of fixture `file`, by native FFmpeg.
+function streamsOf(file = FILE) {
+  const { video, audio } = expected[file] ?? {};
+  if (!video || !audio) throw new Error(`no ${file} in expected.json`);
+  const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
+  return { video, audio, num, den };
+}
+
 // The clip, in seconds: read from IN, placed from START to END of DURATION.
 const [IN, START, END, DURATION] = [0.5, 1, 3, 4];
 const OFFSET = START - IN;
@@ -36,17 +44,19 @@ interface Placed {
   in: number;
   start: number;
   end: number;
+  // FILE without one.
+  file?: string;
 }
 
 const CLIP: Placed = { in: IN, start: START, end: END };
 // The sound alone of a clip after it, which shows black.
 const SOUND: Placed = { in: 0.2, start: 3.3, end: 3.8 };
-// Three clips, each read from after one of the file's keyframes, at 0 s and 1 s: the second cut
-// straight after the first, back in the file, and the third after a gap.
+// Three clips, each read from after a keyframe: the second, of SECOND, cut straight after the
+// first, and the third after a gap.
 // Each is longer than LATE, so some of it is clear of its edges on every runner.
 const CUTS: Placed[] = [
   { in: 1.2, start: 0.5, end: 2.2 },
-  { in: 0.1, start: 2.2, end: 3.9 },
+  { in: 0.1, start: 2.2, end: 3.9, file: SECOND },
   { in: 1.1, start: 4.4, end: 5.9 },
 ];
 const CUT_DURATION = 6.4;
@@ -81,7 +91,9 @@ function planOf(clips: Placed[], duration = DURATION): Engine.Plan {
 }
 
 function layersOf(clip: Placed, i: number): [Engine.PlanVideoLayer, Engine.PlanAudioLayer] {
-  const rate = audio?.sampleRate ?? 1;
+  const { file = FILE } = clip;
+  const { video, audio, num, den } = streamsOf(file);
+  const rate = audio.sampleRate;
   const layer = {
     start: Math.round(clip.start * 1e6),
     end: Math.round(clip.end * 1e6),
@@ -93,7 +105,7 @@ function layersOf(clip: Placed, i: number): [Engine.PlanVideoLayer, Engine.PlanA
     clip: `v${i}`,
     in: Math.round((clip.in * den) / num),
     timeBase: [num, den] as Engine.Ratio,
-    source: { asset: FILE, stream: video.id },
+    source: { asset: file, stream: video.id },
     opacity: 1,
     blend: "normal",
     transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 },
@@ -103,7 +115,7 @@ function layersOf(clip: Placed, i: number): [Engine.PlanVideoLayer, Engine.PlanA
     clip: `a${i}`,
     in: Math.round(clip.in * rate),
     timeBase: [1, rate] as Engine.Ratio,
-    source: { asset: FILE, stream: audio?.id ?? 1 },
+    source: { asset: file, stream: audio.id },
     gainDb: 0,
     pan: 0,
     fadeIn: layer.start,
@@ -114,8 +126,9 @@ function layersOf(clip: Placed, i: number): [Engine.PlanVideoLayer, Engine.PlanA
 
 const micros = (seconds: number) => Math.round(seconds * 1e6);
 
-// The frame due at file time `t`, in seconds, by native FFmpeg's timestamps.
-function frameAt(t: number) {
+// The frame of `file` due at its time `t`, in seconds, by native FFmpeg's timestamps.
+function frameAt(t: number, file?: string) {
+  const { video, num, den } = streamsOf(file);
   const after = video.pts.findIndex((pts) => (pts * num) / den > t);
   return Math.max(0, (after < 0 ? video.pts.length : after) - 1);
 }
@@ -131,8 +144,8 @@ function clipAt(t: number, clips: Placed[]) {
 function shownAt(t: number, clips = [CLIP]) {
   const clip = clipAt(t, clips);
   if (!clip) return [-1];
-  const first = frameAt(Math.max(clip.in, t - LATE - clip.offset));
-  const last = frameAt(t + EARLY - clip.offset);
+  const first = frameAt(Math.max(clip.in, t - LATE - clip.offset), clip.file);
+  const last = frameAt(t + EARLY - clip.offset, clip.file);
   return Array.from({ length: last - first + 1 }, (_, i) => first + i);
 }
 
@@ -164,11 +177,11 @@ function watchPlay(plan: Engine.Plan, duration: number) {
     server.url.href,
     (tab) =>
       tab.evaluate(
-        async ({ entry, page, file, each, length, ms }) => {
+        async ({ entry, page, each, length, ms }) => {
           const support: typeof PageSupport = await import(page);
           const { player, canvas } = await support.startEngine(entry);
-          const handle = await support.fixtureHandle(file);
-          await player.compose({ duration: length, plan: () => each, source: () => handle });
+          const source = (asset: string) => support.fixtureHandle(asset);
+          await player.compose({ duration: length, plan: () => each, source });
           await player.play();
           const seen = await support.watchScreen(player, canvas, ms, { black: true });
           player.close();
@@ -177,7 +190,6 @@ function watchPlay(plan: Engine.Plan, duration: number) {
         {
           entry: ENTRY,
           page: PAGE,
-          file: FILE,
           each: plan,
           length: Math.round(duration * 1e6),
           ms: (duration + 0.5) * 1000,
@@ -215,7 +227,7 @@ test(`plays a clip of ${FILE} with black around it, and sound alone after it, to
   expect(checked.filter(([t]) => t > END).length).toBeGreaterThan(MIN_READS / 2);
 }, 60_000);
 
-test(`plays clips of ${FILE} cut back to back and after a gap, to the end`, async () => {
+test(`plays clips of ${FILE} and ${SECOND} cut back to back and after a gap, to the end`, async () => {
   const reads = await watchPlay(planOf(CUTS, CUT_DURATION), CUT_DURATION);
   checkPlay(reads, CUTS, CUT_DURATION);
 }, 60_000);
@@ -225,12 +237,12 @@ test(`plays clips of ${FILE} cut back to back and after a gap, to the end`, asyn
 function seekPaused(plan: Engine.Plan, duration: number, seeks: number[], moved?: Engine.Plan) {
   return inPage(server.url.href, (tab) =>
     tab.evaluate(
-      async ({ entry, page, file, first, edit, length, targets }) => {
+      async ({ entry, page, first, edit, length, targets }) => {
         const support: typeof PageSupport = await import(page);
         const { player, canvas } = await support.startEngine(entry);
-        const handle = await support.fixtureHandle(file);
+        const source = (asset: string) => support.fixtureHandle(asset);
         const current = { plan: first };
-        await player.compose({ duration: length, plan: () => current.plan, source: () => handle });
+        await player.compose({ duration: length, plan: () => current.plan, source });
         const seen: [number, number][] = [];
 
         for (const time of targets) {
@@ -255,7 +267,6 @@ function seekPaused(plan: Engine.Plan, duration: number, seeks: number[], moved?
       {
         entry: ENTRY,
         page: PAGE,
-        file: FILE,
         first: plan,
         edit: moved ?? null,
         length: Math.round(duration * 1e6),
@@ -273,12 +284,12 @@ function checkSeeks(got: [number, number][], seeks: number[], clips: Placed[]) {
     expect(Math.abs(clock - time), `clock at ${time} s`).toBeLessThan(SAMPLE);
     const clip = clipAt(time, clips);
     // In whole microseconds, as the plan places it, so a target on a frame's time is due there.
-    const there = clip && (micros(time) - micros(clip.offset)) / 1e6;
-    expect(id, `at ${time} s`).toBe(there === undefined ? -1 : frameAt(there));
+    const due = clip ? frameAt((micros(time) - micros(clip.offset)) / 1e6, clip.file) : -1;
+    expect(id, `at ${time} s`).toBe(due);
   }
 }
 
-test(`seeks into clips of ${FILE} and the gaps between them, paused`, async () => {
+test(`seeks into clips of ${FILE} and ${SECOND} and the gaps between them, paused`, async () => {
   const got = await seekPaused(planOf(CUTS, CUT_DURATION), CUT_DURATION, CUT_SEEKS);
   checkSeeks(got, CUT_SEEKS, CUTS);
 }, 60_000);
@@ -298,7 +309,7 @@ test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`,
 function wrongKind(): Engine.Plan {
   const plan = planOf([CLIP]);
   const layer = plan.segments[0]?.video[0];
-  if (layer) layer.source = { asset: FILE, stream: audio?.id ?? 1 };
+  if (layer) layer.source = { asset: FILE, stream: streamsOf().audio.id };
   return plan;
 }
 
