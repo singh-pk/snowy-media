@@ -65,6 +65,12 @@ async function sha256(data: Bytes) {
   return new Uint8Array(hash);
 }
 
+async function signsBody(header: Bytes, body: Bytes) {
+  const bodyHash = await sha256(body);
+  const signedHash = header.subarray(59, SIGNED);
+  return bodyHash.every((b, i) => b === signedHash[i]);
+}
+
 function checkUint(name: string, value: number, max: number) {
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new RangeError(`${name} must be an integer from 0 to ${max}, not ${value}`);
@@ -199,9 +205,8 @@ export async function decodeChunk(
   if (track !== slot.track || index !== slot.index) throw new InvalidChunkError("another slot");
 
   const body = bytes.subarray(HEADER);
-  const bodyHash = await sha256(body);
-  const signedHash = bytes.subarray(59, SIGNED);
-  if (!bodyHash.every((b, i) => b === signedHash[i])) throw new InvalidChunkError("bad body hash");
+  const matches = await signsBody(bytes, body);
+  if (!matches) throw new InvalidChunkError("bad body hash");
 
   return {
     session,
@@ -212,6 +217,27 @@ export async function decodeChunk(
     packets: decodeBody(body, view.getUint32(55, true)),
   };
 }
+
+/**
+ * A chunk's packets, cut again, joined to the header `encodeChunk` signed when the chunk was
+ * first cut, its first `HEADER` bytes: or undefined when they aren't the body that header
+ * signed, such as from a file changed since. Nothing is signed again. Throws a `RangeError` for
+ * a header shorter than `HEADER`.
+ */
+export async function joinChunk(header: Bytes, packets: Packet[]) {
+  if (header.byteLength < HEADER) throw new RangeError(`a chunk header is ${HEADER} bytes`);
+  const body = encodeBody(packets);
+  const matches = await signsBody(header, body);
+  if (!matches) return undefined;
+  const bytes = new Uint8Array(HEADER + body.byteLength);
+  bytes.set(header.subarray(0, HEADER));
+  bytes.set(body, HEADER);
+  return bytes;
+}
+
+/** The `startUs` a chunk's header signed. */
+export const chunkStartUs = (header: Bytes) =>
+  readTime(new DataView(header.buffer, header.byteOffset, HEADER), 39);
 
 export const sameSlot = (a: ChunkSlot, b: ChunkSlot) => a.track === b.track && a.index === b.index;
 

@@ -13,6 +13,7 @@
   "src/chunk-cutter.ts": 100,
   "src/chunk-index.ts": 100,
   "src/chunk-links.ts": 100,
+  "src/chunk-recut.ts": 100,
   "src/chunk-requests.ts": 100,
   "src/chunk-store.ts": 95,
   "src/chunk.ts": 100,
