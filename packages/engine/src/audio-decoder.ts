@@ -26,7 +26,6 @@ const PACKET_OVERHEAD = 256;
 // The frames of silence written at a time, from a buffer of zeros made once.
 const SILENCE = 1024;
 
-// An audio stream being decoded into a PCM ring, from a queue of its compressed packets.
 export interface Audio {
   stream: number;
   /**
@@ -50,7 +49,6 @@ export interface Audio {
   close(): void;
 }
 
-/** The FFmpeg core, and how the media worker turns a failed call into an error. */
 interface Ffmpeg {
   core: CoreModule;
   check: (ret: number, what: string) => void;
@@ -61,7 +59,6 @@ export interface AudioOptions {
   /** The open file's demuxer. */
   ctx: number;
   request: AudioRequest;
-  /** The PCM ring it decodes into. */
   pcm: SharedArrayBuffer;
   /** Microseconds: the audio before it is dropped. */
   from: number;

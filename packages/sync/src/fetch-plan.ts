@@ -1,18 +1,11 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Where each chunk comes from (docs/architecture.md#choosing-where-each-chunk-comes-from): for
-// every chunk an interest covers that this peer still needs, which link to ask, and when. A
-// chunk costs its sealed size from the chunk index, and each link has a measured RTT and
-// throughput, so a chunk goes to the link expected to finish it first among those the tree
-// allows: an urgent chunk to a forwarder that advertises it, else the source; one ahead only to a
-// forwarder; a background one, while nothing more pressing is out, to a forwarder, else the
-// source. A link takes requests only while it has room, so no link holds a film's worth queued.
+// Where each chunk comes from (docs/architecture.md#choosing-where-each-chunk-comes-from). A link
+// takes requests only while it has room, so no link holds a film's worth queued.
 //
-// The plan runs on events. Each marks it stale and one pass runs in a microtask, so a burst of
-// events plans once, and a pass skips whole ranges held, coming live or advertised by no one,
-// so its work follows what changed, not the film's length. It sends through the callbacks it is
-// given and keeps no clock of its own.
+// A burst of events plans once, in a microtask, and a pass skips whole ranges held, coming live or
+// advertised by no one, so its work follows what changed, not the film's length.
 
 import { chunkKey, type ChunkSlot } from "./chunk";
 import { chunkAt, type JoinedIndex } from "./chunk-index";
@@ -24,16 +17,12 @@ export type FetchPriority = "urgent" | "ahead" | "background";
 /** What an interest covers, its tracks resolved to ids. */
 export type Want = { tracks: number[]; fromUs: number; toUs: number; priority: FetchPriority };
 
-/** A request for a chunk, of a forwarder or of the source. */
 export type Fetch = { slot: ChunkSlot; peer: KeyId; priority: FetchPriority };
 
-/** A link's measures: its round trip, and how fast it delivers. */
 export type LinkMeasures = { rttMs: number; bytesPerMs: number };
 
 export type FetchPlanOptions = {
-  /** The source's peer id. */
   source: KeyId;
-  /** The chunks the index lists, joined from its pages. */
   index(): JoinedIndex;
   /** Whether every chunk is listed, so a moment past the last is covered by it. */
   ended(): boolean;
@@ -49,9 +38,7 @@ export type FetchPlanOptions = {
   links(): ReadonlyMap<KeyId, LinkMeasures>;
   /** The time, in milliseconds, on the clock playhead updates are given in. */
   now(): number;
-  /** Sends a request. */
   ask(fetch: Fetch): void;
-  /** Sends a `cancel` for a request. */
   cancel(fetch: Fetch): void;
 };
 
@@ -137,8 +124,7 @@ function createListing(options: FetchPlanOptions) {
 
 type Listing = ReturnType<typeof createListing>;
 
-// The interests stated, each with the index span it covers as of the last pass. `changed` is
-// called when what they cover may have changed.
+// The interests stated, each with the index span it covers as of the last pass.
 function createWants(listing: Listing, changed: () => void) {
   const wants = new Set<{ want: Want; span: Span | undefined }>();
 
@@ -187,7 +173,6 @@ function createWants(listing: Listing, changed: () => void) {
     );
   }
 
-  // Per track, the spans of the interests at a priority, in start order.
   function spans(priority: FetchPriority) {
     const byTrack = new Map<number, Span[]>();
 
@@ -356,7 +341,6 @@ function createPlacer(options: FetchPlanOptions, requests: Requests, room: Room,
       .keys()
       .filter((peer) => peer !== options.source);
 
-  // Whether some link could take a chunk at `priority` now.
   function open(priority: FetchPriority) {
     const sourceTakes = priority !== "ahead" && room.room(options.source);
     return sourceTakes || forwarders().some((peer) => room.takes(peer, priority));

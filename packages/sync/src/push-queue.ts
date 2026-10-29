@@ -29,7 +29,6 @@ type Request = { peer: KeyId; slot: ChunkSlot; at: number };
 export type PushQueueOptions = {
   /** The catalog's tracks, fixed for the session. */
   tracks: Catalog["tracks"];
-  /** Answers a peer's request with `busy` or `gone`, over its link. */
   send(peer: KeyId, message: ChunkBusy | ChunkGone): void;
   /**
    * Called when a change leaves something to send after `next` found nothing, so a source that
@@ -92,7 +91,6 @@ function createRequests() {
     state.background = without(state.background, match);
   }
 
-  // Puts a request in a tier among the others by when it was first asked.
   function insert(tier: Request[], request: Request) {
     const after = tier.findIndex((r) => r.at > request.at);
     tier.splice(after === -1 ? tier.length : after, 0, request);
@@ -301,7 +299,6 @@ export function createPushQueue(options: PushQueueOptions) {
     else answer(peer, "busy", slot);
   }
 
-  /** A peer left: its requests go with it. */
   const left = (peer: KeyId) => requests.drop((r) => r.peer === peer);
 
   /**

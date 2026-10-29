@@ -31,8 +31,7 @@ export type SourceRecordsOptions = {
   content: CryptoKey;
   /**
    * Called with each record kept: a newer catalog or control record, a track's first setup, or a
-   * page of the index listing more chunks.
-   * What it throws is reported, as the record stays kept.
+   * page of the index listing more chunks. What it throws is reported; the record stays kept.
    */
   onRecord?: (record: SourceRecord) => void;
 };
@@ -169,7 +168,6 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     );
   }
 
-  /** The chunks the index lists so far, joined from its pages: their bounds and sizes. */
   const index = () => joinedIndex((page) => held.pages.get(page)?.value);
 
   // The highest page of the index held, or -1 for none, which any bounds reach.

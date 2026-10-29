@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
-//
-// The public API of @snowy-media/engine.
 
 import type { VideoParams } from "./codec";
 import { type Clip, clipOf, type Composition } from "./composition";
@@ -28,7 +26,7 @@ export { UnsupportedPlatformError } from "./platform";
 export type { MediaInfo, PlatformFeature, Track } from "./protocol";
 
 export interface EngineOptions {
-  /** The canvas the engine draws video into; the engine takes control of it. */
+  /** The engine takes control of it. */
   canvas: HTMLCanvasElement;
 }
 
@@ -58,11 +56,9 @@ export interface Engine {
    */
   changed(): Promise<void>;
   /**
-   * Plays the open file's first video and first audio track, or the open composition with its
-   * clip's, from where it is, once the browser allows audio to start (after a user gesture), unless a pause comes first: once
-   * video is decoded and audio buffered ahead, it starts the audio, and resolves once
-   * it is heard. Rejects if playing has failed, or with an AbortError if an open stops it
-   * while it starts.
+   * Plays the open file's first video and audio track, or the composition's clip, from where it
+   * is, once the browser allows audio (after a user gesture), unless a pause comes first; resolves
+   * once audio is heard. Rejects if playing has failed, or with an AbortError if an open stops it.
    */
   play(): Promise<void>;
   /** Pauses; `play` goes on from here. Rejects if playing has failed. */
@@ -86,7 +82,6 @@ export interface Engine {
   fastSeek(time: number): Promise<void>;
   /** The time, in seconds, of what is being heard and seen now: the file's or the composition's. */
   readonly currentTime: number;
-  /** Stops the engine's workers. */
   close(): void;
 }
 
@@ -97,7 +92,6 @@ const visible = () => document.visibilityState === "visible";
 const loadError = (e: Event, worker: string) =>
   new Error(e instanceof ErrorEvent ? e.message : `the ${worker} worker failed to load`);
 
-// Sends `message` to `worker` and resolves with its reply, or rejects if the worker fails to load.
 function request(worker: Worker, message: ToRender, transfer: Transferable[]) {
   return new Promise<FromRender>((resolve, reject) => {
     worker.addEventListener("message", (e: MessageEvent<FromRender>) => resolve(e.data), {
@@ -110,8 +104,7 @@ function request(worker: Worker, message: ToRender, transfer: Transferable[]) {
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-// The media worker, as a function per request; replies may come in any order. `buffered`
-// runs when a demux request says its audio is buffered.
+// Replies may come in any order, so each request carries an id.
 function createMedia() {
   const worker = new Worker(new URL("./media.worker.js", import.meta.url), { type: "module" });
   const pending = new Map<number, PromiseWithResolvers<FromMedia> & { buffered(): void }>();
@@ -190,10 +183,9 @@ export async function createEngine({ canvas }: EngineOptions): Promise<Engine> {
 type Player = ReturnType<typeof createPlayerState>;
 
 function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>) {
-  // Wakes the waits of `until`.
   const waits = new Set<() => void>();
 
-  // Has each wait of `until` look again; on every event that may change what it waits for.
+  // On every event that may change what a wait of `until` waits for.
   function changed() {
     for (const wake of waits) wake();
   }
@@ -217,7 +209,6 @@ function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>
     context: undefined as AudioContext | undefined,
     // Set at once, so a second play while the first starts joins it.
     playback: undefined as Promise<Playback> | undefined,
-    // What plays, once it has started.
     started: undefined as Playback | undefined,
     // Why playing stopped, until the next open.
     failure: undefined as Error | undefined,
@@ -279,7 +270,6 @@ function failPlayer(p: Player, error: Error) {
   stop(p);
 }
 
-// What a play needs of the player.
 function playbackHost(p: Player): PlaybackHost {
   return {
     render: p.render,
@@ -364,7 +354,6 @@ async function open(p: Player, handle: FileSystemFileHandle) {
   return reply.info;
 }
 
-// Throws unless `stream` of what is open is of `kind`.
 function checkStream(p: Player, stream: number | undefined, kind: "video" | "audio") {
   if (stream === undefined) return;
   const track = p.opened?.info.tracks.find((t) => t.id === stream);

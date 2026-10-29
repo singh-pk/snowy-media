@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Undo (docs/architecture.md#undo-revert-and-going-back): the operations that take a batch back,
-// worked out from three documents: just before the batch, just after it, and now. A change the
-// batch made is taken back only where it still stands as the batch left it; one changed since is
-// left alone and reported, so an undo never takes back someone else's later edit.
+// Undo (docs/architecture.md#undo-revert-and-going-back), from the documents just before a batch,
+// just after it and now. A change is taken back only where it still stands as the batch left it,
+// so an undo never takes back someone else's later edit.
 
 import type { Batch } from "./batch";
 import { itemId, type ItemId } from "./ids";
@@ -13,10 +12,9 @@ import { createProject, leafOf, type Document } from "./project";
 type Operation = Batch["ops"][number];
 type OperationOf<K extends Operation["op"]> = Extract<Operation, { op: K }>;
 
-/** An operation of the batch that the undo leaves alone, by its index, and why. */
 type Left = { index: number; reason: string };
 
-/** The operations that take a batch back, last first, and what they leave alone. */
+/** `ops` take the batch back, last operation first. */
 export type Undo = { ops: Operation[]; left: Left[] };
 
 type Documents = { before: Document; after: Document; now: Document };
@@ -41,7 +39,6 @@ function stands(docs: Documents, id: string, removed: boolean) {
   return now !== undefined && now.removed === removed && same(now, docs.after.record(id));
 }
 
-// What takes back setting a leaf, or why it is left alone.
 function undoSet(
   op: OperationOf<"sequence.set" | "role.set" | "item.set" | "effect.set">,
   { before, after, now }: Documents,
@@ -102,7 +99,7 @@ function undoKeyframeRemove(
   return [{ op: "keyframe.set", keyframe: old }];
 }
 
-// What takes back one operation, whose own id is `id`, or why it is left alone.
+// `id` is the id the operation itself took; a string is why it is left alone.
 function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | string {
   const { before, after, now } = docs;
 
@@ -170,10 +167,8 @@ function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | stri
 }
 
 /**
- * The operations that undo `batch`, last operation first, from the documents just before and
- * just after it and the document now. `skipped` are the indexes of the operations it skipped.
- * Each operation is undone against the document as the undo's operations so far leave it, and
- * compared with the batch's document as they leave it, so one that a later operation of the
+ * `skipped` are the indexes of the operations `batch` skipped. Each operation is undone against
+ * the documents as the undo's operations so far leave them, so one that a later operation of the
  * batch changed or removed is undone once that change is.
  */
 export function undoBatch(

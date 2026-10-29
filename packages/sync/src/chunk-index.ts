@@ -1,13 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The chunk index (docs/architecture.md#chunk-index): where each chunk cut so far begins and the
-// last one ends, and how many bytes each one's video takes, so a peer finds the chunk covering a
-// time, and what asking for it costs, before it holds that chunk. Chunks are as long as the
-// file's keyframes make them, so no peer can work this out alone. The index
-// comes in pages of `INDEX_PAGE` chunks, each a signed record (src/signed-record.ts) keyed
-// `index/<page>@<n>` for the n chunks it lists. A page only grows until it is full, so a peer
-// keeps the one listing the most, and a full page never travels again.
+// The chunk index (docs/architecture.md#chunk-index), so a peer finds the chunk covering a time,
+// and what asking for it costs, before it holds it: the file's keyframes set each chunk's length,
+// so no peer can work this out alone. A page only grows until it is full, so a peer keeps the one
+// listing the most, and a full page never travels again.
 
 import { isCount, isRecord } from "./chat";
 import type { Bytes } from "./crypto";
@@ -19,39 +16,33 @@ import {
   signRecord,
 } from "./signed-record";
 
-/** How many chunks a page of the index lists once it is full. */
 const INDEX_PAGE = 64;
 
 export type IndexPage = {
   /** Which page: it lists chunks from `page × INDEX_PAGE`. */
   page: number;
   /**
-   * Chunk boundaries in microseconds, increasing: the page's `i`th chunk is
-   * `[bounds[i], bounds[i + 1])`, as each chunk ends where the next begins. One list serves every
-   * track, since an index is the same time range in each.
+   * In microseconds, increasing: the page's `i`th chunk is `[bounds[i], bounds[i + 1])`. One list
+   * serves every track, since an index is the same time range in each.
    */
   bounds: number[];
-  /** The sealed size of the page's `i`th chunk of video, in bytes: one per chunk. */
+  /** The sealed size of the page's `i`th chunk of video, in bytes. */
   bytes: number[];
 };
 
-/** The chunks listed so far, joined from the pages: their bounds and their video's sizes. */
 export type JoinedIndex = Pick<IndexPage, "bounds" | "bytes">;
 
 const FIELDS = new Set(["page", "bounds", "bytes"]);
 const DOMAIN = "snowy index v1";
 
-// The object key of a page listing `count` chunks.
 const pageKey = (page: number, count: number) => `index/${page}@${count}`;
 
-/** How many chunks a page lists. */
 export const listed = ({ bounds }: IndexPage) => bounds.length - 1;
 
 /** Whether `bounds`, as `joinedIndex` gives them, list a chunk of `page`: no page before it is missing. */
 export const reachesPage = (bounds: number[], page: number) =>
   bounds.length - 1 > page * INDEX_PAGE;
 
-// The bounds in canonical shape: at least one chunk and at most a full page, each with a length.
 function checkBounds(bounds: unknown) {
   const sized = Array.isArray(bounds) && bounds.length >= 2 && bounds.length <= INDEX_PAGE + 1;
   if (!sized) throw new InvalidRecordError("bad bounds");
@@ -66,7 +57,6 @@ function checkBounds(bounds: unknown) {
   return checked;
 }
 
-// The sizes in canonical shape: one positive whole number for each of `count` chunks.
 function checkSizes(bytes: unknown, count: number) {
   if (!Array.isArray(bytes) || bytes.length !== count) throw new InvalidRecordError("bad bytes");
   const checked: number[] = [];
@@ -79,7 +69,6 @@ function checkSizes(bytes: unknown, count: number) {
   return checked;
 }
 
-// A page in canonical shape: its bounds, and one positive size for each chunk they list.
 function checkPage(value: unknown): IndexPage {
   if (!isRecord(value)) throw new InvalidRecordError("not an object");
   onlyFields(value, FIELDS);
@@ -90,10 +79,7 @@ function checkPage(value: unknown): IndexPage {
   return { page, bounds, bytes: checkSizes(value.bytes, bounds.length - 1) };
 }
 
-/**
- * Signs a page of the index with the session key. Returns its object key and bytes. Throws an
- * `InvalidRecordError` for a malformed one.
- */
+/** Throws an `InvalidRecordError` for a malformed page. */
 export async function encodeIndexPage(session: CryptoKeyPair, page: IndexPage) {
   const canonical = checkPage(page);
   const bytes = await signRecord(session, DOMAIN, canonical);
@@ -101,9 +87,8 @@ export async function encodeIndexPage(session: CryptoKeyPair, page: IndexPage) {
 }
 
 /**
- * Checks that a page of the index is the page, listing as many chunks, that its object key
- * names, is well formed and signed by the session key, then reads it. Rejects with an
- * `InvalidRecordError` for anything else.
+ * Rejects with an `InvalidRecordError` unless the page is the one its key names, listing as many
+ * chunks, well formed and signed by the session key.
  */
 export async function decodeIndexPage(sessionKey: CryptoKey, key: string, bytes: Bytes) {
   const { sig, fields } = parseRecord(bytes);

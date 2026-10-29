@@ -17,10 +17,9 @@ const pcmFrames = (rate: number) => 2 ** Math.ceil(Math.log2(rate));
 const NO_VIDEO_RING = 64;
 // The audio buffered before it starts, in seconds, so a slow start does not underrun.
 const PREROLL = 0.25;
-// The output timestamp has settled once this many in a row, each newer than the last, map
-// context time to performance time within SETTLED_MS of the one before. The first ones
-// after output starts are estimates: Chromium moves them by up to 35 ms. Coarse
-// timers may never agree, so it settles anyway after SETTLED_LIMIT newer ones.
+// The output timestamp has settled once this many newer ones in a row agree within SETTLED_MS:
+// Chromium moves the first ones after output starts by up to 35 ms. Coarse timers may never
+// agree, so it settles anyway after SETTLED_LIMIT newer ones.
 const SETTLED_COUNT = 2;
 const SETTLED_MS = 2;
 const SETTLED_LIMIT = 10;
@@ -35,8 +34,6 @@ type PlayMessage = Extract<ToRender, { type: "play" }>;
 /** How far the render worker has decoded, as it last reported, and for which play. */
 export type VideoReport = Omit<Extract<FromRender, { type: "video" }>, "type">;
 
-// What plays: play `id`, its clock, publishing the output timestamp now, whether it may
-// start and is heard, and stopping it.
 export interface Playback {
   id: number;
   clock: Clock;
@@ -47,7 +44,6 @@ export interface Playback {
   stop(): void;
 }
 
-/** What a play needs of the engine that starts it. */
 export interface PlaybackHost {
   render: Worker;
   /** Sends the media worker a demux request; `buffered` runs once its audio is buffered. */
@@ -67,7 +63,7 @@ export interface PlaybackOptions {
   /** The open file's video parameters, by stream; none for a composition without a file. */
   opened: { video: Record<number, VideoParams> } | undefined;
   played: Played;
-  /** Where it starts, in microseconds. */
+  /** In microseconds. */
   from: number;
 }
 
@@ -94,10 +90,9 @@ interface Reading {
   preroll: number;
 }
 
-// Starts the render worker and the media worker on play `id`, from `from`: a clip's video and
-// audio at its in point at the earliest, its clock where the play starts. Resolves once the media
-// worker has read what it plays; with nothing to read, as in the gap after a clip, at once, the
-// clock running on to the composition's end.
+// A clip's video and audio start at its in point at the earliest, its clock where the play
+// starts. Resolves once the media worker has read what it plays; at once with nothing to read,
+// as in the gap after a clip, the clock running on to the composition's end.
 function startReading(r: Reading, buffered: () => void): Promise<unknown> {
   const { host, id, ring, pcm, from, params, audio, played } = r;
   const { clip } = played;
@@ -126,11 +121,9 @@ function startReading(r: Reading, buffered: () => void): Promise<unknown> {
   return host.demux(message, buffered);
 }
 
-// The output timestamp, for the render worker (src/pcm.ts), on every animation frame and
-// as the context stops. It runs once it has settled, and stays so until the context stops.
-// Stopped by a pause at `stopping` (performance milliseconds), it holds the media time heard
-// then until a timestamp passes it, so the clock never goes back: the last timestamp
-// is up to an audio callback older, and the frame on screen went up by it carried forward.
+// Settled until the context stops. A pause at `stopping` (performance milliseconds) holds the
+// media time heard then until a timestamp passes it, so the clock never goes back: the last
+// timestamp is up to an audio callback old, and the frame on screen went up by it carried forward.
 function createOutputClock(context: AudioContext, clock: Clock, changed: () => void) {
   // The last output timestamp, as context minus performance milliseconds, and when; and the
   // media time heard when a pause stopped it, until a timestamp passes it.
@@ -218,7 +211,6 @@ function createReadiness({ host, id, hasVideo, demux, output }: ReadinessOptions
   return { primed, drawn, heard };
 }
 
-/** Starts what `played` says of the open file playing into `context` from `from`, as play `id`. */
 export async function startPlayback(options: PlaybackOptions): Promise<Playback> {
   const { host, context, id, opened, played, from } = options;
   // In the gap after a clip, nothing of it plays.

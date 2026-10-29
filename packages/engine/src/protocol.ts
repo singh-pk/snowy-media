@@ -17,19 +17,16 @@ export type PlatformFeature =
   | "webcodecs"
   | "webgpu-external-texture";
 
-/** A missing feature, and what exactly was missing. */
 export type Missing = [feature: PlatformFeature, reason: string];
 
-// After init, the render worker plays video stream packets from `ring` (src/ring.ts), with
-// parameters `params`, timed by the clock in PCM ring `pcm` (src/pcm.ts), until it stops. It
-// plays from `from`, in microseconds: of the frames before, only the last is shown. A clip's
-// play (`window`) shows its frames only from `in` to `out`, and black before and after, where
-// the clock may start, from `start`: its video plays from `in` at the earliest.
-// An error while it plays is reported once, with the play's `id`, and it stops. Until it has
-// drawn a frame by the running clock (`shown`, the last report), it reports each change in
-// how far decoding is, as it happens: a quarter second or all of it decoded (`ahead`), or no
-// further while the media worker is blocked (`stuck`), so the main thread starts audio with
-// video ready, and resolves play once it is seen (src/index.ts).
+// After init, the render worker plays the video packets in `ring` (src/ring.ts), timed by the
+// clock in PCM ring `pcm` (src/pcm.ts), until it stops. It plays from `from` (microseconds),
+// showing only the last frame before it. A clip's play (`window`) shows frames only from `in`
+// to `out`, black around them, and its clock may start earlier, at `start`.
+// An error is reported once, with the play's `id`, and it stops. Until it has drawn a frame by
+// the running clock (`shown`, the last report), it reports each change in how far decoding is:
+// a quarter second or all of it (`ahead`), or no further while the media worker is blocked
+// (`stuck`), so the main thread starts audio with video ready (src/index.ts).
 export type ToRender =
   | { type: "init"; canvas: OffscreenCanvas }
   | {
@@ -69,7 +66,6 @@ export type Track =
   | { id: number; kind: "audio"; codec: string; sampleRate: number; channels: number }
   | { id: number; kind: "subtitle" | "data" | "attachment"; codec: string };
 
-/** An open file: what it holds, and for each video stream its parameters and keyframes. */
 export interface Opened {
   info: MediaInfo;
   video: Record<number, VideoParams>;
@@ -88,19 +84,17 @@ export interface MediaInfo {
   tracks: Track[];
 }
 
-// `id` pairs each reply with its request. A demux request writes the packets of `streams` into
-// `ring` (src/ring.ts) from the keyframe due at or before `from` (microseconds) on, and with
-// `audio` decodes that audio stream into the PCM ring `pcm` (src/pcm.ts), resampled to its
-// rate and channels. A play's PCM ring keeps its clock, so it comes without `audio` too: the
-// media worker writes how far the packets reach into it, and that no audio comes. Unless it
-// fails or the PCM ring closes first, it says once, before it replies, that the audio is
-// buffered (`buffered`): `preroll` frames of it, a full ring, all of it, or at once without
-// audio. A clip's demux (`clip`) reads up to `until`, past which no packet is written and no
-// audio decoded, and its clock starts at `start`, before `from` in a gap before the clip, with
-// silence up to the clip's audio; once it is past `until`, the clock runs on to `end`. It
-// replies once it has written all the audio and the END record, or once a consumer has closed
-// its ring. On an error it ends the ring with FAILED
-// and replies with the error, the only report of it.
+// `id` pairs each reply with its request. A demux writes the packets of `streams` into `ring`
+// (src/ring.ts) from the keyframe due at or before `from` (microseconds), and with `audio`
+// decodes that stream into PCM ring `pcm` (src/pcm.ts), resampled to its rate and channels.
+// A play's PCM ring keeps its clock, so it comes without `audio` too: the media worker writes
+// how far the packets reach into it, and that no audio comes. Unless it fails or the ring closes
+// first, it sends `buffered` once before it replies: at `preroll` frames, a full ring, all of
+// the audio, or at once without audio. A clip's demux (`clip`) writes no packet or audio past
+// `until`, and its clock starts at `start`, before `from` in a gap before the clip, silent up
+// to the clip's audio; past `until` the clock runs on to `end`. It replies once it has written
+// all the audio and the END record, or a consumer has closed its ring. On an error it ends the
+// ring with FAILED and replies with the error, its only report.
 export type ToMedia =
   | { type: "open"; id: number; file: File }
   | {
@@ -122,19 +116,18 @@ export type FromMedia =
   | { type: "demuxed"; id: number }
   | { type: "error"; id: number; message: string };
 
-// The render worker's decoders in the video decode worker (src/video.worker.ts), each by its
-// id, talk through two rings (src/ring.ts) the render worker makes once and sends at the start,
-// with no message per packet or frame. Each decoder's packets stay in its play's packet ring,
-// which comes by message (`packets`) before the decoder opens: the decode worker copies each
-// out of there itself, so only where it is crosses. In the ring to the worker, a decoder opens
-// for a play's video stream that one of VIDEO_MODULES decodes, from the stream's exported codec
-// parameters, then takes the stream's packets in decoding order (timestamps in its time base),
-// a record of the packet ring at a time, a flush once the stream ends, and a close; and a frame
-// goes back, by its module, once it is uploaded or dropped, whether its decoder is open or not.
-// In the ring from the worker come each packet ring record taken, after which the render
-// worker frees it, each decoded frame, each packet decoded, the flush done, and a decoder's
-// first error, after which it decodes nothing. A module's memory, which frames are read from,
-// comes by message once it loads, before any of its frames.
+// The render worker's decoders in the video decode worker (src/video.worker.ts), each by its id,
+// talk through two rings (src/ring.ts) sent once at the start, with no message per packet or
+// frame. A decoder's packets stay in its play's packet ring, sent (`packets`) before it opens:
+// the decode worker copies each out itself, so only where it is crosses. To the worker, a
+// decoder opens for a play's video stream that one of VIDEO_MODULES decodes, from its exported
+// codec parameters, then takes packets in decoding order (timestamps in its time base), one
+// packet ring record at a time, a flush at the stream's end, and a close; and a frame goes back,
+// by its module, once uploaded or dropped, whether its decoder is open or not. From the worker
+// come each packet ring record taken, which the render worker then frees, each decoded frame,
+// each packet decoded, the flush done, and a decoder's first error, after which it decodes
+// nothing. A module's memory, which frames are read from, comes by message once it loads,
+// before any of its frames.
 export type ToVideo =
   | { type: "start"; to: SharedArrayBuffer; from: SharedArrayBuffer }
   | { type: "packets"; id: number; ring: SharedArrayBuffer };

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render worker. It checks the part of the platform baseline only a worker can see:
-// WebGPU on an OffscreenCanvas, WebCodecs, and a VideoFrame imported as a GPU texture, the
-// path every WebCodecs frame takes to the screen. Then it plays video: on each animation
-// frame it shows the frame due when that animation frame reaches the screen, by the audio
-// clock (src/pcm.ts).
+// The render worker. It checks the baseline only a worker can see: WebGPU on an OffscreenCanvas,
+// WebCodecs, and importing a VideoFrame as a GPU texture, the path every WebCodecs frame takes.
+// Then each animation frame shows the frame due when it reaches the screen, by the audio clock.
 
 import { createCompositor } from "./compositor";
 import { createPcmControl } from "./pcm";
@@ -35,7 +33,6 @@ const wasm = createWasmVideo();
 
 const state = {
   compositor: undefined as ReturnType<typeof createCompositor> | undefined,
-  // What plays, and its animation frame request.
   playing: undefined as Playing | undefined,
 };
 
@@ -99,10 +96,9 @@ function report(playing: Playing) {
   post({ type: "video", id, ahead, stuck, drawn, shown, reached });
 }
 
-// Reports what was sent to the GPU of `playing`, the frame due at the start drawn and a scrub's
-// target reached, once `compositor`'s GPU has done it, or its failure to `fail`: a paused seek
-// and a scrub resolve on them, and a GPU that compiles a draw the first time it runs, as one in
-// software does, may take many refreshes to.
+// Reports the start's frame drawn and a scrub's target reached, as sent, once the GPU has done
+// them: a paused seek and a scrub resolve on them, and a GPU that compiles a draw the first time
+// it runs, as one in software does, may take many refreshes to.
 async function reportDone(
   playing: Playing,
   compositor: ReturnType<typeof createCompositor>,
@@ -124,7 +120,6 @@ async function reportDone(
   report(playing);
 }
 
-// A device drawing into `canvas`, or what is missing for one.
 async function openGPU(canvas: OffscreenCanvas): Promise<Gpu | Missing> {
   if (!("gpu" in navigator)) return ["webgpu", "navigator.gpu is missing"];
 
@@ -146,7 +141,6 @@ async function openGPU(canvas: OffscreenCanvas): Promise<Gpu | Missing> {
   }
 }
 
-// A 2×2 VideoFrame, or what is missing for one.
 function createFrame(): VideoFrame | Missing {
   if (typeof VideoDecoder === "undefined") return ["webcodecs", "VideoDecoder is missing"];
 
@@ -186,7 +180,6 @@ async function init(canvas: OffscreenCanvas) {
   post({ type: "ready" });
 }
 
-// Moves the play `id`, if it still plays, on to `to`.
 function scrub({ id, to }: Extract<ToRender, { type: "scrub" }>) {
   if (state.playing?.id !== id) return;
   state.playing.target = to;
@@ -276,10 +269,9 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
     playing.frame = self.requestAnimationFrame(draw);
   }
 
-  // How far decoding is, for the main thread's preroll, on each event that may change it, until
-  // a frame is shown by the running clock. Stuck is read with the media worker blocked first:
-  // on a full PCM ring, which stays full while the context is held, or on a full packet ring;
-  // after that, video starved or full gets no further.
+  // For the main thread's preroll, until a frame is shown by the running clock. Stuck needs the
+  // media worker blocked first, on a PCM ring full while the context is held or a full packet
+  // ring; after that, video starved or full gets no further.
   function update() {
     if (state.playing !== playing || playing.shown) return;
     // Watched first, so the media worker blocking after the read below runs this again.

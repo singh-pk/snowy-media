@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The messages that ask for chunks (docs/architecture.md#serving-requests), sent with a link's
-// `send`, and the forwarder's side that answers them. A peer sends `request` for a chunk at a
-// priority and `cancel` when it no longer wants it; a forwarder or the source answers `busy` when
-// it has no room for that peer now, or `gone` when it doesn't hold the chunk. A forwarder sends
-// one chunk at a time on each link, the most urgent first and the oldest asked first within a
-// priority, so a seek's chunk waits for at most the one already on the wire. Every field from a
-// peer is checked before it is used.
+// The messages that ask for chunks (docs/architecture.md#serving-requests), and the forwarder's
+// side that answers them. It sends one chunk at a time on each link, the most urgent and then the
+// oldest asked first, so a seek's chunk waits for at most the one already on the wire.
 
 import { isCount, isRecord } from "./chat";
 import { chunkKey, type ChunkSlot } from "./chunk";
@@ -16,7 +12,6 @@ import type { FetchPriority } from "./fetch-plan";
 
 /** Asks for a chunk, on `data` from a forwarder or `deliver` from the source. */
 type ChunkRequest = { type: "request"; priority: FetchPriority } & ChunkSlot;
-/** Asks the sender to stop sending a chunk. */
 type ChunkCancel = { type: "cancel" } & ChunkSlot;
 /** The sender has no room for this asker now. */
 export type ChunkBusy = { type: "busy" } & ChunkSlot;
@@ -50,11 +45,9 @@ export type ChunkServerOptions = {
    * its own measures of the link, or 0 when it has no slot for that peer.
    */
   room(peer: KeyId): number;
-  /** Whether this forwarder holds a chunk. */
   holds(slot: ChunkSlot): boolean;
   /** A held chunk's sealed bytes, or undefined if it was evicted since. */
   read(slot: ChunkSlot): Promise<Bytes | undefined>;
-  /** Sends a message to a peer over its link. */
   send(peer: KeyId, message: ChunkBusy | ChunkGone): void;
   /**
    * Sends a chunk to a peer on its `data` channel, stopping between pieces once `signal` aborts.
@@ -86,7 +79,6 @@ function first(waiting: Map<string, Queued>) {
     );
 }
 
-/** Answers other peers' chunk requests from what this forwarder holds. */
 export function createChunkServer(options: ChunkServerOptions) {
   const askers = new Map<KeyId, Asker>();
 
@@ -108,8 +100,7 @@ export function createChunkServer(options: ChunkServerOptions) {
     }
   }
 
-  // Sends `peer`'s requests one at a time, each chunk or `gone` if it can't be read, until none
-  // waits or its link closes. A chunk cancelled while it was read isn't sent.
+  // A chunk cancelled while it was read isn't sent.
   async function drain(peer: KeyId, asker: Asker) {
     for (let next = first(asker.waiting); next !== undefined; next = first(asker.waiting)) {
       if (askers.get(peer) !== asker) return;
@@ -164,7 +155,6 @@ export function createChunkServer(options: ChunkServerOptions) {
     if (message.type === "cancel") cancel(peer, chunkKey(message));
   }
 
-  // Drops a waiting request, or stops the chunk on the wire.
   function cancel(peer: KeyId, key: string) {
     const asker = askers.get(peer);
     if (asker === undefined) return;
@@ -172,7 +162,6 @@ export function createChunkServer(options: ChunkServerOptions) {
     else asker.waiting.delete(key);
   }
 
-  /** The link to `peer` closed: its requests are dropped. */
   function closed(peer: KeyId) {
     askers.delete(peer);
   }

@@ -1,11 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Video output in the render worker: decodes a stream's packets from the packet ring with
-// WebCodecs, or for a codec WebCodecs does not decode with FFmpeg (src/wasm-video.ts), into
-// the frame queue (src/frames.ts), and shows the frame due at a given media time through the
-// compositor. Decoding waits while the queue is full, its frames are a
-// second ahead of the media time, or the decoder has enough packets in hand, so neither memory nor the decoder's backlog grows.
+// Decoding waits while the frame queue is full, its frames are a second ahead of the media
+// time, or the decoder has enough packets in hand, so neither memory nor its backlog grows.
 
 import { isRasl, makesFrame, type VideoParams, videoConfig } from "./codec";
 import type { createCompositor } from "./compositor";
@@ -31,7 +28,6 @@ const TIME_AHEAD = 1_000_000;
 // as the clock jumps a frame, as when audio starts.
 const AHEAD = 2;
 
-// A WebCodecs decoder of the stream with parameters `p`, configured by its first packet.
 function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
   const decoder = new VideoDecoder({ output: events.output, error: events.error });
   decoder.addEventListener("dequeue", events.dequeue);
@@ -57,7 +53,6 @@ function webCodecsDecoder(p: VideoParams, events: DecoderEvents): Decoder {
 const frameBytes = (frame: DecodedFrame) =>
   frame.format ? frame.allocationSize() : frame.codedWidth * frame.codedHeight * 4;
 
-/** What a video output draws with and tells; see `createVideoOutput`. */
 export interface VideoOutputOptions {
   compositor: ReturnType<typeof createCompositor>;
   wasm: ReturnType<typeof createWasmVideo>;
@@ -129,7 +124,6 @@ function createShared(
 
 type Shared = ReturnType<typeof createShared>;
 
-// Uploads `frame`, then queues its picture to be shown, unless the output has closed.
 async function upload(o: Shared, frame: DecodedFrame) {
   try {
     const picture = await o.compositor.upload(frame, o.route);
@@ -154,10 +148,9 @@ function send(o: Shared, frame: DecodedFrame) {
 }
 
 /**
- * Uploads the latest frame due at `time` (microseconds), then the next decoded frames until
- * AHEAD (one in a scrub) are up or on their way, so they are up before they are due. Only the
- * frames that go up are uploaded: copying a 4K frame off the GPU takes milliseconds, and a scrub
- * decodes many it never shows. Resolves once uploaded.
+ * Uploads the latest frame due at `time` (microseconds), then the next decoded ones up to AHEAD
+ * (one in a scrub). Only frames that go up are uploaded: copying a 4K frame off the GPU takes
+ * milliseconds, and a scrub decodes many it never shows.
  */
 function prepare(o: Shared, time: number) {
   const { state, queue, decoding, uploads } = o;
@@ -192,7 +185,6 @@ function prepare(o: Shared, time: number) {
   return uploads.done;
 }
 
-// Where the decoder's frames, its taking a packet and its failure go.
 function decoderEvents(o: Shared): DecoderEvents {
   const { state, queue, decoding } = o;
 
@@ -223,14 +215,12 @@ function decoderEvents(o: Shared): DecoderEvents {
 const far = ({ decoding, state }: Shared) =>
   decoding.decodedTo() > Math.max(state.at, state.first) + TIME_AHEAD;
 
-// Resolves on the next wake of the decode loop.
 function woken(o: Shared) {
   const wake = Promise.withResolvers<void>();
   o.wake.room = wake.resolve;
   return wake.promise;
 }
 
-// An output's parts, with its decoder and the ring it reads.
 type Output = Shared & {
   decoder: Decoder;
   consumer: ReturnType<typeof createConsumer>;
@@ -356,12 +346,10 @@ function present(o: Output, time: number) {
     }
   }
 
-  // Then the frames to go up next.
   void prepare(o, time);
   return picture !== undefined;
 }
 
-// Clears the canvas to black, outside a clip, closing the picture shown, unless it is black.
 function blank(o: Output) {
   const { state } = o;
   if (state.blank) return;
@@ -371,7 +359,6 @@ function blank(o: Output) {
   state.blank = true;
 }
 
-// Stops decoding and closes every frame.
 function close(o: Output) {
   const { state } = o;
   state.closed = true;
@@ -386,15 +373,13 @@ function close(o: Output) {
 }
 
 /**
- * Decodes the packets of the stream with parameters `p` from `ring`, with WebCodecs or
- * `wasm`'s decoders, and shows them with `compositor`. `done` resolves once the decoder has
- * decoded the last packet, the producer has failed (it reports why itself) or the output is
- * closed, and rejects if decoding fails. `changed` runs on each event that may change
- * how far decoding is: a frame decoded, the decoder taking a packet, a wait for packets or for
- * the media time begun, the end decoded, and the media worker blocking while `watch`ed. `freed`
- * runs as the ring frees room for a media worker that waits, and as it closes (src/ring.ts). It
- * plays from `from` (microseconds), its packets starting at a keyframe before it: of the frames
- * before, it keeps only the last, the one due then.
+ * `done` resolves once the last packet is decoded, the producer has failed (it reports why
+ * itself) or the output is closed, and rejects if decoding fails. `changed` runs on each event
+ * that may change how far decoding is: a frame decoded, the decoder taking a packet, a wait for
+ * packets or the media time begun, the end decoded, and the media worker blocking while
+ * `watch`ed. `freed` runs as the ring frees room for a waiting producer, and as it closes
+ * (src/ring.ts). It plays from `from` (microseconds), its packets starting at a keyframe before
+ * it: of the frames before, it keeps only the last, the one due then.
  */
 export function createVideoOutput(
   ring: SharedArrayBuffer,

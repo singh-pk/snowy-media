@@ -11,10 +11,9 @@ import { frameFlicks, type Ratio } from "./time";
 /** Why an operation was skipped: the kinds docs/architecture.md#applying names. */
 export type SkipReason = "malformed" | "stale" | "structural" | "unsupported" | "waiting";
 
-/** An operation of a batch that applying skipped, by its index in the batch. */
+/** `index` is the skipped operation's place in its batch. */
 export type Skip = { index: number; reason: SkipReason; detail: string };
 
-/** Thrown while applying one operation, to skip it. */
 export class Skipped extends Error {
   constructor(
     readonly reason: SkipReason,

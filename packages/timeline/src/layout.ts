@@ -19,17 +19,15 @@ export type AnchorClip = {
   timeBase: Ratio;
 };
 
-// `value`, if it is a time in flicks a number holds exactly.
 function flicks(value: number) {
   if (!Number.isSafeInteger(value)) throw new RangeError(`not a time in flicks: ${value}`);
   return value;
 }
 
 /**
- * Where an item connected to `clip` at source point `at` starts, in flicks: the clip's start
- * plus `(at − in) / speed`. At a negative speed, `in` is still the source point at the clip's
- * start, and playback runs down from it. The point may lie outside the clip, which puts the item
- * before or after it. A video item passes its sequence's `rate` and is snapped down to a frame.
+ * Where an item connected to `clip` at source point `at` starts, in flicks: `start + (at − in) /
+ * speed`, where `in` is the point at the clip's start even at a negative speed. `at` may lie
+ * outside the clip. A video item passes its sequence's `rate` and is snapped down to a frame.
  */
 export function clipAnchorStart(clip: AnchorClip, at: number, rate?: Ratio) {
   const start = flicks(clip.start + sourceToFlicks(at - clip.in, clip.timeBase, clip.speed));
@@ -57,7 +55,6 @@ export function transitionHalves(duration: number, rate: Ratio) {
 /** A connected item of one role, placed in time, with the lane it prefers. */
 export type Connected = { id: ItemId; start: number; duration: number; lane: number };
 
-// Order by start, then id by UTF-16 code unit.
 function byStartThenId(a: Connected, b: Connected) {
   if (a.start !== b.start) return a.start - b.start;
   if (a.id === b.id) return 0;
@@ -65,10 +62,9 @@ function byStartThenId(a: Connected, b: Connected) {
 }
 
 /**
- * The lane of each of one role's connected items. Taking them by start, then id, each goes in
- * the lane it prefers if that lane is free over its whole range, and otherwise in the nearest
- * free lane above. Items earlier in that order all start at or before an item, so a lane is free
- * for it when everything already in the lane has ended by its start.
+ * By start, then id, each item takes the lane it prefers if free over its whole range, else the
+ * nearest free lane above. Earlier items all start at or before it, so a lane is free once
+ * everything in it has ended by its start.
  */
 export function assignLanes(items: Connected[]) {
   const ends = new Map<number, number>();

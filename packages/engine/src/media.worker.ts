@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media worker: it reads the file and demuxes it with the FFmpeg core module, and decodes
-// and resamples its audio (src/audio-decoder.ts). It is the one thread that may block, so it
-// reads the file synchronously (src/io.ts) and waits for room in the packet ring (src/ring.ts)
-// and the PCM ring (src/pcm.ts).
+// The one thread that may block: it reads the file synchronously (src/io.ts) and waits for room
+// in the packet ring (src/ring.ts) and the PCM ring (src/pcm.ts).
 
 import {
   AV_NOPTS_VALUE,
@@ -158,8 +156,6 @@ function close(m: Media) {
   m.ctx = 0;
 }
 
-// Opens `file` in place of the open one and describes it, with its video streams'
-// parameters.
 function open(m: Media, file: File): Opened {
   const { core, check, str } = m;
   close(m);
@@ -294,15 +290,10 @@ function createUntil({ core, ctx, pkt }: Media, until: number, streams: number[]
   return { past, done: () => left.count === 0 };
 }
 
-// What tells the clock in PCM ring `pcm` how far the packets placed reach, so it runs on past
-// the audio, or without any, to the end of the video; for a clip (`clip`), up to its `until`,
-// and once no more packets come, on to the composition's `end`, through the gap after the clip.
-// Without audio it also says so, and, but for a clip, whose gap before it runs, starts the clock
-// at the first packet where that is after `from` (seconds), the time the ring was made with: a
-// file whose video starts late, as an MPEG-TS file's may start hours in, starts there, played
-// from the start or sought to before it, as audio starts it at its first sample. It starts the
-// clock before the packet is offered, so the render worker never sees one before the start.
-// A packet of unknown duration reaches only to its pts.
+// Tells the clock in `pcm` how far the packets placed reach, so it runs on past the audio, or
+// without any, to the video's end; for a clip, to its `until`, then the composition's `end`.
+// Without audio or a clip, it starts the clock at the first packet after `from` (seconds), as a
+// late-starting MPEG-TS file needs, before it is offered, so the render worker sees none earlier.
 function createReach(
   { core, ctx, pkt }: Media,
   pcm: ReturnType<typeof createPcmProducer>,
@@ -338,12 +329,10 @@ function createReach(
   return { ahead, placed, ended };
 }
 
-// Writes the packets of `streams` into `ring` and queues those of `audio`, decoding them into
-// its PCM ring as that has room, from where the demuxer is to the end of the file. The END
-// record follows the last packet as soon as it is read, and the audio drains after. Returns
-// early once the packet ring's consumer closes it; once the PCM ring's does, the audio stops
-// and the packets go on. It waits only when neither ring has room for what comes next: on the
-// PCM ring's doorbell, which both rings' consumers ring, or with no audio on the packet ring.
+// Writes the packets of `streams` into `ring`, END as soon as the last is read, and decodes
+// `audio`'s into its PCM ring as that has room. It returns once the packet ring's consumer
+// closes it; once the PCM ring's does, only the audio stops. It waits only when neither ring has
+// room: on the PCM ring's doorbell, which both consumers ring, or else the packet ring's.
 function pump(m: Media, ring: Ring, streams: number[], { audio, reach, until }: Pumped) {
   const { core, check, pkt } = m;
   const ctx = demuxer(m, streams);
