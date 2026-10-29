@@ -98,7 +98,7 @@ type Link = {
 
 - A link is to one peer, and the transport opens it: over the relay's inbox tracks, or a direct connection's data channels. The peer's chat tracks are subscribed outside it.
 - Its `close` event fires once, whichever end closed it. Nothing arrives after it, including what was on its way.
-- A peer may have two links open at once, the relay's and a direct one. A request is answered on the link it came on, and an ask goes on the newest link. When any of a peer's links closes, what was asked of that peer moves on to the next candidate; if the reply comes anyway on another link, the first answer fills the gap.
+- A peer may have two links open at once, the relay's and a direct one. A request is answered on the link it came on, and an ask goes on the newest link, with its cancel or urgent re-ask on the link it went out on, whose end holds it. When any of a peer's links closes, what was asked of that peer moves on to the next candidate; if the reply comes anyway on another link, the first answer fills the gap.
 
 ## Identity, sessions and access
 

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // A peer's chunk traffic on its links (docs/architecture.md#media-delivery). The fetch plan's
-// requests and cancels go out on the asked peer's newest link; `busy` and `gone` replies, and the
-// chunks peers deliver, go back to the plan and the store; and other peers' requests are answered
+// requests go out on the asked peer's newest link, and a request's cancel or urgent re-ask on the
+// link it went out on, whose server holds it; `busy` and `gone` replies, and the chunks peers
+// deliver, go back to the plan and the store; and other peers' requests are answered
 // from the store on the link each came on, by a chunk server per link. A link that closes puts
 // every request this peer made of its peer back into the plan, and drops the requests that came
 // on it.
@@ -11,7 +12,7 @@
 // Over the relay an object goes whole: it arrives as one piece, and a cancel stops only a chunk
 // whose delivery hasn't begun.
 
-import { chunkSlot, InvalidChunkError } from "./chunk";
+import { chunkKey, chunkSlot, InvalidChunkError, type ChunkSlot } from "./chunk";
 import { checkChunkControl, createChunkServer } from "./chunk-requests";
 import type { openChunkStore } from "./chunk-store";
 import type { Bytes, KeyId } from "./crypto";
@@ -42,40 +43,80 @@ export type ChunkLinksOptions = {
   stopped(error: unknown): void;
 };
 
+// Stores a delivered chunk: `kept` once it is stored, `copy` for one stored or being stored
+// already, whose own delivery ends or cancels its request, or why it couldn't be.
+async function put(store: ChunkLinksOptions["store"], key: string, sealed: Bytes) {
+  try {
+    const fresh = await store.put({ key, sealed });
+    return fresh ? "kept" : "copy";
+  } catch (error) {
+    return error instanceof InvalidChunkError ? "invalid" : { error };
+  }
+}
+
+const keyOf = (peer: KeyId, slot: ChunkSlot) => `${peer} ${chunkKey(slot)}`;
+
+// The link each open request went out on, by peer and chunk, until it is answered, delivered,
+// cancelled or its link closes: that link's end holds it, so only that link can change it.
+function createSent() {
+  const sent = new Map<string, Link>();
+
+  // The link a request goes on: the one it went out on, or else `newest`.
+  function take(peer: KeyId, slot: ChunkSlot, newest: Link) {
+    const key = keyOf(peer, slot);
+    const link = sent.get(key) ?? newest;
+    sent.set(key, link);
+    return link;
+  }
+
+  // The request ended: returns the link it went out on, if it went out.
+  function end(peer: KeyId, slot: ChunkSlot) {
+    const key = keyOf(peer, slot);
+    const link = sent.get(key);
+    sent.delete(key);
+    return link;
+  }
+
+  function closed(link: Link) {
+    for (const [key, to] of sent) if (to === link) sent.delete(key);
+  }
+
+  return { take, end, closed };
+}
+
 export function createChunkLinks(options: ChunkLinksOptions) {
   const links = new Map<KeyId, Link[]>();
   // Each linked peer's newest link's measures, which asks go on.
   const measured = new Map<KeyId, LinkMeasures>();
   const newest = (peer: KeyId) => links.get(peer)?.at(-1);
+  const sent = createSent();
 
   const plan = createFetchPlan({
     // copy: once per session, what the plan reads, with the links it asks on.
     ...options.plan,
     links: () => measured,
+    // The plan asks only the peers in `measured`, each of which has a link.
     ask: ({ slot, peer, priority }) =>
-      newest(peer)?.send({ type: "request", track: slot.track, index: slot.index, priority }),
+      sent
+        .take(peer, slot, newest(peer)!)
+        .send({ type: "request", track: slot.track, index: slot.index, priority }),
     cancel: ({ slot, peer }) =>
-      newest(peer)?.send({ type: "cancel", track: slot.track, index: slot.index }),
+      sent.end(peer, slot)?.send({ type: "cancel", track: slot.track, index: slot.index }),
   });
 
   function received(peer: KeyId, server: ChunkServer, value: unknown) {
     const control = checkChunkControl(value);
     if (control === undefined) return;
     const slot = { track: control.track, index: control.index };
-    if (control.type === "busy") plan.busy(peer, slot);
-    else if (control.type === "gone") plan.gone(peer, slot);
-    else server.requested(peer, control);
-  }
 
-  // Stores a delivered chunk: `kept` once it is stored, `copy` for one stored or being stored
-  // already, whose own delivery ends or cancels its request, or why it couldn't be.
-  async function put(key: string, sealed: Bytes) {
-    try {
-      const fresh = await options.store.put({ key, sealed });
-      return fresh ? "kept" : "copy";
-    } catch (error) {
-      return error instanceof InvalidChunkError ? "invalid" : { error };
+    if (control.type === "request" || control.type === "cancel") {
+      server.requested(peer, control);
+      return;
     }
+
+    sent.end(peer, slot);
+    if (control.type === "busy") plan.busy(peer, slot);
+    else plan.gone(peer, slot);
   }
 
   // A chunk a peer delivered. One that doesn't check out counts as `gone` from that peer, so it
@@ -84,8 +125,9 @@ export function createChunkLinks(options: ChunkLinksOptions) {
   async function object(peer: KeyId, key: string, bytes: Bytes) {
     const slot = chunkSlot(key);
     if (slot === undefined) return;
+    sent.end(peer, slot);
     plan.piece(slot, peer, bytes.byteLength);
-    const outcome = await put(key, bytes);
+    const outcome = await put(options.store, key, bytes);
     if (outcome === "kept") plan.stored(slot, peer);
     else if (outcome === "invalid") plan.gone(peer, slot);
     else plan.dropped(peer, slot);
@@ -107,6 +149,7 @@ export function createChunkLinks(options: ChunkLinksOptions) {
     const rest = links.get(peer)!.filter((l) => l !== link);
     if (rest.length > 0) links.set(peer, rest);
     else links.delete(peer);
+    sent.closed(link);
     measure(peer);
     server.closed(peer);
     plan.closed(peer);

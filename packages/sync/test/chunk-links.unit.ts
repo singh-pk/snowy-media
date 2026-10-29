@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // A peer's chunk traffic on its links (src/chunk-links.ts), in Chromium, over links in memory: the
-// plan's requests go on the asked peer's newest link and its cancels follow them; chunks delivered
+// plan's requests go on the asked peer's newest link, and a request's cancel or re-ask on the link it went out on; chunks delivered
 // are stored and end their requests; `busy` and `gone` replies, a chunk that doesn't check out and
 // one storage has no room for each move a chunk on as the design says; a closed link's requests
 // are placed again; and other peers' requests are answered from the store.
@@ -185,6 +185,25 @@ test("requests go on the newest link, a chunk delivered is stored, and one from 
   expect(p.at.heard.slice(3)).toEqual(["new cancel 0:1", "new request 0:3 urgent"]);
 });
 
+test("a request's cancel and urgent re-ask go on the link it went out on, not a newer one", async () => {
+  const p = peer({ fwd: [0, 1, 2, 3] });
+  p.link("fwd", "one");
+  p.links.plan.want({ tracks: [0], fromUs: 0, toUs: 4 * SECOND, priority: "background" });
+  await p.quiet();
+  p.link("fwd", "two");
+  await p.quiet();
+  expect(p.at.heard).toEqual(["one request 0:0 background", "one request 0:1 background"]);
+
+  // The older link's server holds both requests, so only it can turn one urgent or cancel it.
+  p.links.plan.want({ tracks: [0], fromUs: 0, toUs: 2 * SECOND, priority: "urgent" });
+  await p.quiet();
+  expect(p.at.heard.slice(2)).toEqual(["one request 0:0 urgent"]);
+  const source = p.link("source");
+  deliver(source, 1);
+  await p.quiet();
+  expect(p.at.heard.slice(3, 4)).toEqual(["one cancel 0:1"]);
+});
+
 test("gone moves a chunk to the source, and busy holds a link until its next delivery", async () => {
   const p = peer({ fwd: [0, 1, 2, 3] });
   const fwd = p.link("fwd");
@@ -275,6 +294,23 @@ test("a store that fails to write stops fetching, once, until the consumer mends
   p.links.plan.storage(false);
   await p.quiet();
   expect(p.at.heard.slice(3)).toEqual(["fwd request 0:0 urgent", "fwd request 0:1 urgent"]);
+});
+
+test("a chunk asked again after its delivery or cancel goes on the peer's newest link", async () => {
+  const p = peer({ fwd: [0, 1, 2, 3] });
+  const one = p.link("fwd", "one");
+  p.at.refuse.set("media/0/0", new DOMException("disk", "NotReadableError"));
+  p.links.plan.want(URGENT);
+  await p.quiet();
+  deliver(one, 0);
+  await p.quiet();
+  expect(p.at.heard.slice(2)).toEqual(["one cancel 0:1"]);
+
+  p.link("fwd", "two");
+  p.at.refuse.clear();
+  p.links.plan.storage(false);
+  await p.quiet();
+  expect(p.at.heard.slice(3)).toEqual(["two request 0:0 urgent", "two request 0:1 urgent"]);
 });
 
 test("a copy delivered while another is being stored cancels nothing", async () => {
