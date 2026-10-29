@@ -36,18 +36,18 @@ afterAll(() => server.stop(true));
 
 type Played = Awaited<ReturnType<typeof PageSupport.play>>;
 
-type Clip = Parameters<typeof PageSupport.play>[2]["clip"];
+type Track = Parameters<typeof PageSupport.play>[2]["track"];
 
 // Plays the audio of fixture `name` on `channels` channels, a second longer than it lasts, or
-// than the clip `clip` of it does.
+// than the track `track` of it does.
 async function play(
   tab: Page,
   name: string,
   audio: Audio,
-  { channels, clip }: { channels: number; clip?: Clip },
+  { channels, track }: { channels: number; track?: Track },
 ) {
   const { frames } = audio.resampled;
-  const end = clip ? (clip.end - clip.start) / 1e6 : frames / PCM_RATE;
+  const end = track ? (track.end - track.from) / 1e6 : frames / PCM_RATE;
   const seconds = Math.ceil(end) + 1;
 
   return tab.evaluate(
@@ -67,7 +67,7 @@ async function play(
       worklet: AUDIO_WORKLET,
       n: name,
       s: audio.id,
-      options: { seconds, channels, frames, ...(clip ? { clip } : {}) },
+      options: { seconds, channels, frames, ...(track ? { track } : {}) },
     },
   );
 }
@@ -130,14 +130,22 @@ test("the clock keeps time over ten minutes", async () => {
   }
 }, 300_000);
 
-// A clip of CLIP_FILE, read from 0.5 s to 1.9 s and placed 0.5 s later, on a composition that
-// ends 0.6 s after it: in the file's time, its clock starts at -0.5 s, the composition's start,
-// and runs on to 3 s, its end. Of the file's clicks, on its whole seconds, only the one at 1 s
-// is in it.
+// Two clips of CLIP_FILE on a composition of 4 s, with silence before, between and after them:
+// its 0.5 s to 1.5 s at 1 s, and its 1.8 s to 2.5 s at 2.5 s. Of the file's clicks, on its whole
+// seconds, the one at 1 s plays at 1.5 s and the one at 2 s at 2.7 s; the one at 0 s, in neither
+// clip, does not play.
 const CLIP_FILE = "h264-aac.mp4";
-const CLIP = { from: 500_000, start: -500_000, until: 1_900_000, end: 3_000_000 };
+const TRACK = {
+  from: 0,
+  clips: [
+    { in: 500_000, out: 1_500_000, offset: 500_000 },
+    { in: 1_800_000, out: 2_500_000, offset: 700_000 },
+  ],
+  end: 4_000_000,
+};
+const CLICKS = [1.5, 2.7];
 
-test("a clip's audio plays from its in point to its out point, in silence before and after", async () => {
+test("a track's clips play their audio at their places, in silence around them", async () => {
   const browser = await launch();
 
   try {
@@ -145,18 +153,16 @@ test("a clip's audio plays from its in point to its out point, in silence before
     await tab.goto(server.url.href);
     const { audio } = expected[CLIP_FILE] ?? {};
     if (!audio) throw new Error(`no ${CLIP_FILE} in expected.json`);
-    const played = await play(tab, CLIP_FILE, audio, { channels: 2, clip: CLIP });
+    const played = await play(tab, CLIP_FILE, audio, { channels: 2, track: TRACK });
     const shift = played.offsets.map((o) => Math.abs(o - played.start));
     // From the composition's start, without a gap, through the silence, to its end.
-    expect(played.start).toBe(CLIP.start / 1e6);
+    expect(played.start).toBe(TRACK.from / 1e6);
     expect(Math.max(0, ...shift)).toBeLessThan(1e-9);
     expect(played.end.playing).toBe(false);
-    expect(played.end.pts).toBeCloseTo(CLIP.end / 1e6, 6);
-    // The one click in the clip, at its time in the file.
-    expect(played.clicks.length).toBe(1);
-    expect(Math.abs((played.clicks[0] ?? 0) + played.start - 1)).toBeLessThanOrEqual(
-      CLICK_TOLERANCE,
-    );
+    expect(played.end.pts).toBeCloseTo(TRACK.end / 1e6, 6);
+    const late = played.clicks.map((t, k) => Math.abs(t + played.start - (CLICKS[k] ?? 0)));
+    expect(played.clicks.length).toBe(CLICKS.length);
+    expect(Math.max(...late)).toBeLessThanOrEqual(CLICK_TOLERANCE);
   } finally {
     await browser.close();
   }

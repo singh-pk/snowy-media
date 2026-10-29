@@ -13,9 +13,6 @@ import {
   type Ptr,
 } from "@snowy-media/ffmpeg/core";
 import { createPcmProducer, pcmFormat } from "./pcm";
-import type { ToMedia } from "./protocol";
-
-type AudioRequest = NonNullable<Extract<ToMedia, { type: "demux" }>["audio"]>;
 
 // How many bytes of compressed audio the media worker queues ahead of the PCM ring: minutes of
 // AAC or Opus, tens of seconds of FLAC. It lets the demuxer run ahead of the audio clock, so it
@@ -28,6 +25,7 @@ const PACKET_OVERHEAD = 256;
 const SILENCE = 1024;
 
 export interface Audio {
+  /** The stream it decodes, or -1 for silence alone. */
   stream: number;
   /**
    * Moves a packet of the stream out of `pkt` into the queue, or drops it once decoding is over,
@@ -60,7 +58,10 @@ export interface AudioOptions {
   ffmpeg: Ffmpeg;
   /** The open file's demuxer. */
   ctx: number;
-  request: AudioRequest;
+  /** The audio stream to decode, or undefined for silence alone, in a track. */
+  stream: number | undefined;
+  /** The frames in the ring before `buffered` is called. */
+  preroll: number;
   pcm: SharedArrayBuffer;
   /** Microseconds: the audio before it is dropped. */
   from: number;
@@ -71,11 +72,18 @@ export interface AudioOptions {
   start: number | undefined;
   /** Microseconds: the audio from here on is dropped. */
   until: number;
+  /**
+   * In a track (src/protocol.ts), in microseconds: where the ring's audio is up to on the clock,
+   * and how much later on it the file's times play. Silence fills the ring from `at` to the audio,
+   * and after the audio to `until`, so the next clip's audio starts where it should; the track
+   * starts and finishes the clock, not this. Without it, `start` says where the clock starts.
+   */
+  place?: { at: number; offset: number } | undefined;
   /** Called once, when the ring first holds the preroll, is full, or has all the audio. */
   buffered: () => void;
 }
 
-type Decoder = ReturnType<typeof openDecoder>;
+type Decoder = ReturnType<typeof openDecoder> & { timeBase: { num: number; den: number } };
 type State = ReturnType<typeof createState>;
 
 // Compressed packets in a circle of slots, which doubles when full, so it allocates only as it
@@ -155,7 +163,7 @@ function openDecoder({ core, check }: Ffmpeg, ctx: number, stream: number) {
   return decoder;
 }
 
-function freeDecoder(core: CoreModule, decoder: Decoder) {
+function freeDecoder(core: CoreModule, decoder: ReturnType<typeof openDecoder>) {
   core._sny_packet_free(decoder.spent);
   core._sny_resampler_free(decoder.resampler);
   core._sny_frame_free(decoder.resampled);
@@ -163,30 +171,37 @@ function freeDecoder(core: CoreModule, decoder: Decoder) {
   if (decoder.dec) core._sny_decoder_close(decoder.dec);
 }
 
-function createState(options: AudioOptions) {
-  const { ffmpeg, ctx, request, pcm, from, start, until, buffered } = options;
+function decoderOf(ffmpeg: Ffmpeg, ctx: number, stream: number): Decoder {
   const { core } = ffmpeg;
-  const { stream, preroll } = request;
-  const { channels, rate } = pcmFormat(pcm);
-  const producer = createPcmProducer(pcm);
   const st = core._sny_stream(ctx, stream);
   const timeBase = { num: core._sny_stream_tb_num(st), den: core._sny_stream_tb_den(st) };
-  const decoder = openDecoder(ffmpeg, ctx, stream);
+  return Object.assign(openDecoder(ffmpeg, ctx, stream), { timeBase });
+}
+
+function createState(options: AudioOptions) {
+  const { ffmpeg, ctx, stream, preroll, pcm, from, start, until, place, buffered } = options;
+  const { core } = ffmpeg;
+  const { channels, rate } = pcmFormat(pcm);
+  // The frames from the clock's start to `time` (microseconds).
+  const frames = (time: number) => Math.round((time * rate) / 1e6);
+  // In a track, the ring is filled up to the clip's end, so the frames it takes are known now.
+  const most = place ? Math.max(0, frames(until + place.offset) - frames(place.at)) : Infinity;
   return {
     ffmpeg,
     from,
     start,
     until,
+    place,
+    frames,
     buffered,
     preroll,
     channels,
     rate,
-    producer,
-    timeBase,
-    decoder,
+    producer: createPcmProducer(pcm),
+    decoder: stream === undefined ? undefined : decoderOf(ffmpeg, ctx, stream),
     queue: createPacketQueue(core),
     // Frames written, silence included; and how many may be, up to `until`, once started.
-    told: { buffered: false, written: 0, most: Infinity },
+    told: { buffered: false, written: 0, most },
     // The resampled frames not yet in the ring: `left` frames from index `at` of HEAPF32; how
     // many more to drop, as they come before `from`; and the frames of silence before them.
     pending: { at: 0, left: 0, skip: 0, silence: 0 },
@@ -209,8 +224,7 @@ function tell(a: State) {
 }
 
 // Sends the decoder the next queued packet, or the end; false if there is neither yet.
-function send(a: State) {
-  const { dec, spent } = a.decoder;
+function send(a: State, { dec, spent }: Decoder) {
   if (a.queue.sendTo(dec, spent)) return true;
   if (!a.phase.ended || a.phase.sentEnd) return false;
   a.ffmpeg.core._sny_decoder_send(dec, 0);
@@ -219,10 +233,9 @@ function send(a: State) {
 }
 
 // Resamples `input` (0 at the end) into the pending frames.
-function resample(a: State, input: Ptr) {
+function resample(a: State, { resampler, resampled }: Decoder, input: Ptr) {
   const { core, check } = a.ffmpeg;
   const { pending, channels } = a;
-  const { resampler, resampled } = a.decoder;
   check(core._sny_resample(resampler, input, resampled, a.rate, channels), "resample");
   pending.at = core._sny_frame_plane(resampled, 0) >>> 2;
   pending.left = core._sny_frame_samples(resampled);
@@ -276,20 +289,36 @@ function write(a: State) {
 
 // Starts the clock at the first decoded frame. The audio before `from` is dropped. Given a `start`,
 // silence fills from it to where the audio starts, so the clock starts at `start`: after a seek,
-// where Opus, for one, drops its first frames, and in a gap before a clip.
-function startClock(a: State) {
-  const { from, rate, pending, timeBase } = a;
-  const pts = a.ffmpeg.core._sny_frame_pts(a.decoder.frame);
+// where Opus, for one, drops its first frames. In a track, silence fills from where the ring is
+// up to, and the clock has started already.
+function startClock(a: State, { frame, timeBase }: Decoder) {
+  const { from, rate, pending, place } = a;
+  const pts = a.ffmpeg.core._sny_frame_pts(frame);
   const first = pts === AV_NOPTS_VALUE ? 0 : (Number(pts) * timeBase.num) / timeBase.den;
   const late = (first - from / 1e6) * rate;
   // Rounded down, so the first frame kept starts no later than `from`, and so does the clock.
   pending.skip = Math.max(0, Math.floor(-late));
   const kept = first + pending.skip / rate;
+  a.phase.started = true;
+
+  if (place) {
+    pending.silence = Math.max(0, a.frames(kept * 1e6 + place.offset) - a.frames(place.at));
+    return;
+  }
+
   const clock = a.start === undefined ? kept : Math.min(kept, a.start / 1e6);
   pending.silence = Math.max(0, Math.round((kept - clock) * rate));
   a.told.most = Math.max(0, Math.round((a.until / 1e6 - clock) * rate));
   a.producer.start(clock);
-  a.phase.started = true;
+}
+
+// In a track, fills the ring with silence up to `until` once the audio has ended short of it, or
+// there is none; false once it is full.
+function pad(a: State) {
+  const short = a.told.most - a.told.written;
+  if (!a.place || short <= 0) return false;
+  a.pending.silence = short;
+  return true;
 }
 
 function feed(a: State) {
@@ -304,9 +333,10 @@ function feed(a: State) {
       continue;
     }
 
-    if (phase.flushed) {
+    if (phase.flushed || !decoder) {
+      if (pad(a)) continue;
       phase.done = true;
-      a.producer.finish();
+      if (!a.place) a.producer.finish();
       tell(a);
       return true;
     }
@@ -314,15 +344,15 @@ function feed(a: State) {
     const ret = core._sny_decoder_receive(decoder.dec, decoder.frame);
 
     if (ret === AVERROR_EOF) {
-      resample(a, 0);
+      resample(a, decoder, 0);
       phase.flushed = true;
     } else if (ret === AVERROR_EAGAIN) {
-      if (!send(a)) return moved;
+      if (!send(a, decoder)) return moved;
       moved = true;
     } else {
       check(ret, "decoder_receive");
-      if (!phase.started) startClock(a);
-      resample(a, decoder.frame);
+      if (!phase.started) startClock(a, decoder);
+      resample(a, decoder, decoder.frame);
     }
   }
 
@@ -342,11 +372,11 @@ export function createAudio(options: AudioOptions): Audio {
 
   function close() {
     a.queue.free();
-    freeDecoder(core, a.decoder);
+    if (a.decoder) freeDecoder(core, a.decoder);
   }
 
   return {
-    stream: options.request.stream,
+    stream: options.stream ?? -1,
     queue: (pkt) => phase.closed || phase.done || a.queue.put(pkt),
     feed: () => feed(a),
     end: () => {

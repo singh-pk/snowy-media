@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // engine.compose in Chromium, through the public API alone: a composition of one clip of
-// h264-aac.mp4, read from 0.5 s and placed from 1 s to 3 s of 4 s. Played, the canvas is
-// black before and after the clip and shows, within it, the frame due at the composition's
-// time less the clip's offset, by native FFmpeg's timestamps, and the clock runs on to the end;
-// paused, a seek lands on black or on that frame, with the clock at the target; an edit that
-// moves the clip moves what is shown; and a plan the engine does not play is refused.
+// h264-aac.mp4, read from 0.5 s and placed from 1 s to 3 s of 4 s, and one of three clips of it
+// cut back to back and with gaps. Played, the canvas is black outside the clips and shows,
+// within one, the frame due at the composition's time less the clip's offset, by native FFmpeg's
+// timestamps, and the clock runs on to the end; paused, a seek lands on black or on that frame,
+// with the clock at the target; an edit that moves the clip moves what is shown; and a plan the
+// engine does not play is refused.
 // Usage: bun run test
 
 import { afterAll, expect, test } from "bun:test";
@@ -30,6 +31,27 @@ const [num = 1, den = 1] = video.timeBase.split("/").map(Number);
 // The clip, in seconds: read from IN, placed from START to END of DURATION.
 const [IN, START, END, DURATION] = [0.5, 1, 3, 4];
 const OFFSET = START - IN;
+
+interface Placed {
+  in: number;
+  start: number;
+  end: number;
+}
+
+const CLIP: Placed = { in: IN, start: START, end: END };
+// The sound alone of a clip after it, which shows black.
+const SOUND: Placed = { in: 0.2, start: 3.3, end: 3.8 };
+// Three clips, each read from after one of the file's keyframes, at 0 s and 1 s: the second cut
+// straight after the first, back in the file, and the third after a gap.
+// Each is longer than LATE, so some of it is clear of its edges on every runner.
+const CUTS: Placed[] = [
+  { in: 1.2, start: 0.5, end: 2.2 },
+  { in: 0.1, start: 2.2, end: 3.9 },
+  { in: 1.1, start: 4.4, end: 5.9 },
+];
+const CUT_DURATION = 6.4;
+// Seeks into each gap, each clip, and just after the cut between two.
+const CUT_SEEKS = [0.25, 1, 2.25, 4.1, 4.5, 6.1];
 // How late a frame may be, and how far the clock may be from where it should be, in seconds,
 // as test/play.test.ts measured them: Chromium draws slower than real time on CI's macOS
 // runners (SLOW_DRAWING) and in software on its Linux and Windows ones (SOFTWARE_GPU).
@@ -49,20 +71,27 @@ const server = await serveEngine(
 
 afterAll(() => server.stop(true));
 
-// The composition's plan of the clip placed from `start` seconds, in the plan's shape: as a
-// timeline gives it, its picture and its sound are two clips, each in its stream's time base.
-function planOf(start: number): Engine.Plan {
+// The composition's plan of `clips`, in the plan's shape: as a timeline gives it, each one's
+// picture and sound are two clips, each in its stream's time base.
+function planOf(clips: Placed[], duration = DURATION): Engine.Plan {
+  const layers = clips.map((clip, i) => layersOf(clip, i));
+  const to = Math.round(duration * 1e6);
+  const [v, a] = [layers.map(([each]) => each), layers.map(([, each]) => each)];
+  return { segments: [{ from: 0, to, video: v, audio: a, transitions: [] }] };
+}
+
+function layersOf(clip: Placed, i: number): [Engine.PlanVideoLayer, Engine.PlanAudioLayer] {
   const rate = audio?.sampleRate ?? 1;
   const layer = {
-    start: start * 1e6,
-    end: (start + END - START) * 1e6,
+    start: Math.round(clip.start * 1e6),
+    end: Math.round(clip.end * 1e6),
     speed: [1, 1] as Engine.Ratio,
     effects: [],
   };
   const v = {
     ...layer,
-    clip: "v1",
-    in: Math.round((IN * den) / num),
+    clip: `v${i}`,
+    in: Math.round((clip.in * den) / num),
     timeBase: [num, den] as Engine.Ratio,
     source: { asset: FILE, stream: video.id },
     opacity: 1,
@@ -71,8 +100,8 @@ function planOf(start: number): Engine.Plan {
   };
   const a = {
     ...layer,
-    clip: "a1",
-    in: Math.round(IN * rate),
+    clip: `a${i}`,
+    in: Math.round(clip.in * rate),
     timeBase: [1, rate] as Engine.Ratio,
     source: { asset: FILE, stream: audio?.id ?? 1 },
     gainDb: 0,
@@ -80,8 +109,10 @@ function planOf(start: number): Engine.Plan {
     fadeIn: layer.start,
     fadeOut: layer.end,
   };
-  return { segments: [{ from: 0, to: DURATION * 1e6, video: [v], audio: [a], transitions: [] }] };
+  return [v, a];
 }
+
+const micros = (seconds: number) => Math.round(seconds * 1e6);
 
 // The frame due at file time `t`, in seconds, by native FFmpeg's timestamps.
 function frameAt(t: number) {
@@ -89,39 +120,55 @@ function frameAt(t: number) {
   return Math.max(0, (after < 0 ? video.pts.length : after) - 1);
 }
 
-// What the canvas should show at composition time `t`: black (-1) outside the clip, or the
+// The clip of `clips` at composition time `t`, if any, and how much later than the file's it is.
+function clipAt(t: number, clips: Placed[]) {
+  const clip = clips.find((c) => t >= c.start && t < c.end);
+  return clip && { ...clip, offset: clip.start - clip.in };
+}
+
+// What the canvas should show at composition time `t`: black (-1) outside the clips, or the
 // frames that may be on screen, from the one due LATE before to the one due EARLY after `t`.
-function shownAt(t: number) {
-  if (t < START || t >= END) return [-1];
-  const first = frameAt(Math.max(IN, t - LATE - OFFSET));
-  const last = frameAt(t + EARLY - OFFSET);
+function shownAt(t: number, clips = [CLIP]) {
+  const clip = clipAt(t, clips);
+  if (!clip) return [-1];
+  const first = frameAt(Math.max(clip.in, t - LATE - clip.offset));
+  const last = frameAt(t + EARLY - clip.offset);
   return Array.from({ length: last - first + 1 }, (_, i) => first + i);
 }
 
-// Whether a read at `t` is far enough from the clip's edges to say which it shows: up to EARLY
+// Whether a read at `t` is far enough from the clips' edges to say which it shows: up to EARLY
 // before an edge, a read may show what comes after it, and up to LATE after, what came before.
-const clearOfEdges = (t: number) =>
-  t < START - EARLY || (t >= START + LATE && t < END - EARLY) || t >= END + LATE;
+const clearOfEdges = (t: number, clips = [CLIP]) =>
+  clips.every((c) => [c.start, c.end].every((edge) => t < edge - EARLY || t >= edge + LATE));
 
 // The plan with a second video layer over the clip, which the engine does not play.
 function twoLayers(): Engine.Plan {
-  const plan = planOf(START);
+  const plan = planOf([CLIP]);
   const [segment] = plan.segments;
   const [layer] = segment?.video ?? [];
   if (segment && layer) segment.video.push({ ...layer, clip: "v2" });
   return plan;
 }
 
-test(`plays a clip of ${FILE} with black around it, to the end`, async () => {
-  const reads = await inPage(
+// The plan of CLIP, and after it the sound of SOUND alone.
+function soundAfter(): Engine.Plan {
+  const plan = planOf([CLIP]);
+  const [, sound] = layersOf(SOUND, 1);
+  plan.segments[0]?.audio.push(sound);
+  return plan;
+}
+
+// Plays `plan` of `duration` seconds to its end, reading the screen as it goes.
+function watchPlay(plan: Engine.Plan, duration: number) {
+  return inPage(
     server.url.href,
     (tab) =>
       tab.evaluate(
-        async ({ entry, page, file, plan, duration, ms }) => {
+        async ({ entry, page, file, each, length, ms }) => {
           const support: typeof PageSupport = await import(page);
           const { player, canvas } = await support.startEngine(entry);
           const handle = await support.fixtureHandle(file);
-          await player.compose({ duration, plan: () => plan, source: () => handle });
+          await player.compose({ duration: length, plan: () => each, source: () => handle });
           await player.play();
           const seen = await support.watchScreen(player, canvas, ms, { black: true });
           player.close();
@@ -131,51 +178,77 @@ test(`plays a clip of ${FILE} with black around it, to the end`, async () => {
           entry: ENTRY,
           page: PAGE,
           file: FILE,
-          plan: planOf(START),
-          duration: DURATION * 1e6,
-          ms: (DURATION + 0.5) * 1000,
+          each: plan,
+          length: Math.round(duration * 1e6),
+          ms: (duration + 0.5) * 1000,
         },
       ),
     { gesture: true },
   );
+}
 
+// Checks the reads of a play of `clips` to `duration` seconds: the clock ran on to the end and
+// stopped there, each clip was seen, and each read clear of an edge showed what it should.
+// Returns those reads.
+function checkPlay(reads: [number, number][], clips: Placed[], duration: number) {
   console.log(`${reads.length} reads, from ${reads[0]?.[0]} s to ${reads.at(-1)?.[0]} s`);
-  expect(reads.length).toBeGreaterThanOrEqual(Math.floor(MIN_READS * DURATION));
-  // The clock ran on through the gap after the clip, to the end, and stopped there.
-  expect(Math.abs((reads.at(-1)?.[0] ?? 0) - DURATION)).toBeLessThan(REAL_TIME);
-  const checked = reads.slice(1).filter(([t]) => clearOfEdges(t));
-  // Each part was seen: the gap before, the clip, the gap after.
-  expect(checked.filter(([t]) => t < START).length).toBeGreaterThan(MIN_READS / 2);
-  expect(checked.filter(([t]) => t > START && t < END).length).toBeGreaterThan(MIN_READS);
-  expect(checked.filter(([t]) => t > END).length).toBeGreaterThan(MIN_READS / 2);
+  expect(reads.length).toBeGreaterThanOrEqual(Math.floor(MIN_READS * duration));
+  expect(Math.abs((reads.at(-1)?.[0] ?? 0) - duration)).toBeLessThan(REAL_TIME);
+  const checked = reads.slice(1).filter(([t]) => clearOfEdges(t, clips));
 
-  for (const [t, id] of checked) expect(shownAt(t), `frame ${id} at ${t} s`).toContain(id);
+  for (const { start, end } of clips) {
+    const seen = checked.filter(([t]) => t > start && t < end).length;
+    // MIN_READS a second, over the part of the clip clear of its edges.
+    const least = Math.floor(MIN_READS * (end - start - EARLY - LATE));
+    expect(seen, `reads from ${start} s to ${end} s`).toBeGreaterThanOrEqual(least);
+  }
+
+  for (const [t, id] of checked) expect(shownAt(t, clips), `frame ${id} at ${t} s`).toContain(id);
+  return checked;
+}
+
+test(`plays a clip of ${FILE} with black around it, and sound alone after it, to the end`, async () => {
+  const reads = await watchPlay(soundAfter(), DURATION);
+  const checked = checkPlay(reads, [CLIP], DURATION);
+  // The gaps before and after the clip were seen too.
+  expect(checked.filter(([t]) => t < START).length).toBeGreaterThan(MIN_READS / 2);
+  expect(checked.filter(([t]) => t > END).length).toBeGreaterThan(MIN_READS / 2);
 }, 60_000);
 
-test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`, async () => {
-  const got = await inPage(server.url.href, (tab) =>
+test(`plays clips of ${FILE} cut back to back and after a gap, to the end`, async () => {
+  const reads = await watchPlay(planOf(CUTS, CUT_DURATION), CUT_DURATION);
+  checkPlay(reads, CUTS, CUT_DURATION);
+}, 60_000);
+
+// Seeks to each of `seeks` paused, in a composition of `plan` of `duration` seconds, and reads what
+// each shows; then, given `moved`, seeks to 1.7 s, edits the plan to it and reads again.
+function seekPaused(plan: Engine.Plan, duration: number, seeks: number[], moved?: Engine.Plan) {
+  return inPage(server.url.href, (tab) =>
     tab.evaluate(
-      async ({ entry, page, file, plan, moved, duration, seeks }) => {
+      async ({ entry, page, file, first, edit, length, targets }) => {
         const support: typeof PageSupport = await import(page);
         const { player, canvas } = await support.startEngine(entry);
         const handle = await support.fixtureHandle(file);
-        const current = { plan };
-        await player.compose({ duration, plan: () => current.plan, source: () => handle });
+        const current = { plan: first };
+        await player.compose({ duration: length, plan: () => current.plan, source: () => handle });
         const seen: [number, number][] = [];
 
-        for (const time of seeks) {
+        for (const time of targets) {
           await player.seek(time);
           // The last read of a short watch: a read may show the canvas a few frames before.
           const reads = await support.watchScreen(player, canvas, 100, { black: true });
           seen.push(reads.at(-1) ?? [Number.NaN, Number.NaN]);
         }
 
-        // An edit moves the clip later: the time stays, and what is there now is shown.
-        await player.seek(1.7);
-        current.plan = moved;
-        await player.changed();
-        const edited = await support.watchScreen(player, canvas, 100, { black: true });
-        seen.push(edited.at(-1) ?? [Number.NaN, Number.NaN]);
+        // An edit: the time stays, and what is there now is shown.
+        if (edit) {
+          await player.seek(1.7);
+          current.plan = edit;
+          await player.changed();
+          const edited = await support.watchScreen(player, canvas, 100, { black: true });
+          seen.push(edited.at(-1) ?? [Number.NaN, Number.NaN]);
+        }
+
         player.close();
         return seen;
       },
@@ -183,21 +256,37 @@ test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`,
         entry: ENTRY,
         page: PAGE,
         file: FILE,
-        plan: planOf(START),
-        moved: planOf(2),
-        duration: DURATION * 1e6,
-        seeks: SEEKS,
+        first: plan,
+        edit: moved ?? null,
+        length: Math.round(duration * 1e6),
+        targets: seeks,
       },
     ),
   );
+}
 
-  for (const [i, time] of SEEKS.entries()) {
+// Paused, each seek of `seeks` landed on the frame of `clips` due at its target exactly, or black,
+// with the clock at the target.
+function checkSeeks(got: [number, number][], seeks: number[], clips: Placed[]) {
+  for (const [i, time] of seeks.entries()) {
     const [clock = Number.NaN, id] = got[i] ?? [];
     expect(Math.abs(clock - time), `clock at ${time} s`).toBeLessThan(SAMPLE);
-    // Paused, the frame due at the target exactly, or black.
-    const want = time < START || time >= END ? -1 : frameAt(time - OFFSET);
-    expect(id, `at ${time} s`).toBe(want);
+    const clip = clipAt(time, clips);
+    // In whole microseconds, as the plan places it, so a target on a frame's time is due there.
+    const there = clip && (micros(time) - micros(clip.offset)) / 1e6;
+    expect(id, `at ${time} s`).toBe(there === undefined ? -1 : frameAt(there));
   }
+}
+
+test(`seeks into clips of ${FILE} and the gaps between them, paused`, async () => {
+  const got = await seekPaused(planOf(CUTS, CUT_DURATION), CUT_DURATION, CUT_SEEKS);
+  checkSeeks(got, CUT_SEEKS, CUTS);
+}, 60_000);
+
+test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`, async () => {
+  const moved = planOf([{ in: IN, start: 2, end: 4 }]);
+  const got = await seekPaused(planOf([CLIP]), DURATION, SEEKS, moved);
+  checkSeeks(got, SEEKS, [CLIP]);
 
   // Moved to start at 2 s, the clip leaves 1.7 s in the gap before it.
   const [clock = Number.NaN, id] = got[SEEKS.length] ?? [];
@@ -207,7 +296,7 @@ test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`,
 
 // The plan with the clip's video layer reading its audio stream.
 function wrongKind(): Engine.Plan {
-  const plan = planOf(START);
+  const plan = planOf([CLIP]);
   const layer = plan.segments[0]?.video[0];
   if (layer) layer.source = { asset: FILE, stream: audio?.id ?? 1 };
   return plan;
@@ -265,7 +354,7 @@ test("refuses what it does not play, follows edits that change nothing or only t
         entry: ENTRY,
         page: PAGE,
         file: FILE,
-        plan: planOf(START),
+        plan: planOf([CLIP]),
         two: twoLayers(),
         kind: wrongKind(),
         duration: DURATION * 1e6,
@@ -315,8 +404,8 @@ test(`follows an edit while it plays, and a pause made while it opens again`, as
           entry: ENTRY,
           page: PAGE,
           file: FILE,
-          plan: planOf(START),
-          moved: planOf(2),
+          plan: planOf([CLIP]),
+          moved: planOf([{ in: IN, start: 2, end: 4 }]),
           duration: DURATION * 1e6,
         },
       ),

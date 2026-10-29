@@ -11,7 +11,7 @@
 The playback pipeline of [Snowy](https://github.com/singh-pk/snowy-media): it reads a local file, demuxes and decodes it with [`@snowy-media/ffmpeg`](../ffmpeg) and WebCodecs, keeps audio and video in sync, and draws into a canvas with WebGPU, all in workers. It has no user interface; the Snowy player and editor build on it.
 
 > [!NOTE]
-> In development: `bun add @snowy-media/engine`. Until 1.0 a minor version may change the API. It plays a file's first video and audio track, or a composition of one clip of a file, and seeks and scrubs frame-exactly; see the [changelog](CHANGELOG.md) for what is there so far.
+> In development: `bun add @snowy-media/engine`. Until 1.0 a minor version may change the API. It plays a file's first video and audio track, or a composition of clips of a file played one after another, and seeks and scrubs frame-exactly; see the [changelog](CHANGELOG.md) for what is there so far.
 
 ## How it works
 

@@ -9,7 +9,7 @@
 import { createCompositor } from "./compositor";
 import { createPcmControl } from "./pcm";
 import type { FromRender, Missing, ToRender } from "./protocol";
-import { createVideoOutput } from "./video";
+import { createTrack } from "./track";
 import { createWasmVideo } from "./wasm-video";
 
 interface Gpu {
@@ -45,7 +45,7 @@ function post(message: FromRender) {
 }
 
 // The play `id` of `output` from `from`, and what the main thread was last told of it.
-function createPlaying(id: number, output: ReturnType<typeof createVideoOutput>, from: number) {
+function createPlaying(id: number, output: ReturnType<typeof createTrack>, from: number) {
   return {
     id,
     output,
@@ -201,28 +201,20 @@ function clear() {
   state.compositor.clear();
 }
 
-// Whether media time `at` (microseconds) is outside a clip's `window`, where the canvas is black.
-const outside = (window: Window | undefined, at: number) =>
-  window !== undefined && (at < window.in || at >= window.out);
-
-type Window = Extract<ToRender, { type: "play" }>["window"];
-
-function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type: "play" }>) {
+function play({ id, ring, pcm, from, clips }: Extract<ToRender, { type: "play" }>) {
   stop();
   if (!state.compositor) throw new Error("play before init");
   const compositor = state.compositor;
   const clock = createPcmControl(pcm);
   // `changed` and `freed` fire only in later tasks, once `playing` below exists. The media worker
   // waits on the PCM ring's doorbell for room in either ring (src/pcm.ts).
-  const output = createVideoOutput(ring, params, {
+  const output = createTrack(ring, clips, {
     compositor,
     wasm,
     changed: () => update(),
     freed: clock.wakeProducer,
-    from,
   });
-  // In a gap before a clip, the clock starts before its video does.
-  const playing = createPlaying(id, output, window?.start ?? from);
+  const playing = createPlaying(id, output, from);
   const timing = createTiming();
 
   // Reports the first failure of this play, unless it has stopped.
@@ -243,15 +235,10 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
       const seen = clock.heard(performance.timeOrigin + time + refresh);
       // The clock starts up to a sample before the target; no frame due before the target shows.
       const at = Math.max(Math.round(seen * 1e6), playing.target);
-      const black = outside(window, at);
-      if (black) output.blank();
-      // Before the clip, its first frame is uploaded ahead, so it is up when due.
-      if (black && window && at < window.in) void output.prepare(window.in);
-      const drawn = black || output.present(at);
+      const drawn = output.present(at);
       // Shown by the running clock once a frame is up and none due by then is still going up,
       // not merely while the clock runs, so a decoder slower than the clock still gets there.
-      // Black counts as shown at once.
-      const shown = running && (black || output.current(at));
+      const shown = running && output.current(at);
       const { sent } = playing;
       sent.drawn ||= drawn;
       if (output.reached(playing.target)) sent.reached = playing.target;

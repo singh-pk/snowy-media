@@ -5,6 +5,7 @@
 // carry that the public API shares. Which thread does what: docs/architecture.md#threads.
 
 import type { VideoParams } from "./codec";
+import type { Clip } from "./composition";
 
 /** A platform feature the engine needs (AGENTS.md rule 2). */
 export type PlatformFeature =
@@ -20,6 +21,19 @@ export type PlatformFeature =
 export type Missing = [feature: PlatformFeature, reason: string];
 
 /**
+ * A clip of video the render worker plays: its packets, of a stream with `params`, start at a
+ * keyframe before `in`, and it is shown from `in` to `out` in its file's time, `offset` later on
+ * the clock, all in microseconds. Of the frames before `in`, only the last, the one due then, is
+ * shown.
+ */
+export interface VideoClip {
+  params: VideoParams;
+  in: number;
+  out: number;
+  offset: number;
+}
+
+/**
  * From the main thread to the render worker. After `init`, each `play` plays the video packets in
  * `ring` (src/ring.ts), timed by the clock in the PCM ring `pcm` (src/pcm.ts), until `stop`,
  * `clear` or the next `play`. A play's first error stops it and is reported once, with its `id`.
@@ -30,18 +44,15 @@ export type ToRender =
       type: "play";
       id: number;
       ring: SharedArrayBuffer;
-      params: VideoParams;
       pcm: SharedArrayBuffer;
-      /**
-       * The media time it plays from, in microseconds. Of the frames before it, only the last is
-       * shown.
-       */
+      /** Where the clock starts, in microseconds. */
       from: number;
       /**
-       * A clip's play: frames are shown only from `in` to `out` (microseconds), with black around
-       * them, and the clock starts at `start`, which in a gap before the clip is before `from`.
+       * The clips whose packets `ring` holds, in turn, each ended by a CUT record, or the last by
+       * the END record, with black between and around them on the clock. A file plays as one
+       * clip, from where it starts to the end, at an offset of 0.
        */
-      window?: { start: number; in: number; out: number };
+      clips: VideoClip[];
     }
   /**
    * Moves the paused play `id` on to `to` (microseconds) by decoding further: a scrub forward.
@@ -108,10 +119,10 @@ export interface MediaInfo {
 
 /**
  * From the main thread to the media worker. Each reply carries the `id` of its request. An `open`
- * replies `opened`. A `demux` replies `demuxed` once it has written the packet ring's END record
- * and all the audio (or the PCM ring's consumer has closed that ring), or once the packet ring's
- * consumer has closed it; on an error it ends the packet ring with FAILED and replies `error`, its
- * only report.
+ * replies `opened`. A `demux` or a `track` replies `demuxed` once it has written the packet ring's
+ * END record and all the audio (or the PCM ring's consumer has closed that ring), or once the
+ * packet ring's consumer has closed it; on an error it ends the packet ring with FAILED and replies
+ * `error`, its only report.
  */
 export type ToMedia =
   | { type: "open"; id: number; file: File }
@@ -136,12 +147,23 @@ export type ToMedia =
        * holds `preroll` frames, is full or has all the audio. Needs `pcm`.
        */
       audio?: { stream: number; preroll: number };
+    }
+  | {
       /**
-       * A clip's demux, in microseconds: no packet or audio past `until` is written. The clock
-       * starts at `start`, which in a gap before the clip is before `from`, and is silent up to
-       * the clip's audio; past `until` it runs on to `end`. Needs `pcm`.
+       * Reads a composition's clips of the open file in turn, each from its keyframe at or before
+       * its `in` to its `out`, for a clock on the composition's time that starts at `from` and
+       * runs on to `end`, all in microseconds. Each clip's video packets go into `ring`, followed
+       * by a CUT record, and its audio into `pcm`, with silence wherever no clip's audio plays.
+       * `buffered` is sent once `pcm` holds `preroll` frames, is full or has all the audio.
        */
-      clip?: { start: number; until: number; end: number };
+      type: "track";
+      id: number;
+      ring: SharedArrayBuffer;
+      pcm: SharedArrayBuffer;
+      from: number;
+      clips: Clip[];
+      end: number;
+      preroll: number;
     };
 
 /** From the media worker to the main thread, each with the `id` of the request it answers. */

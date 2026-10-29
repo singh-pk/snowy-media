@@ -21,6 +21,8 @@ export const ENTRY = "/test/dist/index.js";
 export const MEDIA_WORKER = "/test/dist/media.worker.js";
 /** The AudioWorklet module. */
 export const AUDIO_WORKLET = "/test/dist/audio.worklet.js";
+/** test/support/track.ts. */
+export const TRACK_PAGE = "/test/dist/test/support/track.js";
 /** test/support/page.ts. */
 export const PAGE = "/test/dist/test/support/page.js";
 /** bench/ring.worker.ts. */
@@ -32,7 +34,7 @@ async function buildAll() {
   await build({
     outdir,
     ffmpeg: "/ffmpeg/",
-    entrypoints: ["test/support/page.ts", "bench/ring.worker.ts"],
+    entrypoints: ["test/support/page.ts", "test/support/track.ts", "bench/ring.worker.ts"],
     sourcemap: "external",
   });
   const workers = [
