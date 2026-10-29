@@ -47,7 +47,16 @@ export async function renderTrack(
   const room = 2 ** Math.ceil(Math.log2((end / 1e6) * PCM_RATE));
   const pcm = createPcmRing(room, PCM_CHANNELS, PCM_RATE);
   const placed = clips.map((c) => ({ ...c, clip: "", asset: "", video: stream, audio: undefined }));
-  const request = { type: "track" as const, ring, pcm, from: 0, clips: placed, end, preroll: 0 };
+  const request = {
+    type: "track" as const,
+    ring,
+    pcm,
+    from: 0,
+    clips: placed,
+    files: {},
+    end,
+    preroll: 0,
+  };
   const demuxed = media.request(request);
   const compositor = createCompositor(device, context, format);
   const options = { compositor, wasm, changed: () => {}, freed: () => {} };

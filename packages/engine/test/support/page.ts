@@ -186,7 +186,7 @@ export async function play(
   const clips = track?.clips.map((c) => ({ ...c, ...clip }));
   const demux = { type: "demux" as const, ring, streams: [], from: 0, pcm, audio };
   await media.request(
-    track && clips ? { type: "track", ring, pcm, ...track, clips, preroll: 0 } : demux,
+    track && clips ? { type: "track", ring, pcm, ...track, clips, files: {}, preroll: 0 } : demux,
   );
   const offsets: number[] = [];
 
@@ -256,7 +256,8 @@ export async function openVideo(worker: string, name: string, stream: number) {
   const media = startMedia(worker);
   const res = await fetch(`/test/fixtures/${name}`);
   const blob = await res.blob();
-  const opened = await media.request({ type: "open", file: new File([blob], name) });
+  const file = new File([blob], name);
+  const opened = await media.request({ type: "open", file, asset: "" });
   if (opened.type !== "opened") throw new Error(`${name}: ${opened.type}`);
   const params = opened.video[stream];
   if (!params) throw new Error(`${name}: no parameters for stream ${stream}`);

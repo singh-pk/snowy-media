@@ -216,9 +216,8 @@ function checkCut(a: Clip, b: Clip) {
  * The clips `plan` plays within `duration` microseconds, in the order they play: each a layer
  * of video and a layer of audio of one file in step, or either alone. Throws a NotSupportedError
  * for what the engine does not play: clips that play at the same time, as video and audio that
- * are not in step do, clips of more than one file, a source other than a file, a transition, an
- * effect, a speed other than 1, and any opacity, blend, transform, gain, pan or fade but the
- * plain one.
+ * are not in step do, a source other than a file, a transition, an effect, a speed other than 1,
+ * and any opacity, blend, transform, gain, pan or fade but the plain one.
  */
 export function clipsOf(plan: Plan, duration: number): Clip[] {
   const { video, audio } = layersOf(plan);
@@ -235,7 +234,5 @@ export function clipsOf(plan: Plan, duration: number): Clip[] {
     if (before) checkCut(before, clip);
   }
 
-  const asset = clips[0]?.asset;
-  if (clips.some((c) => c.asset !== asset)) throw unsupported("clips of more than one file");
   return clips;
 }

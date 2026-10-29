@@ -56,7 +56,7 @@ async function play(
       const media = support.startMedia(worker);
       const res = await fetch(`/test/fixtures/${n}`);
       const blob = await res.blob();
-      await media.request({ type: "open", file: new File([blob], n) });
+      await media.request({ type: "open", file: new File([blob], n), asset: "" });
       const played = await support.play(media, s, { worklet, ...options });
       media.stop();
       return played;
