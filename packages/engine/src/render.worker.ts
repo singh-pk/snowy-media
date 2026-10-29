@@ -57,11 +57,15 @@ function createPlaying(id: number, output: ReturnType<typeof createVideoOutput>,
     reportedReached: -1,
     ahead: false,
     stuck: false,
-    drawn: false,
     shown: false,
-    // Where it plays from, which a scrub moves on, and the last such target reached, or -1.
+    // Where it plays from, which a scrub moves on. Whether the frame due at the start is drawn,
+    // and the last target reached, or -1, as the GPU has drawn them and as sent to it; and
+    // whether the GPU is being waited on.
     target: from,
+    drawn: false,
     reached: -1,
+    sent: { drawn: false, reached: -1 },
+    waiting: false,
   };
 }
 
@@ -93,6 +97,31 @@ function report(playing: Playing) {
   playing.reported = now;
   playing.reportedReached = reached;
   post({ type: "video", id, ahead, stuck, drawn, shown, reached });
+}
+
+// Reports what was sent to the GPU of `playing`, the frame due at the start drawn and a scrub's
+// target reached, once `compositor`'s GPU has done it, or its failure to `fail`: a paused seek
+// and a scrub resolve on them, and a GPU that compiles a draw the first time it runs, as one in
+// software does, may take many refreshes to.
+async function reportDone(
+  playing: Playing,
+  compositor: ReturnType<typeof createCompositor>,
+  fail: (e: unknown) => void,
+) {
+  playing.waiting = true;
+  const { drawn, reached } = playing.sent;
+
+  try {
+    await compositor.done();
+  } catch (e) {
+    fail(e);
+    return;
+  }
+
+  if (state.playing !== playing) return;
+  playing.waiting = false;
+  Object.assign(playing, { drawn, reached });
+  report(playing);
 }
 
 // A device drawing into `canvas`, or what is missing for one.
@@ -187,11 +216,12 @@ type Window = Extract<ToRender, { type: "play" }>["window"];
 function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type: "play" }>) {
   stop();
   if (!state.compositor) throw new Error("play before init");
+  const compositor = state.compositor;
   const clock = createPcmControl(pcm);
   // Its events all come in later tasks, once `playing` below is made. The media worker waits on
   // the PCM ring's doorbell for room in either ring (src/pcm.ts).
   const output = createVideoOutput(ring, params, {
-    compositor: state.compositor,
+    compositor,
     wasm,
     changed: () => update(),
     freed: clock.wakeProducer,
@@ -228,12 +258,14 @@ function play({ id, ring, params, pcm, from, window }: Extract<ToRender, { type:
       // not just as it runs; a decoder slower than the clock still lets it be shown. Black is
       // shown at once.
       const shown = running && (black || output.current(at));
-      const reached = output.reached(playing.target) ? playing.target : playing.reached;
+      const { sent } = playing;
+      sent.drawn ||= drawn;
+      if (output.reached(playing.target)) sent.reached = playing.target;
+      const unsent = sent.drawn !== playing.drawn || sent.reached !== playing.reached;
+      if (unsent && !playing.waiting) void reportDone(playing, compositor, fail);
 
-      if ((drawn && !playing.drawn) || (shown && !playing.shown) || reached !== playing.reached) {
-        playing.drawn ||= drawn;
-        playing.shown ||= shown;
-        playing.reached = reached;
+      if (shown && !playing.shown) {
+        playing.shown = true;
         report(playing);
       }
     } catch (e) {
