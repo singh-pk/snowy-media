@@ -65,7 +65,7 @@ Maintainers release a package from `main`, in a pull request and then a tag. For
 
 1. checks that the tag is on `main`;
 2. for ffmpeg, rebuilds the modules without a cache and checks them against `dist.sha256`; for the engine, builds it;
-3. packs the npm tarball and checks it holds exactly the files it should (the package's `scripts/release.ts`: [ffmpeg](packages/ffmpeg/scripts/release.ts), [engine](packages/engine/scripts/release.ts)). The engine's also checks that `@snowy-media/ffmpeg` as it is in the repository, which the engine was tested against, is released: release ffmpeg first when it has unreleased changes;
+3. packs the npm tarball and checks it holds exactly the files it should (the package's `scripts/release.ts`: [ffmpeg](packages/ffmpeg/scripts/release.ts), [engine](packages/engine/scripts/release.ts), on the shared steps of [`tooling/release.ts`](tooling/release.ts), which also copies the package's licence from `LICENSES/` into `LICENSE`). The engine's also checks that `@snowy-media/ffmpeg` as it is in the repository, which the engine was tested against, is released: release ffmpeg first when it has unreleased changes;
 4. creates a draft GitHub release with the changelog section and the tarball, plus for ffmpeg the source archive;
 5. publishes that tarball to npm with provenance through [trusted publishing](https://docs.npmjs.com/trusted-publishers), so no npm token exists anywhere;
 6. publishes the GitHub release. Releases are immutable once published, which is why this comes last.

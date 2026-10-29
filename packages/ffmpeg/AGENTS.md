@@ -28,7 +28,7 @@ A full FFmpeg build takes 20+ minutes; changing only `src/` relinks in under a m
 | `src/io.js` | Emscripten imports that route AVIO reads to JavaScript hooks |
 | `scripts/gen-dts.ts` | generates `dist/<module>/index.{js,d.ts}` from `src/*.c` |
 | `scripts/gen-fixtures.ts` | builds `test/fixtures` and `expected.json` from native `ffprobe` |
-| `scripts/release.ts` | release notes, `LICENSE` and the LGPL source archive for a tag |
+| `scripts/release.ts` | the LGPL source archive and the npm tarball's file list for a tag, on the shared steps of `tooling/release.ts` |
 | `test/` | Playwright tests; `test/support/` is shared with `bench/` |
 | `bench/` | benchmark harness, library adapters, recorded results |
 | `docs/architecture.md` | design and the reasons behind it |

@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //
-// Prepares the release for tag @snowy-media/ffmpeg@X.Y.Z (.github/workflows/release.yml):
-// checks that the tag matches package.json and has a CHANGELOG.md section, copies the LGPL
-// text into LICENSE, and writes into release/
-//   notes.md                                that section
+// Prepares the release for tag @snowy-media/ffmpeg@X.Y.Z (.github/workflows/release.yml): the
+// shared steps of tooling/release.ts, with the LGPL as LICENSE. Writes into release/
+//   notes.md                                the CHANGELOG.md section
 //   snowy-media-ffmpeg-X.Y.Z.tgz            the npm package, checked to hold exactly the
 //                                           files below, which npm then publishes as is
 //   snowy-media-ffmpeg-X.Y.Z-source.tar.xz  this package at HEAD plus, in third_party/, the
@@ -14,36 +13,23 @@
 
 import { $ } from "bun";
 import { mkdir, rm } from "node:fs/promises";
+import { packRelease, startRelease } from "../../../tooling/release";
 
-// jscpd:ignore-start: mirrors packages/engine/scripts/release.ts, since packages share no code
-const tag = process.argv[2] ?? "";
-const root = new URL("../", import.meta.url).pathname;
-const pkg = await Bun.file(`${root}package.json`).json();
-const { version } = pkg;
-if (tag !== `${pkg.name}@${version}`) throw new Error(`tag "${tag}" is not ${pkg.name}@${version}`);
-
-const changelog = await Bun.file(`${root}CHANGELOG.md`).text();
-const section = changelog.split(/^## /m).find((s) => s.startsWith(`[${version}]`));
-if (!section) throw new Error(`CHANGELOG.md has no [${version}] section`);
-// jscpd:ignore-end
-
-const out = `${root}release/`;
-const name = `snowy-media-ffmpeg-${version}`;
+const release = await startRelease({
+  root: Bun.fileURLToPath(new URL("../", import.meta.url)),
+  tag: process.argv[2] ?? "",
+  licence: "LGPL-2.1-or-later",
+});
+const { root, out, name } = release;
 const stage = `${out}${name}/`;
-await rm(out, { recursive: true, force: true });
 await mkdir(`${stage}third_party`, { recursive: true });
-await Bun.write(`${out}notes.md`, `${section.slice(section.indexOf("\n") + 1).trim()}\n`);
+await Bun.write(`${stage}LICENSE`, Bun.file(`${root}LICENSE`));
 
-const license = Bun.file(`${root}../../LICENSES/LGPL-2.1-or-later.txt`);
-await Bun.write(`${root}LICENSE`, license);
-await Bun.write(`${stage}LICENSE`, license);
-
-// A wrong `files` pattern or a missing build step would otherwise publish an incomplete
-// package that npm never lets us replace.
+const pkg = await Bun.file(`${root}package.json`).json();
 const modules = Object.keys(pkg.exports)
   .filter((key) => key !== "./package.json")
   .map((key) => key.slice(2));
-const expected = [
+await packRelease(release, [
   "package.json",
   "CHANGELOG.md",
   "LICENSE",
@@ -59,22 +45,7 @@ const expected = [
   ...modules.flatMap((m) =>
     [`${m}.js`, `${m}.wasm`, "index.js", "index.d.ts"].map((f) => `dist/${m}/${f}`),
   ),
-].toSorted();
-// jscpd:ignore-start: mirrors packages/engine/scripts/release.ts, since packages share no code
-await $`bun pm pack --quiet --destination ${out}`.cwd(root);
-const listing = await $`tar -tzf ${out}${name}.tgz`.text();
-const packed = listing
-  .trim()
-  .split("\n")
-  .map((path) => path.replace(/^package\//, ""))
-  .toSorted();
-
-if (packed.join("\n") !== expected.join("\n")) {
-  throw new Error(
-    `the npm package holds\n${packed.join("\n")}\nbut should hold\n${expected.join("\n")}`,
-  );
-}
-// jscpd:ignore-end
+]);
 
 await $`git -C ${root} archive HEAD | tar -xf - -C ${stage}`;
 await $`docker buildx build --target source --output type=local,dest=${stage}third_party ${root}`;

@@ -31,4 +31,4 @@ Issues and pull requests are welcome, from people and from AI agents. Read [CONT
 
 ## Licence
 
-Snowy's packages are source-available under the [Snowy License](LICENSES/LicenseRef-Snowy-License-1.0.txt): free for individuals, companies of up to 3 people, non-profits, education, open-source projects and evaluation; larger companies using them in production need a company licence. `@snowy-media/ffmpeg` is [LGPL-2.1-or-later](LICENSES/LGPL-2.1-or-later.txt), like FFmpeg, and the repository tooling is [MIT](LICENSES/MIT.txt). [LICENSE.md](LICENSE.md) says what covers which files. The name and logos are trademarks ([TRADEMARKS.md](TRADEMARKS.md)).
+Snowy's packages are source-available under the [Snowy License](LICENSES/LicenseRef-Snowy-License-1.0.txt). `@snowy-media/ffmpeg` is [LGPL-2.1-or-later](LICENSES/LGPL-2.1-or-later.txt), like FFmpeg, and the repository tooling is [MIT](LICENSES/MIT.txt). [LICENSE.md](LICENSE.md) says what covers which files, who may use the Snowy License free and when a company licence is needed. The name and logos are trademarks ([TRADEMARKS.md](TRADEMARKS.md)).
