@@ -168,6 +168,8 @@ test("a missing or malformed token admits nothing", async () => {
   const { peer, grant, path } = await setup();
   const token = await peerToken(grant, peer);
   const now = Date.now();
+  // Signed as it is, but not a whole number of milliseconds.
+  const fractional = await tokenAt(grant, peer, now + 0.5);
   const queries = [
     undefined,
     "",
@@ -175,6 +177,7 @@ test("a missing or malformed token admits nothing", async () => {
     "token=not-base64!",
     `token=${encoder.encode("[]").toBase64({ alphabet: "base64url" })}`,
     query(altered(token, (json) => (json.request.issuedAt = "now"))),
+    query(fractional),
     query(altered(token, (json) => Object.assign(json, { request: "peer" }))),
     query(altered(token, (json) => (json.grant.rights = "editor"))),
     query(altered(token, (json) => (json.sig = `${json.sig}A`))),
@@ -184,6 +187,15 @@ test("a missing or malformed token admits nothing", async () => {
   ];
   const results = await Promise.all(queries.map((q) => authorize(path, q, now)));
   expect(results).toEqual(queries.map(() => undefined));
+});
+
+test("a request signed for one session admits nothing in another, whatever grant it comes with", async () => {
+  const [a, b] = await Promise.all([setup(), setup()]);
+  // Someone who holds B's invite and reads the token A's peer made for A, within its 5 minutes.
+  const token = await peerToken(a.grant, a.peer);
+  const moved = altered(token, (json) => Object.assign(json, { grant: b.grant }));
+  const granted = await authorize(b.path, query(moved), Date.now());
+  expect(granted).toBeUndefined();
 });
 
 test("a token made as the docs give it admits as one `peerToken` makes", async () => {
