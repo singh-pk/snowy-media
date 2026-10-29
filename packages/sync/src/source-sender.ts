@@ -7,7 +7,7 @@
 // peer whose last link closes leaves it.
 
 import type { Catalog } from "./catalog";
-import { chunkKey, type ChunkSlot } from "./chunk";
+import { chunkKey, sameSlot, type ChunkSlot } from "./chunk";
 import { checkChunkControl } from "./chunk-requests";
 import type { Bytes, KeyId } from "./crypto";
 import type { Link } from "./link";
@@ -21,18 +21,47 @@ export type SourceSenderOptions = {
   /**
    * A chunk's sealed object, cut again from the file if need be, or undefined when it can't be,
    * such as a body that no longer matches its signed header: a peer that asked is answered
-   * `gone`, and a live chunk is skipped. A rejection stops sending.
+   * `gone`, and a live chunk is skipped.
    */
   chunk(slot: ChunkSlot): Promise<Bytes | undefined>;
   /** Sends a chunk live, on `source/media/<track>`. */
   live(slot: ChunkSlot, bytes: Bytes): void;
-  /** Sending stopped because `chunk` rejected, with its error. */
+  /** Sending stopped because `ready`, `chunk`, `live` or a link's send threw, with its error. */
   stopped(error: unknown): void;
 };
+
+// The chunk being cut for a peer. The queue no longer holds it, so a cancel or the peer leaving
+// while it is cut drops it here instead.
+function createCutting() {
+  const state = {
+    now: undefined as { peer: KeyId; slot: ChunkSlot; dropped: boolean } | undefined,
+  };
+
+  function start(send: Send) {
+    state.now =
+      send.to === "peer" ? { peer: send.peer, slot: send.slot, dropped: false } : undefined;
+  }
+
+  // Whether the chunk cut since `start` was dropped.
+  function end() {
+    const dropped = state.now?.dropped === true;
+    state.now = undefined;
+    return dropped;
+  }
+
+  // Drops the peer's chunk being cut: `slot`'s, or any.
+  function drop(peer: KeyId, slot?: ChunkSlot) {
+    const now = state.now;
+    if (now?.peer === peer && (slot === undefined || sameSlot(slot, now.slot))) now.dropped = true;
+  }
+
+  return { start, end, drop };
+}
 
 export function createSourceSender(options: SourceSenderOptions) {
   const links = new Map<KeyId, Link[]>();
   const state = { stopped: false, queued: Promise.withResolvers<void>() };
+  const cutting = createCutting();
   const queue = createPushQueue({
     tracks: options.tracks,
     send: (peer, message) => links.get(peer)?.at(-1)?.send(message),
@@ -45,17 +74,17 @@ export function createSourceSender(options: SourceSenderOptions) {
     return state.queued.promise;
   }
 
-  // A link that closed while its chunk was cut gets nothing: the peer left the queue with it.
   function sent(send: Send, bytes: Bytes | undefined) {
     if (send.to === "track") {
       if (bytes !== undefined) options.live(send.slot, bytes);
       return;
     }
 
-    const link = links.get(send.peer)?.at(-1);
+    // A peer with no link left has dropped its send, so it has a link here.
+    const link = links.get(send.peer)!.at(-1)!;
     const { track, index } = send.slot;
-    if (bytes === undefined) link?.send({ type: "gone", track, index });
-    else link?.deliver(chunkKey(send.slot), bytes);
+    if (bytes === undefined) link.send({ type: "gone", track, index });
+    else link.deliver(chunkKey(send.slot), bytes);
   }
 
   async function step() {
@@ -68,8 +97,9 @@ export function createSourceSender(options: SourceSenderOptions) {
       return;
     }
 
+    cutting.start(send);
     const bytes = await options.chunk(send.slot);
-    if (!state.stopped) sent(send, bytes);
+    if (!cutting.end() && !state.stopped) sent(send, bytes);
   }
 
   async function run() {
@@ -92,6 +122,7 @@ export function createSourceSender(options: SourceSenderOptions) {
 
     links.delete(peer);
     queue.left(peer);
+    cutting.drop(peer);
   }
 
   /** A link to a peer opened: its requests and cancels go into the queue. */
@@ -101,14 +132,20 @@ export function createSourceSender(options: SourceSenderOptions) {
     else links.set(link.peer, [link]);
     link.on("message", (value) => {
       const control = checkChunkControl(value);
-      if (control !== undefined) queue.requested(link.peer, control);
+      if (control === undefined || state.stopped) return;
+      if (control.type === "cancel") cutting.drop(link.peer, control);
+      queue.requested(link.peer, control);
     });
     link.on("close", () => unlinked(link));
   }
 
-  /** Stops sending: nothing more goes once the chunk being sent, if any, has gone. */
+  /**
+   * Stops sending: nothing more goes, not even a chunk being cut, and links' messages are ignored.
+   * Links stay held until they close.
+   */
   function stop() {
     state.stopped = true;
+    state.queued.resolve();
   }
 
   void run();

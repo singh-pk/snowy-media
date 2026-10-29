@@ -213,6 +213,8 @@ export async function decodeChunk(
   };
 }
 
+export const sameSlot = (a: ChunkSlot, b: ChunkSlot) => a.track === b.track && a.index === b.index;
+
 export const chunkKey = ({ track, index }: ChunkSlot) => `media/${track}/${index}`;
 
 const CHUNK_KEY = /^media\/(0|[1-9]\d{0,4})\/(0|[1-9]\d{0,9})$/;

@@ -33,7 +33,7 @@ async function task() {
 }
 
 // The source, with its stream ready at once unless `held`, a chunk of any slot cut on request
-// unless `missing` or `broken` names it, in the order `asked`, calling `cutting` as it does; and
+// unless `missing` or `broken` names it, in the order `asked`, awaiting `cutting` as it does; and
 // what it sent live and to linked peers, and its stop, as heard events. What goes live is heard at
 // once, and what goes on a link a task later, so `asked` holds the order chunks went in.
 function source({ held = false } = {}) {
@@ -47,7 +47,7 @@ function source({ held = false } = {}) {
     missing: new Set<string>(),
     broken: new Map<string, Error>(),
     stopped: [] as unknown[],
-    cutting: () => {},
+    cutting: (): unknown => undefined,
   };
 
   const sender = createSourceSender({
@@ -62,7 +62,7 @@ function source({ held = false } = {}) {
     chunk: async (slot) => {
       const key = chunkKey(slot);
       at.asked.push(`${slot.track}:${slot.index}`);
-      at.cutting();
+      await at.cutting();
       const error = at.broken.get(key);
       if (error !== undefined) throw error;
       return at.missing.has(key) ? undefined : new Uint8Array([slot.track, slot.index]);
@@ -74,6 +74,20 @@ function source({ held = false } = {}) {
     },
   });
   sender.select([1]);
+
+  // Holds the next chunk's cut until `release` is called; `entered` resolves once it is held.
+  function holdCut() {
+    const entered = Promise.withResolvers<void>();
+    const open = Promise.withResolvers<void>();
+
+    at.cutting = async () => {
+      at.cutting = () => undefined;
+      entered.resolve();
+      await open.promise;
+    };
+
+    return { entered: entered.promise, release: () => open.resolve() };
+  }
 
   // Lets the stream take chunks from now on.
   function release() {
@@ -103,6 +117,7 @@ function source({ held = false } = {}) {
     heard,
     until,
     readied: readies.until,
+    holdCut,
     release,
     cut,
     link,
@@ -237,6 +252,54 @@ test("a peer whose last link closed is sent nothing it asked for", async () => {
   expect(s.at.asked).toEqual(["2:0", "1:0", "0:0"]);
 });
 
+test("a cancel while its chunk is cut drops it, and others' or another chunk's don't", async () => {
+  const s = source({ held: true });
+  s.cut(2);
+  const bob = s.link("bob");
+  const carol = s.link("carol");
+  bob.send({ type: "request", track: 0, index: 0, priority: "urgent" });
+  bob.send({ type: "request", track: 0, index: 1, priority: "urgent" });
+  await s.settle();
+  const first = s.holdCut();
+  s.release();
+  await first.entered;
+  bob.send({ type: "cancel", track: 0, index: 0 });
+  await s.settle();
+  first.release();
+  const second = s.holdCut();
+  await second.entered;
+  carol.send({ type: "cancel", track: 0, index: 1 });
+  bob.send({ type: "cancel", track: 0, index: 0 });
+  await s.settle();
+  second.release();
+  await s.until(6 + 1);
+  await s.settle();
+  expect(s.at.asked.slice(0, 2)).toEqual(["0:0", "0:1"]);
+  expect(s.heard.filter((event) => !event.startsWith("live"))).toEqual(["bob deliver media/0/1"]);
+});
+
+test("a peer leaving while its chunk is cut is sent it once, on the link it asks again on", async () => {
+  const s = source({ held: true });
+  s.cut(1);
+  const bob = s.link("bob");
+  bob.send({ type: "request", track: 0, index: 0, priority: "urgent" });
+  await s.settle();
+  const cut = s.holdCut();
+  s.release();
+  await cut.entered;
+  bob.close();
+  await s.settle();
+  const again = s.link("bob", "again");
+  again.send({ type: "request", track: 0, index: 0, priority: "urgent" });
+  await s.settle();
+  cut.release();
+  await s.until(3 + 1);
+  await s.settle();
+  expect(s.at.asked).toEqual(["0:0", "0:0", "2:0", "1:0", "0:0"]);
+  expect(s.heard.filter((event) => !event.startsWith("live"))).toEqual(["again deliver media/0/0"]);
+  expect(s.at.stopped).toEqual([]);
+});
+
 test("stop ends sending, idle, waiting for the stream or cutting, and other messages are ignored", async () => {
   const s = source();
   const bob = s.link("bob");
@@ -246,7 +309,12 @@ test("stop ends sending, idle, waiting for the stream or cutting, and other mess
   await s.until(3);
   s.sender.stop();
   s.cut(1, 1);
-  bob.send({ type: "request", track: 0, index: 0, priority: "urgent" });
+
+  // Were they taken, the fifth would be answered `busy`.
+  for (const index of [0, 1, 2, 3, 4]) {
+    bob.send({ type: "request", track: 0, index, priority: "background" });
+  }
+
   await s.settle();
   await task();
   expect(s.heard).toEqual(["live 2:0", "live 1:0", "live 0:0"]);

@@ -9,7 +9,7 @@
 // bounded whatever a peer sends.
 
 import type { Catalog } from "./catalog";
-import type { ChunkSlot } from "./chunk";
+import { sameSlot, type ChunkSlot } from "./chunk";
 import { chunkAt } from "./chunk-index";
 import type { ChunkBusy, ChunkControl, ChunkGone } from "./chunk-requests";
 import type { KeyId } from "./crypto";
@@ -43,8 +43,6 @@ const ids = (tracks: Catalog["tracks"], kind: Catalog["tracks"][number]["kind"])
     .filter((t) => t.kind === kind)
     .map((t) => t.id)
     .toSorted((a, b) => a - b);
-
-const sameSlot = (a: ChunkSlot, b: ChunkSlot) => a.track === b.track && a.index === b.index;
 
 const isRequest = (peer: KeyId, slot: ChunkSlot) => (r: Request) =>
   r.peer === peer && sameSlot(r.slot, slot);
