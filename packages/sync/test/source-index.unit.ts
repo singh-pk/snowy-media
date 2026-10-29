@@ -3,14 +3,15 @@
 //
 // The source's chunk index (src/source-index.ts), in Chromium: a burst of cuts goes as one page;
 // the page still filling goes again as it grows, a full page once, and a burst across pages gives
-// each; after a reload only the last page goes again, as after a relay restart; an index out of
-// place is refused; and the pages published sign and join into every index cut.
+// each; after a reload every page past what went goes, and the last page again, as after a relay
+// restart; an index out of place is refused; and the pages published sign and join into every index cut.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import { decodeIndexPage, encodeIndexPage, joinedIndex, type IndexPage } from "../src/chunk-index";
 import { generateKeyPair } from "../src/crypto";
-import { createSourceIndex, type IndexedCut } from "../src/source-index";
+import type { IndexedCut } from "../src/source-cut";
+import { createSourceIndex } from "../src/source-index";
 
 const S = 1_000_000;
 
@@ -69,16 +70,21 @@ test("a burst across pages gives the full page, then the next, and a full page g
   ]);
 });
 
+// After a reload, with the first `published` of `count` indexes listed in pages that went.
+const reloaded = (count: number, published = count) =>
+  createSourceIndex({ kept: cuts(0, count), published });
+
 test("after a reload, or with again, only the page listing the newest index goes again", () => {
-  const reloaded = createSourceIndex(cuts(0, 66));
-  const resumed = drain(reloaded);
-  reloaded.again();
-  const restarted = drain(reloaded);
-  const full = drain(createSourceIndex(cuts(0, 64)));
-  const empty = createSourceIndex([]);
+  const reload = reloaded(66);
+  const resumed = drain(reload);
+  reload.again();
+  const restarted = drain(reload);
+  const full = drain(reloaded(64));
+  const empty = reloaded(0);
   empty.again();
   // A burst into page 1 not published yet when `again` comes: page 0 still goes, full.
-  const pending = createSourceIndex(cuts(0, 63));
+  const pending = createSourceIndex();
+  for (const c of cuts(0, 63)) pending.add(c);
   drain(pending);
   for (const c of cuts(63, 66)) pending.add(c);
   pending.again();
@@ -94,8 +100,19 @@ test("after a reload, or with again, only the page listing the newest index goes
   ]);
 });
 
+test("after a reload, every page listing an index past what went goes, from the oldest", () => {
+  // Pages up to index 50 went; 130 were cut before the reload, so pages 0 and 1 never went full.
+  const pages = drain(reloaded(130, 50));
+
+  expect(pages.map((p) => [p.page, p.bounds.length - 1])).toEqual([
+    [0, 64],
+    [1, 64],
+    [2, 2],
+  ]);
+});
+
 test("an index out of place is refused and listed nowhere", () => {
-  const index = createSourceIndex([cut(0)]);
+  const index = reloaded(1);
   drain(index);
   const thrown = [
     { ...cut(1), index: 2 },
