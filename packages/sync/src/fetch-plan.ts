@@ -218,6 +218,13 @@ function createRequests(options: FetchPlanOptions) {
     return true;
   }
 
+  function piece(slot: ChunkSlot, peer: KeyId, bytes: number) {
+    const request = out.get(chunkKey(slot));
+    if (request?.peer !== peer) return;
+    request.started = true;
+    request.arrived += bytes;
+  }
+
   function refuse(slot: ChunkSlot, peer: KeyId) {
     const key = chunkKey(slot);
     refused.set(key, (refused.get(key) ?? new Set()).add(peer));
@@ -241,6 +248,7 @@ function createRequests(options: FetchPlanOptions) {
     ask,
     cancel,
     end,
+    piece,
     refuse,
     settle,
     refuses: (key: string, peer: KeyId) => refused.get(key)?.has(peer) === true,
@@ -511,12 +519,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
     },
     playhead: clock.playhead,
     /** A piece of `bytes` of a chunk arrived from `peer`. */
-    piece(slot: ChunkSlot, peer: KeyId, bytes: number) {
-      const request = requests.out.get(chunkKey(slot));
-      if (request?.peer !== peer) return;
-      request.started = true;
-      request.arrived += bytes;
-    },
+    piece: requests.piece,
     /**
      * A chunk was stored, from `from`, or live when that is undefined: its request is done, or,
      * if another peer was asked, cancelled.
@@ -528,6 +531,15 @@ export function createFetchPlan(options: FetchPlanOptions) {
       if (from !== undefined) room.unblock(from);
       if (request?.peer === from) requests.out.delete(key);
       else if (request !== undefined) requests.cancel(key, request);
+      stale();
+    },
+    /**
+     * A chunk arrived from `peer` but wasn't stored, such as when storage is full: its request
+     * ends, as a delivery done, and the chunk is placed again.
+     */
+    dropped(peer: KeyId, slot: ChunkSlot) {
+      requests.end(peer, slot);
+      room.unblock(peer);
       stale();
     },
     /** `peer` has no room for this peer now. */

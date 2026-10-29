@@ -525,6 +525,8 @@ background (only while no urgent or ahead request is out), from the playhead to 
   | The link's `close` event, or the source going offline | Every request on that link goes back into the plan |
   | A `progress` event finds an urgent request to a forwarder that has sent no piece of it and whose expected finish passes its deadline, while the source is online with room and would finish it sooner | Cancel the forwarder request and ask the source |
   | A chunk asked at a lower priority becomes urgent | Ask the same link again, urgently, so its request moves up |
+  | A delivered chunk doesn't check out | As a `gone` reply from that peer |
+  | A delivered chunk can't be stored | The request ends, and the chunk is placed again; on `QuotaExceededError`, nothing more is placed until storage frees ([Feedback to the consumer](#feedback-to-the-consumer)) |
 
 - **Requests are cancelled explicitly** with a `cancel` message, so the sender stops sending, such as one whose chunk no interest covers any more. A forwarder that answered `gone` for a chunk isn't asked for it again until its ranges or capability record change.
 - **Duplicates can't be stored twice:** a chunk that arrives after the same key was stored is thrown away unread, and its request is cancelled.
