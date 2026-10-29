@@ -364,7 +364,7 @@ OPFS  snowy/<SessionId>/
         peers/<PeerId>     newest caps record of each known peer
         counters           this peer's caps version
         meta               this session's onEnd
-        index/<track>      the source only: every signed chunk header it has cut, in index order, each video one with its sealed size
+        index/<track>      the source only: every signed chunk header it has cut, in index order, each with its sealed size
         fingerprint        the source only: size, lastModified, SHA-256 of its file's first and last MiB
 IDB   snowy-keys / <SessionId>
         peer               this device's peer key pair (non-extractable)
@@ -445,7 +445,7 @@ Players and editors can be in the same session: interests belong to each peer.
 - The source picks its file with `showOpenFilePicker()` and keeps the `FileSystemFileHandle` in IndexedDB. It never copies the file.
 - **After a reload,** the source calls `queryPermission({ mode: "read" })` on the handle. If permission was dropped, the *Resume sharing* button calls `requestPermission()`, which needs that click.
 - Before resuming, the source checks the file against the `fingerprint` in its local store. If the size, `lastModified`, or either hash differs, the file has changed on disk, and the source refuses to resume. Resuming would sign different data under the same chunk indexes.
-- The source stores **no chunks**, only the signed header of every chunk it has cut, and the sealed size of each video chunk (`index/<track>`). The headers survive a reload, so indexes and boundaries never change and nothing is signed twice.
+- The source stores **no chunks**, only the signed header of every chunk it has cut, and the sealed size of each chunk, which the [chunk index](#chunk-index) lists for video. The headers survive a reload, so indexes and boundaries never change and nothing is signed twice.
 - **Cutting a past chunk again:** the source seeks the demuxer to the previous chunk's `startUs` (the file's start for index 0), demuxes forward, and cuts as it first did, from that chunk's keyframe, which it finds by its pts. Every chunk after it comes out as it first did, by the rules in [Demuxing and cutting chunks](#demuxing-and-cutting-chunks). Seeking one chunk early catches audio and subtitle packets stored in the file before the video keyframe.
 - Before sending a chunk cut again, the source checks its body against `bodyHash` in the stored header. On a mismatch, it replies `gone` to the requester and reports `file-changed` to its consumer, never sending a chunk that wouldn't verify. A chunk it would push live is skipped instead, and a peer that misses it asks.
 

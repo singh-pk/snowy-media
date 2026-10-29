@@ -39,16 +39,8 @@ async function packetsOf(options: ChunkRecutOptions, slot: ChunkSlot, from: From
     },
   });
 
-  const started = { now: from === undefined };
-
   for await (const [track, packet] of options.read(from?.startUs)) {
-    // Keyframes come in pts order, so one past the start before it means the start is gone.
-    if (!started.now && track === options.video && packet.keyframe) {
-      if (packet.ptsUs > from!.startUs) return undefined;
-      started.now = packet.ptsUs === from!.startUs;
-    }
-
-    cutter.packet(track, packet);
+    if (!cutter.packet(track, packet)) return undefined;
     if (found.packets) return found.packets;
   }
 
