@@ -447,7 +447,7 @@ Players and editors can be in the same session: interests belong to each peer.
 - Before resuming, the source checks the file against the `fingerprint` in its local store. If the size, `lastModified`, or either hash differs, the file has changed on disk, and the source refuses to resume. Resuming would sign different data under the same chunk indexes.
 - The source stores **no chunks**, only the signed header of every chunk it has cut, and the sealed size of each video chunk (`index/<track>`). The headers survive a reload, so indexes and boundaries never change and nothing is signed twice.
 - **Cutting a past chunk again:** the source seeks the demuxer to the previous chunk's `startUs` (the file's start for index 0), demuxes forward, and keeps the packets whose pts falls in `[startUs, endUs)`. Seeking one chunk early catches audio and subtitle packets stored in the file before the video keyframe.
-- Before sending a chunk cut again, the source checks its body against `bodyHash` in the stored header. On a mismatch, it replies `gone` to the requester and reports `file-changed` to its consumer, never sending a chunk that wouldn't verify.
+- Before sending a chunk cut again, the source checks its body against `bodyHash` in the stored header. On a mismatch, it replies `gone` to the requester and reports `file-changed` to its consumer, never sending a chunk that wouldn't verify. A chunk it would push live is skipped instead, and a peer that misses it asks.
 
 ### Demuxing and cutting chunks
 
