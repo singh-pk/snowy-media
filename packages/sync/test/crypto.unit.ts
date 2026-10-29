@@ -104,5 +104,7 @@ test("a sealed object is the size sealedSize gives for its plaintext", async () 
   const sizes = [0, 1, 1000];
   const sealed = await Promise.all(sizes.map((n) => seal(key, "media/0/0", new Uint8Array(n))));
 
-  expect(sealed.map((s) => s.byteLength)).toEqual(sizes.map(sealedSize));
+  // A 12-byte nonce, the ciphertext as long as the plaintext, then a 16-byte GCM tag.
+  expect(sealed.map((s) => s.byteLength)).toEqual([28, 29, 1028]);
+  expect(sizes.map(sealedSize)).toEqual([28, 29, 1028]);
 });

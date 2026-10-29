@@ -49,25 +49,28 @@ async function kept(options: SourceCutOptions, chunk: CutChunk) {
 /**
  * Cuts the file to its end. Resolves with how many indexes it has, or undefined when it has no
  * video keyframe, or none at `from.startUs`: it has changed. Rejects with what `read`, `keep` or
- * `indexed` throws, leaving what is kept so far for cutting to carry on from.
+ * `indexed` throws, leaving what is kept so far for cutting to carry on from, and with a
+ * `RangeError` for `tracks` the cutter refuses or a packet a chunk can't hold.
  */
 export async function cutSource(options: SourceCutOptions) {
   const { video, tracks, from } = options;
   const cut: CutChunk[] = [];
   const cutter = createChunkCutter({ video, tracks, from, cut: (chunk) => cut.push(chunk) });
-  // The last track each index's chunks come in, and the sealed size of each video chunk until then.
-  const last = tracks.at(-1) ?? video;
-  const sizes = new Map<number, number>();
+  // Each index not yet whole: how many of its tracks' chunks are kept, and its video's size.
+  const whole = new Map<number, { kept: number; bytes: number }>();
   const state = { count: (from?.index ?? -1) + 1 };
 
   async function keepCut() {
     for (let chunk = cut.shift(); chunk !== undefined; chunk = cut.shift()) {
       const bytes = await kept(options, chunk);
-      if (chunk.track === video) sizes.set(chunk.index, bytes);
-      if (chunk.track !== last) continue;
       const { index, startUs, endUs } = chunk;
-      options.indexed({ index, startUs, endUs, bytes: sizes.get(index)! });
-      sizes.delete(index);
+      const sofar = whole.get(index) ?? { kept: 0, bytes: 0 };
+      sofar.kept++;
+      if (chunk.track === video) sofar.bytes = bytes;
+      whole.set(index, sofar);
+      if (sofar.kept <= tracks.length) continue;
+      whole.delete(index);
+      options.indexed({ index, startUs, endUs, bytes: sofar.bytes });
       state.count = index + 1;
     }
   }
