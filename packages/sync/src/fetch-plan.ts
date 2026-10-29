@@ -257,6 +257,10 @@ function createRequests(options: FetchPlanOptions) {
     forgive(peer: KeyId) {
       for (const peers of refused.values()) peers.delete(peer);
     },
+    /** Cancels every request that has sent nothing yet. */
+    halt() {
+      for (const [key, request] of out) if (!request.started) cancel(key, request);
+    },
     /** Puts every request of a closed link back into the plan. */
     closed(peer: KeyId) {
       for (const [key, request] of out) if (request.peer === peer) out.delete(key);
@@ -477,8 +481,25 @@ function createClock(
   return { playheadAt, playhead, progress };
 }
 
+// Runs `work` once, in a microtask, however many times it is asked for in one task.
+function createBatch(work: () => void) {
+  const state = { queued: false };
+
+  return () => {
+    if (state.queued) return;
+    state.queued = true;
+
+    queueMicrotask(() => {
+      state.queued = false;
+      work();
+    });
+  };
+}
+
 export function createFetchPlan(options: FetchPlanOptions) {
-  const state = { stale: false, full: false };
+  const state = { full: false };
+  // Events in one task are planned once.
+  const stale = createBatch(pass);
   const requests = createRequests(options);
   const room = createRoom(options, requests.out);
   const listing = createListing(options);
@@ -490,14 +511,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
   const placer = createPlacer(options, requests, room, wants);
   const clock = createClock(options, listing, { requests, room, stale });
 
-  function stale() {
-    if (state.stale) return;
-    state.stale = true;
-    queueMicrotask(pass);
-  }
-
   function pass() {
-    state.stale = false;
     const { index, ended } = listing.read();
     wants.refresh(index.bounds, ended);
     requests.settle(wants.priorityOf);
@@ -538,8 +552,7 @@ export function createFetchPlan(options: FetchPlanOptions) {
      * ends, as a delivery done, and the chunk is placed again.
      */
     dropped(peer: KeyId, slot: ChunkSlot) {
-      requests.end(peer, slot);
-      room.unblock(peer);
+      if (requests.end(peer, slot)) room.unblock(peer);
       stale();
     },
     /** `peer` has no room for this peer now. */
@@ -575,12 +588,15 @@ export function createFetchPlan(options: FetchPlanOptions) {
       stale();
     },
     /**
-     * Storage filled, or freed by an eviction or a drop: nothing more is placed while it is full,
-     * or until an interest changes.
+     * Storage filled, or freed: nothing more is placed while full or until an interest changes,
+     * and requests that have sent nothing are cancelled. Returns whether this changed it.
      */
     storage(full: boolean) {
+      const changed = state.full !== full;
       state.full = full;
-      if (!full) stale();
+      if (full) requests.halt();
+      else stale();
+      return changed;
     },
     progress: clock.progress,
   };

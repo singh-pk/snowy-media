@@ -3,9 +3,10 @@
 //
 // A peer's chunk traffic on its links (docs/architecture.md#media-delivery). The fetch plan's
 // requests and cancels go out on the asked peer's newest link; `busy` and `gone` replies, and the
-// chunks peers deliver, go back to the plan and the store; and other peers' requests go to the
-// chunk server, answered from the store. A link that closes takes every request with that peer
-// with it, both ways, and the plan places them again.
+// chunks peers deliver, go back to the plan and the store; and other peers' requests are answered
+// from the store on the link each came on, by a chunk server per link. A link that closes puts
+// every request this peer made of its peer back into the plan, and drops the requests that came
+// on it.
 //
 // Over the relay an object goes whole: it arrives as one piece, and a cancel stops only a chunk
 // whose delivery hasn't begun.
@@ -18,34 +19,32 @@ import { createFetchPlan, type FetchPlanOptions, type LinkMeasures } from "./fet
 import type { Link } from "./link";
 
 type ChunkStore = Awaited<ReturnType<typeof openChunkStore>>;
+type ChunkServer = ReturnType<typeof createChunkServer>;
 
 export type ChunkLinksOptions = {
   /** What the fetch plan reads of the session: the source, the index, holdings and the clock. */
   plan: Omit<FetchPlanOptions, "links" | "ask" | "cancel">;
   /** The local store, which chunks peers deliver go into and requests are answered from. */
   store: Pick<ChunkStore, "put" | "get" | "has">;
+  /** A link's measures, its RTT and throughput: an object the caller keeps current. */
+  measures(link: Link): LinkMeasures;
   /**
-   * A peer's measures, its link's RTT and throughput, read when its first link opens: an object
-   * the caller keeps current as it measures the link.
+   * How many requests this peer takes on a link now, the one it is sending included, or 0 when it
+   * has no slot for that link's peer.
    */
-  measures(peer: KeyId): LinkMeasures;
+  room(link: Link): number;
   /**
-   * How many requests from `peer` this peer takes now, the one it is sending included, or 0 when
-   * it has no slot for that peer.
+   * A delivered chunk couldn't be stored: `QuotaExceededError` when storage is full, or the
+   * write's own error. Nothing more is fetched, and the requests that have sent nothing are
+   * cancelled, until the consumer frees or mends storage and calls the plan's `storage(false)`,
+   * or changes an interest. Called once each time fetching stops.
    */
-  room(peer: KeyId): number;
-  /**
-   * A delivered chunk didn't fit in storage: nothing more is fetched until the consumer frees
-   * some, then calls the plan's `storage(false)`, or changes an interest.
-   */
-  full(): void;
+  stopped(error: unknown): void;
 };
-
-const isQuota = (error: unknown) =>
-  error instanceof DOMException && error.name === "QuotaExceededError";
 
 export function createChunkLinks(options: ChunkLinksOptions) {
   const links = new Map<KeyId, Link[]>();
+  // Each linked peer's newest link's measures, which asks go on.
   const measured = new Map<KeyId, LinkMeasures>();
   const newest = (peer: KeyId) => links.get(peer)?.at(-1);
 
@@ -59,15 +58,7 @@ export function createChunkLinks(options: ChunkLinksOptions) {
       newest(peer)?.send({ type: "cancel", track: slot.track, index: slot.index }),
   });
 
-  const server = createChunkServer({
-    room: (peer) => options.room(peer),
-    holds: options.store.has,
-    read: options.store.get,
-    send: (peer, message) => newest(peer)?.send(message),
-    deliver: (peer, key, bytes) => Promise.resolve(newest(peer)?.deliver(key, bytes)),
-  });
-
-  function received(peer: KeyId, value: unknown) {
+  function received(peer: KeyId, server: ChunkServer, value: unknown) {
     const control = checkChunkControl(value);
     if (control === undefined) return;
     const slot = { track: control.track, index: control.index };
@@ -76,20 +67,20 @@ export function createChunkLinks(options: ChunkLinksOptions) {
     else server.requested(peer, control);
   }
 
-  // Stores a delivered chunk: `kept` once it is stored, or was already stored or being stored.
-  // A write that fails for another reason drops the chunk, which the plan asks for again.
+  // Stores a delivered chunk: `kept` once it is stored, `copy` for one stored or being stored
+  // already, whose own delivery ends or cancels its request, or why it couldn't be.
   async function put(key: string, sealed: Bytes) {
     try {
-      await options.store.put({ key, sealed });
-      return "kept";
+      const fresh = await options.store.put({ key, sealed });
+      return fresh ? "kept" : "copy";
     } catch (error) {
-      if (error instanceof InvalidChunkError) return "invalid";
-      return isQuota(error) ? "full" : "failed";
+      return error instanceof InvalidChunkError ? "invalid" : { error };
     }
   }
 
   // A chunk a peer delivered. One that doesn't check out counts as `gone` from that peer, so it
-  // isn't asked for that chunk again until its ranges change.
+  // isn't asked for that chunk again until its ranges change; one that couldn't be stored stops
+  // fetching, so a store that can't write doesn't fetch the same chunks again and again.
   async function object(peer: KeyId, key: string, bytes: Bytes) {
     const slot = chunkSlot(key);
     if (slot === undefined) return;
@@ -98,44 +89,46 @@ export function createChunkLinks(options: ChunkLinksOptions) {
     if (outcome === "kept") plan.stored(slot, peer);
     else if (outcome === "invalid") plan.gone(peer, slot);
     else plan.dropped(peer, slot);
-    if (outcome !== "full") return;
-    plan.storage(true);
-    options.full();
+    if (typeof outcome === "object" && plan.storage(true)) options.stopped(outcome.error);
   }
 
-  // A link closed: requests both ways with its peer go, and the plan places its own again, on the
-  // peer's other links or elsewhere.
-  function unlinked(link: Link) {
+  // Each peer's newest link is the one asked, by its measures.
+  function measure(peer: KeyId) {
+    const link = newest(peer);
+    if (link === undefined) measured.delete(peer);
+    else measured.set(peer, options.measures(link));
+  }
+
+  // A link closed: the requests that came on it go with its server, and the plan places what it
+  // asked of that peer again, on the peer's other links or elsewhere.
+  function unlinked(link: Link, server: ChunkServer) {
     const { peer } = link;
     // A link is listed from `connect` until it closes, once.
     const rest = links.get(peer)!.filter((l) => l !== link);
-
-    if (rest.length > 0) {
-      links.set(peer, rest);
-    } else {
-      links.delete(peer);
-      measured.delete(peer);
-    }
-
+    if (rest.length > 0) links.set(peer, rest);
+    else links.delete(peer);
+    measure(peer);
     server.closed(peer);
     plan.closed(peer);
   }
 
-  /** A link to a peer opened: it may be asked for chunks, and its requests are answered. */
+  /** A link to a peer opened: it may be asked for chunks, and its requests are answered on it. */
   function connect(link: Link) {
     const { peer } = link;
     const held = links.get(peer);
-
-    if (held) {
-      held.push(link);
-    } else {
-      links.set(peer, [link]);
-      measured.set(peer, options.measures(peer));
-    }
-
-    link.on("message", (value) => received(peer, value));
+    if (held) held.push(link);
+    else links.set(peer, [link]);
+    measure(peer);
+    const server = createChunkServer({
+      room: () => options.room(link),
+      holds: options.store.has,
+      read: options.store.get,
+      send: (_, message) => link.send(message),
+      deliver: (_, key, bytes) => Promise.resolve(link.deliver(key, bytes)),
+    });
+    link.on("message", (value) => received(peer, server, value));
     link.on("object", (key, bytes) => object(peer, key, bytes));
-    link.on("close", () => unlinked(link));
+    link.on("close", () => unlinked(link, server));
     plan.heard(peer);
   }
 

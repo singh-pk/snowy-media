@@ -69,7 +69,7 @@ function createGate() {
 
 // This peer, `me`, with 4 chunks of track 0 listed, the forwarders' ranges in `haves`, what each
 // linked peer heard from it, and a store that takes chunks unless `refuse` names an error for one,
-// and whose reads and writes wait while the gate is held.
+// takes one copy of a chunk at a time, and whose reads and writes wait while the gate is held.
 function peer(haves: Record<string, number[]>) {
   const net = createNetwork();
   const { heard, hear, until } = createHearing();
@@ -79,9 +79,11 @@ function peer(haves: Record<string, number[]>) {
     refuse: new Map<string, Error>(),
     heard,
     reads: [] as number[],
-    full: 0,
+    stopped: [] as unknown[],
   };
   const has = (key: string) => at.held.has(key);
+  const putting = new Set<string>();
+  const linkMeasures = new WeakMap<Link, LinkMeasures>();
 
   const links = createChunkLinks({
     plan: {
@@ -106,11 +108,18 @@ function peer(haves: Record<string, number[]>) {
     },
     store: {
       put: async ({ key, sealed }: SealedObject) => {
-        await pass();
-        const error = at.refuse.get(key);
-        if (error !== undefined) throw error;
-        at.held.set(key, sealed);
-        return true;
+        if (has(key) || putting.has(key)) return false;
+        putting.add(key);
+
+        try {
+          await pass();
+          const error = at.refuse.get(key);
+          if (error !== undefined) throw error;
+          at.held.set(key, sealed);
+          return true;
+        } finally {
+          putting.delete(key);
+        }
       },
       get: async ({ track, index }) => {
         at.reads.push(index);
@@ -119,15 +128,16 @@ function peer(haves: Record<string, number[]>) {
       },
       has: ({ track, index }) => has(`media/${track}/${index}`),
     },
-    measures: (p) => (p === "source" ? FAR : FAST),
-    room: (p) => (p === "bob" ? 2 : 0),
-    full: () => at.full++,
+    measures: (l) => linkMeasures.get(l) ?? (l.peer === "source" ? FAR : FAST),
+    room: (l) => (l.peer === "bob" ? 2 : 0),
+    stopped: (error) => at.stopped.push(error),
   });
 
   // A link from `me` to `other`, connected; returns `other`'s end, whose messages and objects
-  // `me` gets, and what `me` sends on it is heard as `other …`.
-  function link(other: string, tag = other) {
+  // `me` gets, and what `me` sends on it is heard as `tag …`; `measures` are the link's own.
+  function link(other: string, tag = other, measures?: LinkMeasures) {
     const [mine, theirs] = net.pair("me", other);
+    if (measures !== undefined) linkMeasures.set(mine, measures);
     theirs.on("message", (value) => hear(`${tag} ${spell(value)}`));
     theirs.on("object", (key) => hear(`${tag} deliver ${key}`));
     links.connect(mine);
@@ -214,7 +224,8 @@ test("a chunk that doesn't check out is gone from its sender, and one with no ro
   const fwd = p.link("fwd");
   p.link("source");
   p.at.refuse.set("media/0/0", new InvalidChunkError("truncated header"));
-  p.at.refuse.set("media/0/1", new DOMException("full", "QuotaExceededError"));
+  const quota = new DOMException("full", "QuotaExceededError");
+  p.at.refuse.set("media/0/1", quota);
   p.links.plan.want(URGENT);
   await p.quiet();
 
@@ -222,30 +233,88 @@ test("a chunk that doesn't check out is gone from its sender, and one with no ro
   await p.quiet();
   expect(p.at.heard.slice(2)).toEqual(["source request 0:0 urgent", "fwd request 0:2 urgent"]);
 
-  // A busy forwarder's delivery, though not stored, gives it room again.
+  // A busy forwarder's delivery, though not stored, gives it room again; the source's request,
+  // which has sent nothing, is cancelled.
   fwd.send({ type: "busy", track: 0, index: 2 });
   deliver(fwd, 1);
   await p.quiet();
-  expect(p.at.full).toBe(1);
-  expect(p.at.heard).toHaveLength(4);
-  // Once the consumer frees some, chunks 1 and 2 are asked for again, of the same forwarder.
+  expect(p.at.stopped).toEqual([quota]);
+  expect(p.at.heard.slice(4)).toEqual(["source cancel 0:0"]);
+
+  // Once the consumer frees some, the chunks are asked for again, chunk 0 still not of the
+  // forwarder whose copy didn't check out.
   p.at.refuse.clear();
   p.links.plan.storage(false);
   await p.quiet();
-  expect(p.at.heard.slice(4)).toEqual(["fwd request 0:1 urgent", "fwd request 0:2 urgent"]);
+  expect(p.at.heard.slice(5)).toEqual([
+    "source request 0:0 urgent",
+    "fwd request 0:1 urgent",
+    "fwd request 0:2 urgent",
+  ]);
   expect(p.at.held.size).toBe(0);
 });
 
-test("a chunk the store fails to write otherwise is asked for again", async () => {
+test("a store that fails to write stops fetching, once, until the consumer mends it", async () => {
   const p = peer({ fwd: [0, 1, 2, 3] });
   const fwd = p.link("fwd");
-  p.at.refuse.set("media/0/0", new DOMException("disk", "NotReadableError"));
+  const broken = new DOMException("disk", "NotReadableError");
+  p.at.refuse.set("media/0/0", broken);
+  p.at.refuse.set("media/0/1", broken);
   p.links.plan.want(URGENT);
   await p.quiet();
   deliver(fwd, 0);
   await p.quiet();
-  expect(p.at.full).toBe(0);
-  expect(p.at.heard.slice(2)).toEqual(["fwd request 0:0 urgent"]);
+  expect(p.at.heard.slice(2)).toEqual(["fwd cancel 0:1"]);
+  // Chunk 1 was on its way all the same, and fails too: fetching has stopped already.
+  deliver(fwd, 1);
+  await p.quiet();
+  expect(p.at.stopped).toEqual([broken]);
+  expect(p.at.heard).toHaveLength(3);
+
+  p.at.refuse.clear();
+  p.links.plan.storage(false);
+  await p.quiet();
+  expect(p.at.heard.slice(3)).toEqual(["fwd request 0:0 urgent", "fwd request 0:1 urgent"]);
+});
+
+test("a copy delivered while another is being stored cancels nothing", async () => {
+  const p = peer({ fwd: [0, 1, 2, 3] });
+  const fwd = p.link("fwd");
+  p.links.plan.want(URGENT);
+  await p.quiet();
+  // The forwarder's chunk 0 is being stored when another peer, not asked, sends it too; then
+  // that peer asks for a chunk none holds, whose `gone` comes after anything the copy prompts.
+  const other = p.link("other");
+  const gate = p.hold();
+  deliver(fwd, 0);
+  await gate.entered;
+  deliver(other, 0);
+  other.send({ type: "request", track: 0, index: 9, priority: "urgent" });
+  await p.until(3);
+  gate.release();
+  await p.quiet();
+  expect(p.at.heard.slice(2)).toEqual(["other gone 0:9", "fwd request 0:2 urgent"]);
+  expect([...p.at.held.keys()]).toEqual(["media/0/0"]);
+});
+
+test("asks go by the measures of the peer's newest link", async () => {
+  const p = peer({});
+  p.link("source", "one", FAST);
+  p.links.plan.want(URGENT);
+  await p.quiet();
+  const two = p.link("source", "two", FAR);
+  await p.quiet();
+  two.close();
+  await p.quiet();
+  // Room for 2 on the first link, 4 on the second, and 2 again once only the first is left.
+  expect(p.at.heard).toEqual([
+    "one request 0:0 urgent",
+    "one request 0:1 urgent",
+    "two request 0:2 urgent",
+    "two request 0:3 urgent",
+    "one request 0:0 urgent",
+    "one request 0:1 urgent",
+  ]);
 });
 
 test("a closed link's requests go again on the peer's other link", async () => {
@@ -302,6 +371,7 @@ test("a closed link drops the requests that came on it", async () => {
   const gate = p.hold();
   bob.send({ type: "request", track: 0, index: 5, priority: "urgent" });
   bob.send({ type: "request", track: 0, index: 6, priority: "urgent" });
+  await p.quiet();
   await gate.entered;
   bob.close();
   await p.quiet();
@@ -314,6 +384,26 @@ test("a closed link drops the requests that came on it", async () => {
   expect(p.at.reads).toEqual([5, 7]);
 });
 
+test("a request is answered on the link it came on, and only its own link's close drops it", async () => {
+  const p = peer({});
+  for (const index of [5, 6]) p.at.held.set(`media/0/${index}`, new Uint8Array([index]));
+  const one = p.link("bob", "one");
+  const two = p.link("bob", "two");
+  one.send({ type: "request", track: 0, index: 5, priority: "urgent" });
+  one.send({ type: "request", track: 0, index: 9, priority: "urgent" });
+  await p.until(2);
+  expect(p.at.heard).toEqual(["one deliver media/0/5", "one gone 0:9"]);
+
+  const gate = p.hold();
+  two.send({ type: "request", track: 0, index: 6, priority: "urgent" });
+  await gate.entered;
+  one.close();
+  await p.quiet();
+  gate.release();
+  await p.until(3);
+  expect(p.at.heard).toEqual(["one deliver media/0/5", "one gone 0:9", "two deliver media/0/6"]);
+});
+
 test("other peers' requests are answered from the store, and other messages and objects ignored", async () => {
   const p = peer({});
   p.at.held.set("media/0/5", new Uint8Array([5]));
@@ -322,7 +412,13 @@ test("other peers' requests are answered from the store, and other messages and 
   bob.send({ type: "request", track: 0, index: 7, priority: "urgent" });
   bob.send({ type: "chat-versions", versions: {} });
   bob.deliver("chat/x/1-2", new Uint8Array([1]));
+  // Carol has no slot here.
+  p.link("carol").send({ type: "request", track: 0, index: 5, priority: "urgent" });
   await p.quiet();
-  expect(p.at.heard.toSorted()).toEqual(["bob deliver media/0/5", "bob gone 0:7"]);
+  expect(p.at.heard.toSorted()).toEqual([
+    "bob deliver media/0/5",
+    "bob gone 0:7",
+    "carol busy 0:5",
+  ]);
   expect(p.at.held.size).toBe(1);
 });
