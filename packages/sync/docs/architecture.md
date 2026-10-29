@@ -455,7 +455,8 @@ Players and editors can be in the same session: interests belong to each peer.
 2. **Video:** a chunk spans at least 2 seconds and closes at the first keyframe after that. Every video chunk starts on a keyframe. Its length is bounded only by the file's keyframe interval, because cutting inside a GOP would stop chunks from decoding on their own.
 3. **Leading pictures:** packets stay in decode order with the GOP they belong to. In an open GOP, pictures after the keyframe in decode order but with a pts before `startUs` (such as RASL pictures) stay in that chunk. A peer that starts decoding at a chunk discards every frame with a pts before `startUs`.
 4. **Audio and subtitles:** for every video chunk `[startUs, endUs)`, each audio and subtitle track gets a chunk with the same index containing every packet whose `ptsUs` falls in that range. The same index means the same time range in every track. A subtitle cue that starts in one chunk and ends in a later one stays in the chunk where it starts.
-5. **Codec setup:** one `init/<track>` object per track holding the codec string, WebCodecs `description` (extradata), coded size, sample rate and channel count.
+5. **Packets stored out of place:** a file may store a track's packets after the video around them, so the source cuts an audio or subtitle chunk only once the video has closed the next chunk. A packet stored later than that, or with a pts before the first chunk, is left out. Video before the first keyframe is left out too, and the last chunk of every track ends where the latest packet ends.
+6. **Codec setup:** one `init/<track>` object per track holding the codec string, WebCodecs `description` (extradata), coded size, sample rate and channel count.
 
 ### Push order
 
