@@ -28,5 +28,6 @@
   "src/relay.ts": 90,
   "src/signed-record.ts": 100,
   "src/source-records.ts": 98,
+  "src/source-sender.ts": 100,
   "src/state-requests.ts": 100
 }

@@ -12,10 +12,10 @@
 import { expect, test } from "../../../tooling/unit";
 import { InvalidChunkError } from "../src/chunk";
 import { createChunkLinks } from "../src/chunk-links";
-import { checkChunkControl } from "../src/chunk-requests";
 import type { Bytes, SealedObject } from "../src/crypto";
 import type { LinkMeasures, Want } from "../src/fetch-plan";
 import type { Link } from "../src/link";
+import { createHearing, spell } from "./support/hearing";
 import { createNetwork } from "./support/memory-link";
 
 const SECOND = 1_000_000;
@@ -26,27 +26,6 @@ const CHUNK = 50_000;
 const FAST: LinkMeasures = { rttMs: 10, bytesPerMs: 1000 };
 const FAR: LinkMeasures = { rttMs: 1000, bytesPerMs: 1000 };
 const URGENT: Want = { tracks: [0], fromUs: 0, toUs: 8 * SECOND, priority: "urgent" };
-
-// What linked peers heard from this one, as events a test can wait for.
-function createHearing() {
-  const heard: string[] = [];
-  const waiters: { count: number; resolve: () => void }[] = [];
-
-  function hear(event: string) {
-    heard.push(event);
-    for (const waiter of waiters) if (heard.length >= waiter.count) waiter.resolve();
-  }
-
-  // Resolves once `count` events have been heard in all.
-  function until(count: number) {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    waiters.push({ count, resolve });
-    if (heard.length >= count) resolve();
-    return promise;
-  }
-
-  return { heard, hear, until };
-}
 
 // A gate the store's reads and writes pass: `hold` closes it from then on, returning a promise
 // that resolves once one waits, and `release` to open it.
@@ -152,13 +131,6 @@ function peer(haves: Record<string, number[]>) {
   }
 
   return { links, at, link, quiet, until, hold };
-}
-
-// A chunk message in a short spelling: `request 0:1 urgent`, `gone 0:5`.
-function spell(value: unknown) {
-  const message = checkChunkControl(value)!;
-  const priority = message.type === "request" ? ` ${message.priority}` : "";
-  return `${message.type} ${message.track}:${message.index}${priority}`;
 }
 
 // A peer delivering chunk `key` of track 0 to `me`.

@@ -30,6 +30,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/fetch-plan.ts` | where each chunk comes from: which link to ask, by expected finish while it has room, and what to cancel or move to the source as replies, links and deadlines change |
 | `src/have.ts` | have ranges: what a forwarder holds, sealed and checked, published once per burst of store changes, and each forwarder's newest as a peer keeps them |
 | `src/push-queue.ts` | what the source sends next: seek targets, then requests, then chunks ahead of the playhead up to the push horizon, then background requests; and its answers to peers' requests, holding at most 4 from each |
+| `src/source-sender.ts` | the source's sending: each chunk the push queue picks, live or to the peer that asked, as fast as its stream takes it, and peers' requests on its links into the queue |
 | `src/hlc.ts` | the hybrid logical clock that orders chat |
 | `src/chat.ts` | chat messages in canonical bytes, their hash chain, and signed checkpoints |
 | `src/chat-log.ts` | the chat log: shared order, gaps, version vectors, and edits, deletes and reactions applied |
