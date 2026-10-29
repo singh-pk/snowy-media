@@ -3,7 +3,8 @@
 //
 // Position keys (docs/architecture.md#anchors): fractional indexes, strings that sort between
 // their neighbours. A key is a head letter giving the integer part's length, base-62 digits, then
-// a fraction with no trailing `0`. Appending steps the integer, so keys made one by one stay short.
+// a fraction with no trailing `0`. Appending or prepending steps the integer, so keys made one by
+// one stay short; only inserting between two keys grows the fraction.
 //
 // Keys compare as strings by UTF-16 code unit (`<`), never by locale: the digits and head
 // letters are ASCII, in the order their values have.

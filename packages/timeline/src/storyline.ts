@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // A storyline's layout (docs/architecture.md#layout): items ordered by (position, id), in an AVL
-// tree whose nodes hold their subtree's total duration, so every edit and lookup is O(log n). The
-// tree's shape depends on the order items arrived in, but no result does, and nothing is random.
+// tree whose nodes hold their subtree's total duration, so an edit, an item's start or the item at
+// a time is O(log n). Its shape depends on the order items arrived in, but no result does.
 
 import type { ItemId } from "./ids";
 import type { PositionKey } from "./position";

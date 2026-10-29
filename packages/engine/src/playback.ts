@@ -121,9 +121,9 @@ function startReading(r: Reading, buffered: () => void): Promise<unknown> {
   return host.demux(message, buffered);
 }
 
-// Settled until the context stops. A pause at `stopping` (performance milliseconds) holds the
-// media time heard then until a timestamp passes it, so the clock never goes back: the last
-// timestamp is up to an audio callback old, and the frame on screen went up by it carried forward.
+// The output timestamp for the render worker (src/pcm.ts), on every animation frame once settled.
+// A pause at `stopping` (performance ms) holds the time heard then until a timestamp passes it, so
+// the clock never goes back: the last one is up to an audio callback old, and carried forward.
 function createOutputClock(context: AudioContext, clock: Clock, changed: () => void) {
   // The last output timestamp, as context minus performance milliseconds, and when; and the
   // media time heard when a pause stopped it, until a timestamp passes it.

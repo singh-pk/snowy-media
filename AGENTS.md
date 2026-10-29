@@ -76,7 +76,7 @@ What every change is held to, and what holds it. A reviewer doesn't repeat what 
 | Tests run the code they claim to: per-file coverage floors (rule 11) | `tooling/check-coverage.ts` and `tooling/check-floors.ts`, in CI |
 | A name says what a file or function holds or does: no `utils`, `helpers`, `manager`, `misc` or `common` | review |
 | A file has one job, which its Map row names | review |
-| An edit adds few comment lines: at most 15% of the code it covers, or 2, and no block longer than 3 lines (rule 7) | `tooling/lint-edited.ts`, for agents |
+| An edit adds few comment lines: at most 15% of the code it covers, or 2, and no `//` block grown past 3 lines; an export's contract goes in its `/** */` (rule 7) | `tooling/lint-edited.ts`, for agents |
 | A comment says what the code can't: a contract, a reason, a constraint or a trap; never what a name, type or the next line says, or how the code came to be | review |
 | One way per concern: errors, cleanup, events and state follow what the package already does | review |
 | Nothing written twice that the duplication check misses: a second helper, constant or type for the same thing | review |

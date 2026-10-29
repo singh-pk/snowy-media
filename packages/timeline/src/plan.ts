@@ -253,7 +253,8 @@ type Story = { item: { id: ItemId; start: number; duration: number }; placed: Pl
 
 // The transitions on the cuts after `stories`, widening the clips each side to play through them.
 // Each half shortens on its own, to the media its side has past the cut and to half the item next
-// to the cut, so two transitions on one item never meet. Of two on one cut, the first by id plays.
+// to the cut, so two transitions on one item never meet. One with no clip on either side plays
+// nothing, and of two on one cut, made at once, the first by id plays.
 function crossingsOf(
   { document, sequence, record }: Scope,
   stories: Story[],

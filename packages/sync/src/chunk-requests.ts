@@ -3,7 +3,8 @@
 //
 // The messages that ask for chunks (docs/architecture.md#serving-requests), and the forwarder's
 // side that answers them. It sends one chunk at a time on each link, the most urgent and then the
-// oldest asked first, so a seek's chunk waits for at most the one already on the wire.
+// oldest asked first, so a seek's chunk waits for at most the one already on the wire. Every field
+// from a peer is checked before it is used.
 
 import { isCount, isRecord } from "./chat";
 import { chunkKey, type ChunkSlot } from "./chunk";

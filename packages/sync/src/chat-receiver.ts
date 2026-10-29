@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Receiving chat (docs/architecture.md#chat). A batch proves itself, so one path takes them all:
-// from an author's track, from a repair reply, and this peer's own as it publishes them.
+// from an author's track, from a repair reply, and this peer's own as it publishes them. A batch
+// goes into the holdings, to answer others' repairs, only once all of it is in the local store.
 
 import { decodeBatch } from "./chat-batch";
 import type { createChatHoldings } from "./chat-holdings";

@@ -168,8 +168,9 @@ function undoOne(op: Operation, id: ItemId, docs: Documents): Operation[] | stri
 
 /**
  * `skipped` are the indexes of the operations `batch` skipped. Each operation is undone against
- * the documents as the undo's operations so far leave them, so one that a later operation of the
- * batch changed or removed is undone once that change is.
+ * the document as the undo's operations so far leave it, and compared with the batch's document
+ * as they leave it, so one that a later operation of the batch changed or removed is undone once
+ * that change is.
  */
 export function undoBatch(
   batch: Pick<Batch, "author" | "seq" | "ops">,

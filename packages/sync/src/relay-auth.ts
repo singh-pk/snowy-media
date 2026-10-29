@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Relay authorization (docs/architecture.md#authorization). The auth server keeps nothing: each
-// answer comes from the token, the dialed path and the app's `admit` alone. It is a `fetch` handler
-// on Web Crypto, so it runs wherever that does: `Bun.serve({ fetch: authServer })`, or a Worker.
+// Relay authorization (docs/architecture.md#authorization), and the server moq-relay asks through
+// `--auth-url`. It keeps nothing: each answer comes from the token, the dialed path and the app's
+// `admit` alone. It is a `fetch` handler on Web Crypto, so it runs wherever that does:
+// `Bun.serve({ fetch: authServer })`, or a Worker.
 
 import { isRecord } from "./chat";
 import { RIGHTS, readGrant, verifyGrant, type Grant, type Right } from "./grant";

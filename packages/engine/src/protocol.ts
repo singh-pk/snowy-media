@@ -21,8 +21,8 @@ export type Missing = [feature: PlatformFeature, reason: string];
 
 // After init, the render worker plays the video packets in `ring` (src/ring.ts), timed by the
 // clock in PCM ring `pcm` (src/pcm.ts), until it stops. It plays from `from` (microseconds),
-// showing only the last frame before it. A clip's play (`window`) shows frames only from `in`
-// to `out`, black around them, and its clock may start earlier, at `start`.
+// and of the frames before it shows only the last. A clip's play (`window`) shows frames only
+// from `in` to `out`, black around them, and its clock may start earlier, at `start`.
 // An error is reported once, with the play's `id`, and it stops. Until it has drawn a frame by
 // the running clock (`shown`, the last report), it reports each change in how far decoding is:
 // a quarter second or all of it (`ahead`), or no further while the media worker is blocked

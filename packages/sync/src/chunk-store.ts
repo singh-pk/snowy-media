@@ -3,8 +3,8 @@
 //
 // Media chunks in the local store (docs/architecture.md#local-store), sealed as they came so a peer
 // forwards them unchanged. Chromium writes a writable stream aside and moves it into place on
-// close, so a crash leaves a chunk whole or empty; opening removes empty and swap files, which
-// count against the quota. The store is this origin's own, so reads after a reload aren't checked.
+// close, so a crash leaves a chunk whole or empty; opening removes whatever isn't a chunk, such as
+// a swap file, which would count against the quota. The store is this origin's own, so reads after a reload aren't checked.
 
 import { chunkKey, chunkSlot, openChunk, type ChunkSlot } from "./chunk";
 import type { Bytes, SealedObject } from "./crypto";

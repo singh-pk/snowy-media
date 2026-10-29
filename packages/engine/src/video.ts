@@ -149,8 +149,8 @@ function send(o: Shared, frame: DecodedFrame) {
 
 /**
  * Uploads the latest frame due at `time` (microseconds), then the next decoded ones up to AHEAD
- * (one in a scrub). Only frames that go up are uploaded: copying a 4K frame off the GPU takes
- * milliseconds, and a scrub decodes many it never shows.
+ * (one in a scrub), so they are up before they are due; resolves once uploaded. Only frames that
+ * go up are uploaded: copying a 4K frame off the GPU takes milliseconds, and a scrub decodes many.
  */
 function prepare(o: Shared, time: number) {
   const { state, queue, decoding, uploads } = o;

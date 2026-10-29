@@ -242,6 +242,7 @@ function undoState(state: State, author: KeyId) {
   return { mine, undone, isUndo };
 }
 
+// A batch of only reverts and branch operations is passed over: reverting to before it undoes it.
 function undoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone } = undoState(state, author);
   const found = mine.find(
@@ -255,6 +256,7 @@ function undoable(state: State, author: KeyId): BatchRef | undefined {
   return found === undefined ? undefined : { author, seq: found.batch.seq };
 }
 
+// None once the author edits after their undo; a redo is an undo of an undo, so never redone.
 function redoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone, isUndo } = undoState(state, author);
 

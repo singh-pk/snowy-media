@@ -56,9 +56,10 @@ export interface Engine {
    */
   changed(): Promise<void>;
   /**
-   * Plays the open file's first video and audio track, or the composition's clip, from where it
-   * is, once the browser allows audio (after a user gesture), unless a pause comes first; resolves
-   * once audio is heard. Rejects if playing has failed, or with an AbortError if an open stops it.
+   * Plays the open file's first video and first audio track, or the composition's clip, from
+   * where it is, once the browser allows audio (after a user gesture), unless a pause comes first;
+   * resolves once audio is heard. Rejects if playing has failed, or with an AbortError if an open
+   * stops it while it starts.
    */
   play(): Promise<void>;
   /** Pauses; `play` goes on from here. Rejects if playing has failed. */
@@ -82,6 +83,7 @@ export interface Engine {
   fastSeek(time: number): Promise<void>;
   /** The time, in seconds, of what is being heard and seen now: the file's or the composition's. */
   readonly currentTime: number;
+  /** Stops the engine's workers. */
   close(): void;
 }
 
