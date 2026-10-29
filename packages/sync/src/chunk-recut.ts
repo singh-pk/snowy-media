@@ -11,8 +11,9 @@ import { createChunkCutter } from "./chunk-cutter";
 import { seal, type Bytes } from "./crypto";
 
 export type ChunkRecutOptions = {
-  /** The tracks the file was first cut with: its video track and the others. */
+  /** The video track the file was first cut with. */
   video: number;
+  /** The other tracks the file was first cut with. */
   tracks: number[];
   content: CryptoKey;
   /** The header signed when a chunk was first cut, or undefined for one not cut yet. */
@@ -20,7 +21,7 @@ export type ChunkRecutOptions = {
   /**
    * The file's packets in file order, as `[track, packet]`, from the demuxer sought to or before
    * `fromUs`, or from the file's start when it is undefined. Reading stops, through the
-   * iterator's `return`, once the chunk is cut.
+   * iterator's `return`, once the chunk is cut or can't be.
    */
   read(fromUs: number | undefined): AsyncIterable<readonly [number, Packet]>;
 };
@@ -38,7 +39,15 @@ async function packetsOf(options: ChunkRecutOptions, slot: ChunkSlot, from: From
     },
   });
 
+  const started = { now: from === undefined };
+
   for await (const [track, packet] of options.read(from?.startUs)) {
+    // Keyframes come in pts order, so one past the start before it means the start is gone.
+    if (!started.now && track === options.video && packet.keyframe) {
+      if (packet.ptsUs > from!.startUs) return undefined;
+      started.now = packet.ptsUs === from!.startUs;
+    }
+
     cutter.packet(track, packet);
     if (found.packets) return found.packets;
   }
@@ -55,10 +64,10 @@ async function packetsOf(options: ChunkRecutOptions, slot: ChunkSlot, from: From
 export async function recutChunk(options: ChunkRecutOptions, slot: ChunkSlot) {
   const { track, index } = slot;
   const header = options.header(slot);
-  // Chunk 0 is cut from the file's start, any other from the keyframe starting the one before.
-  const before = index === 0 ? undefined : options.header({ track, index: index - 1 });
-  if (header === undefined || (index > 0 && before === undefined))
-    throw new RangeError(`${chunkKey(slot)} isn't cut yet`);
+  if (header === undefined) throw new RangeError(`${chunkKey(slot)} isn't cut yet`);
+  const prior = { track, index: index - 1 };
+  const before = index === 0 ? undefined : options.header(prior);
+  if (index > 0 && before === undefined) throw new RangeError(`${chunkKey(prior)} isn't cut yet`);
   const from = before && { index: index - 1, startUs: chunkStartUs(before) };
   const packets = await packetsOf(options, slot, from);
   if (packets === undefined) return undefined;

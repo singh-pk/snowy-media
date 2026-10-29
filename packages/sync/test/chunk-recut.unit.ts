@@ -36,13 +36,14 @@ function at(ptsS: number, keyframe = false, tag = 0): Packet {
 }
 
 // Video keyframes every 1.5 s, so a chunk spans two GOPs and some keyframes start none, with a
-// frame between; audio every 0.5 s, stored 0.6 s after the video around it.
+// frame between; audio every 0.5 s, each packet a keyframe as audio's are, stored 0.6 s ahead
+// of the video around it.
 function makeFile() {
   const file: Read[] = [];
 
   for (let i = 0; i < 12; i++) {
     file.push([VIDEO, at(i * 1.5, true, i)], [VIDEO, at(i * 1.5 + 0.75, false, i)]);
-    for (const a of [0, 0.5, 1]) if (i * 1.5 + a >= 0.6) file.push([AUDIO, at(i * 1.5 + a - 0.6)]);
+    for (const a of [0, 0.5, 1]) file.push([AUDIO, at(i * 1.5 + a + 0.6, true)]);
   }
 
   return file;
@@ -80,7 +81,7 @@ function demuxer(packets: readonly Read[], early = false) {
         yield next;
       }
     } finally {
-      seen.stopped = true;
+      seen.stopped = seen.reads < packets.length - start;
     }
   }
 
@@ -102,7 +103,7 @@ test("every chunk cut again is the bytes first encoded, from an exact seek or an
     const [, track, index] = key.split("/").map(Number);
     return { track: track!, index: index! };
   });
-  // Six chunks of each track: [0, 3), [3, 6) … [15, 17.29) s.
+  // Six chunks of each track: [0, 3), [3, 6) … [15, 18.14) s.
   expect(slots.length).toBe(12);
 
   for (const early of [false, true])
@@ -153,9 +154,13 @@ test("a file whose packets changed, or that ends early, gives nothing for the ch
 test("a file whose chunk before has no keyframe at its start any more gives nothing", async () => {
   const moved = file.filter(([track, p]) => !(track === VIDEO && p.ptsUs === 3 * S));
 
-  const sealed = await recut(moved, { track: AUDIO, index: 2 }).sealed;
+  const { sealed, seen } = recut(moved, { track: AUDIO, index: 2 });
+  const result = await sealed;
 
-  expect(sealed).toBeUndefined();
+  expect(result).toBeUndefined();
+  // From the keyframe at 1.5 s, two GOPs of video and audio, up to the keyframe at 4.5 s.
+  expect(seen.reads).toBe(10);
+  expect(seen.stopped).toBe(true);
 });
 
 // Headers as a source holding only `key`'s would give them.
@@ -173,7 +178,7 @@ test("a chunk, or the chunk before it, not cut yet is refused", async () => {
     recutChunk({ ...options, header: only("media/0/2") }, { track: VIDEO, index: 2 }),
   );
 
-  expect(missing).toBeInstanceOf(RangeError);
-  expect(before).toBeInstanceOf(RangeError);
+  expect(missing).toEqual(new RangeError("media/0/1 isn't cut yet"));
+  expect(before).toEqual(new RangeError("media/0/1 isn't cut yet"));
   expect(seen.reads).toBe(0);
 });

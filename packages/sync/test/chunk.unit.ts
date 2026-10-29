@@ -272,7 +272,10 @@ test("packets cut again join the header first signed only when they are its body
     joinChunk(header, [keyframe!, p!]),
   ]);
 
+  const short = await rejection(joinChunk(header.subarray(0, 100), chunk.packets));
+
   expect(joined).toEqual([encoded, encoded, undefined, undefined, undefined]);
+  expect(short).toBeInstanceOf(RangeError);
 });
 
 test("a header gives the start it signed", async () => {

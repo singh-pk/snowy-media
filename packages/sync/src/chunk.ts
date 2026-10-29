@@ -65,8 +65,7 @@ async function sha256(data: Bytes) {
   return new Uint8Array(hash);
 }
 
-// Whether `body` is the one `header` signed.
-async function signedBody(header: Bytes, body: Bytes) {
+async function signsBody(header: Bytes, body: Bytes) {
   const bodyHash = await sha256(body);
   const signedHash = header.subarray(59, SIGNED);
   return bodyHash.every((b, i) => b === signedHash[i]);
@@ -206,7 +205,7 @@ export async function decodeChunk(
   if (track !== slot.track || index !== slot.index) throw new InvalidChunkError("another slot");
 
   const body = bytes.subarray(HEADER);
-  const matches = await signedBody(bytes, body);
+  const matches = await signsBody(bytes, body);
   if (!matches) throw new InvalidChunkError("bad body hash");
 
   return {
@@ -222,11 +221,13 @@ export async function decodeChunk(
 /**
  * A chunk's packets, cut again, joined to the header `encodeChunk` signed when the chunk was
  * first cut, its first `HEADER` bytes: or undefined when they aren't the body that header
- * signed, such as from a file changed since. Nothing is signed again.
+ * signed, such as from a file changed since. Nothing is signed again. Throws a `RangeError` for
+ * a header shorter than `HEADER`.
  */
 export async function joinChunk(header: Bytes, packets: Packet[]) {
+  if (header.byteLength < HEADER) throw new RangeError(`a chunk header is ${HEADER} bytes`);
   const body = encodeBody(packets);
-  const matches = await signedBody(header, body);
+  const matches = await signsBody(header, body);
   if (!matches) return undefined;
   const bytes = new Uint8Array(HEADER + body.byteLength);
   bytes.set(header.subarray(0, HEADER));
