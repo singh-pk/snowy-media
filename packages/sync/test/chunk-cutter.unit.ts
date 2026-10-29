@@ -89,8 +89,8 @@ test("a file with no video keyframe cuts nothing", () => {
   const { packet, end, cut } = cutter();
   packet(VIDEO, at(0));
   packet(AUDIO, at(0));
-  end();
 
+  expect(end()).toBe(false);
   expect(cut).toEqual([]);
 });
 
@@ -192,6 +192,7 @@ test("the end cuts once, and packets after it or of tracks not cut are left out"
 test("another track's packet read before the keyframe starting the chunk before its own is left out", () => {
   const { packet, end, cut } = cutter([AUDIO]);
   packet(AUDIO, at(4.5));
+  packet(AUDIO, at(2.6));
   packet(VIDEO, key(0));
   packet(AUDIO, at(2.5));
   packet(VIDEO, key(2));
@@ -217,6 +218,8 @@ const file: Array<[number, Packet]> = [
   [AUDIO, at(1)],
   [VIDEO, key(1.5)],
   [AUDIO, at(2.4)],
+  // Read before the keyframe that starts chunk 1, so left out of chunk 2.
+  [AUDIO, at(5)],
   [VIDEO, key(2.2)],
   [VIDEO, at(2.1)],
   [AUDIO, at(2)],
@@ -263,15 +266,16 @@ test("chunks cut again from a seek to or before a chunk's keyframe come out as t
   const seeks = [
     { index: 0, startUs: 0, seek: 0 },
     { index: 1, startUs: 2.2 * S, seek: 4 },
-    { index: 2, startUs: 4.5 * S, seek: 12 },
-    { index: 3, startUs: 6.5 * S, seek: 16 },
+    { index: 2, startUs: 4.5 * S, seek: 13 },
+    { index: 2, startUs: 4.5 * S, seek: 4 },
+    { index: 3, startUs: 6.5 * S, seek: 17 },
   ];
 
   for (const { index, startUs, seek } of seeks) {
     const again = cutFile({ index, startUs }, seek);
     const expected = firstCut.filter((c) => {
-      const [track, n] = c.split(" ")[0]!.split(":").map(Number);
-      return n! > index || (n === index && track === VIDEO);
+      const n = Number(c.split(" ")[0]!.split(":")[1]);
+      return n > index;
     });
     expect(again).toEqual(expected);
   }
@@ -286,4 +290,13 @@ test("tracks naming the video track, or one track twice, are refused", () => {
   expect(() => createChunkCutter({ video: VIDEO, tracks: [AUDIO, AUDIO], cut: ignore })).toThrow(
     RangeError,
   );
+});
+
+test("cutting again from a keyframe that never comes cuts nothing, and says so", () => {
+  const { packet, end, cut } = cutter([AUDIO], { index: 1, startUs: 2 * S });
+  for (const p of [key(0), at(1), key(3), at(4)]) packet(p.keyframe ? VIDEO : AUDIO, p);
+
+  expect(end()).toBe(false);
+  expect(end()).toBe(true);
+  expect(cut).toEqual([]);
 });

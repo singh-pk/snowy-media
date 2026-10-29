@@ -27,7 +27,7 @@ export type ChunkCutterOptions = {
   /**
    * To cut past chunks again, from the demuxer sought to or before the video keyframe at
    * `startUs`, which starts chunk `index`: cutting starts at that keyframe, and every chunk after
-   * `index` comes out as it first did. Chunk `index` itself comes for video alone.
+   * `index` comes out as it first did. Chunk `index` itself isn't cut.
    */
   from?: { index: number; startUs: number };
 };
@@ -36,7 +36,7 @@ export type ChunkCutterOptions = {
 // the first, before the first keyframe.
 type Held = { packet: Packet; read: number };
 
-// Where a packet ends: one with no duration still lasts until the next microsecond.
+// One with no duration still lasts until the next microsecond.
 const ends = ({ ptsUs, durationUs }: Packet) => ptsUs + Math.max(durationUs, 1);
 
 export function createChunkCutter(options: ChunkCutterOptions) {
@@ -46,18 +46,17 @@ export function createChunkCutter(options: ChunkCutterOptions) {
     throw new RangeError("tracks must name each track once, and not the video track");
 
   const first = from?.index ?? 0;
-  // The start of each video chunk from `first`, the open one's last.
-  const bounds: number[] = [];
+  const starts: number[] = [];
   const held = new Map(tracks.map((track) => [track, [] as Held[]]));
   const state = { video: [] as Packet[], ended: false };
-  const open = () => first + bounds.length - 1;
+  const open = () => first + starts.length - 1;
 
   // Chunk `index` of another track takes what was read from the keyframe starting the chunk
   // before it, where a chunk cut again starts reading, or from the file's start for chunk 0: what
   // was read before that goes once the chunk before is cut.
   function cutOthers(index: number) {
-    const startUs = bounds[index - first]!;
-    const endUs = bounds[index + 1 - first]!;
+    const startUs = starts[index - first]!;
+    const endUs = starts[index + 1 - first]!;
 
     for (const [track, packets] of held) {
       const kept: Packet[] = [];
@@ -79,20 +78,21 @@ export function createChunkCutter(options: ChunkCutterOptions) {
   // chunk is cut only once a whole chunk more of video has gone by.
   function closeVideo(endUs: number) {
     const index = open();
-    const startUs = bounds.at(-1)!;
-    bounds.push(endUs);
-    options.cut({ track: video, index, startUs, endUs, packets: state.video });
+    const startUs = starts.at(-1)!;
+    starts.push(endUs);
+    if (from === undefined || index > first)
+      options.cut({ track: video, index, startUs, endUs, packets: state.video });
     state.video = [];
     if (index > first) cutOthers(index - 1);
   }
 
   function videoPacket(read: Packet) {
-    const startUs = bounds.at(-1);
+    const startUs = starts.at(-1);
 
     // What comes before the first keyframe can't be decoded.
     if (startUs === undefined) {
       if (!read.keyframe || (from !== undefined && read.ptsUs !== from.startUs)) return;
-      bounds.push(read.ptsUs);
+      starts.push(read.ptsUs);
     } else if (read.keyframe && read.ptsUs >= startUs + MIN_CHUNK_US) closeVideo(read.ptsUs);
 
     state.video.push(read);
@@ -106,13 +106,14 @@ export function createChunkCutter(options: ChunkCutterOptions) {
   function packet(track: number, read: Packet) {
     if (state.ended) return;
     if (track === video) videoPacket(read);
-    else held.get(track)?.push({ packet: read, read: open() });
+    // Read before cutting starts, it could only be in chunk `from.index`, which isn't cut.
+    else if (from === undefined || starts.length > 0)
+      held.get(track)?.push({ packet: read, read: open() });
   }
 
-  // The end of the last chunk: of the latest packet in it.
   function lastEnd() {
     const last = open();
-    const startUs = bounds.at(-1)!;
+    const startUs = starts.at(-1)!;
     const latest = { us: 0 };
     for (const one of state.video) latest.us = Math.max(latest.us, ends(one));
 
@@ -125,15 +126,17 @@ export function createChunkCutter(options: ChunkCutterOptions) {
 
   /**
    * The file has ended: the last chunk of every track is cut, ending where the latest packet in
-   * it ends. Nothing is cut from a file with no video keyframe.
+   * it ends. Returns false when no video keyframe came, or none at `from.startUs`, so nothing
+   * was cut; true otherwise, and on every call after the first.
    */
   function end() {
-    if (state.ended) return;
+    if (state.ended) return true;
     state.ended = true;
-    if (bounds.length === 0) return;
+    if (starts.length === 0) return false;
     const last = open();
     closeVideo(lastEnd());
     cutOthers(last);
+    return true;
   }
 
   return { packet, end };
