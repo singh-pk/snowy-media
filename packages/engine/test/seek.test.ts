@@ -313,6 +313,41 @@ test("clears the canvas when another file opens", async () => {
   expect(got.shown).toBe(frameAt(v, 1e6));
 }, 60_000);
 
+// Paused seeks into SCRUBBED, in seconds: the first draws the page's first frame, which a GPU
+// that compiles a draw on its first run, as one in software does, is slow to show. Then a scrub
+// on to SCRUB_AGAIN, with no keyframe between.
+const SHOWN_AT = [1.7, SCRUB_BACK];
+
+test("a paused seek or scrub resolves with its frame on screen, the page's first too", async () => {
+  const v = expected[SCRUBBED]?.video;
+  if (!v) throw new Error(`no video in ${SCRUBBED}`);
+  const got = await inPage(server.url.href, (tab) =>
+    tab.evaluate(
+      async ({ entry, page, file, times, again }) => {
+        const support: typeof PageSupport = await import(page);
+        const { player, canvas } = await support.openEngine(entry, file);
+        const reader = new OffscreenCanvas(canvas.width, canvas.height).getContext("2d");
+        if (!reader) throw new Error("no 2D context");
+        const shown: number[] = [];
+
+        for (const time of times) {
+          await player.seek(time);
+          // Read as it resolves, before another animation frame.
+          shown.push(support.frameOnScreen(canvas, reader));
+        }
+
+        await player.fastSeek(again);
+        shown.push(support.frameOnScreen(canvas, reader));
+        player.close();
+        return shown;
+      },
+      { entry: ENTRY, page: PAGE, file: SCRUBBED, times: SHOWN_AT, again: SCRUB_AGAIN },
+    ),
+  );
+
+  expect(got).toEqual([...SHOWN_AT, SCRUB_AGAIN].map((time) => frameAt(v, time * 1e6)));
+}, 60_000);
+
 test("a seek after another file opens leaves it paused", async () => {
   const got = await inPage(
     server.url.href,

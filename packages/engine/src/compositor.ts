@@ -284,6 +284,8 @@ export function createCompositor(
     upload,
     draw,
     clear,
+    /** Resolves once the GPU has done the work sent to it so far. */
+    done: () => device.queue.onSubmittedWorkDone(),
     /** Resolves once the last measurement started has ended, for the tests. */
     measured: measurer.done,
   };
