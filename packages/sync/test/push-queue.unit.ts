@@ -8,12 +8,15 @@
 // selected late joins from the playhead, and one deselected stops; chunks of any length are found
 // by time, each with a length and starting where the last ended; and requests are cancelled,
 // dropped with their peer, queued once, refused when they name no chunk, and handed back for
-// `gone` once the last chunk comes before them; at most 4 wait from each peer; and a peer's
-// `request` and `cancel` messages are answered `busy` or `gone` where they must be.
+// `gone` once the last chunk comes before them; a repeat takes the newer priority and keeps when
+// it was first asked; and at most 4 wait from each peer, an urgent one beyond them taking the place
+// of the peer's newest background one, with `busy` for what has no room.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import type { Catalog } from "../src/catalog";
+import type { ChunkSlot } from "../src/chunk";
+import type { FetchPriority } from "../src/fetch-plan";
 import { createPushQueue, PUSH_HORIZON_US, SOURCE_ROOM, type Send } from "../src/push-queue";
 
 const tracks: Catalog["tracks"] = [
@@ -24,23 +27,35 @@ const tracks: Catalog["tracks"] = [
 ];
 const SECOND = 1_000_000;
 
-// A queue with `count` chunks cut, 2 s each, English audio selected, and how often it said
-// something was queued.
+type Queue = ReturnType<typeof createPushQueue>;
+
+// A queue with `count` chunks cut, 2 s each, English audio selected, how often it said something
+// was queued, and its answers to peers, in a short spelling: `busy bob 0:1`.
 function queue(count: number) {
   const queued = { count: 0 };
-  const q = createPushQueue({ tracks, onQueued: () => queued.count++ });
+  const answers: string[] = [];
+  const q = createPushQueue({
+    tracks,
+    send: (peer, { type, track, index }) => answers.push(`${type} ${peer} ${track}:${index}`),
+    onQueued: () => queued.count++,
+  });
   q.select([1]);
   for (let index = 0; index < count; index++) cut(q, index);
-  return { q, queued };
+  return { q, queued, answers };
 }
 
 // Cuts the next chunk, `index`, 2 s long.
-function cut(q: ReturnType<typeof createPushQueue>, index: number) {
+function cut(q: Queue, index: number) {
   q.cut(index * 2 * SECOND, (index + 1) * 2 * SECOND);
 }
 
+// Asks for a chunk as a peer's `request` message does.
+function ask(q: Queue, peer: string, slot: ChunkSlot, priority: FetchPriority = "urgent") {
+  q.requested(peer, { type: "request", ...slot, priority });
+}
+
 // Takes up to `count` sends, in a short spelling: `track:index`, or `peer>track:index`.
-function drain(q: ReturnType<typeof createPushQueue>, count = Infinity) {
+function drain(q: Queue, count = Infinity) {
   const taken: string[] = [];
 
   for (let send: Send | undefined = q.next(); send !== undefined; send = q.next()) {
@@ -100,7 +115,7 @@ test("what isn't cut waits, and a source that found nothing hears once when it c
 
 test("a seek target's chunks go first, then chunks peers asked for, then the rest from the target", () => {
   const { q } = queue(20);
-  q.request("bob", { track: 0, index: 3 });
+  ask(q, "bob", { track: 0, index: 3 });
   q.seek(21 * SECOND);
   expect(drain(q, 6)).toEqual(["3:10", "1:10", "0:10", "bob>0:3", "3:11", "1:11"]);
 });
@@ -108,8 +123,8 @@ test("a seek target's chunks go first, then chunks peers asked for, then the res
 test("a chunk asked for goes to that peer even after it went live, once it is cut", () => {
   const { q } = queue(3);
   drain(q);
-  q.request("bob", { track: 1, index: 0 });
-  q.request("carol", { track: 0, index: 5 });
+  ask(q, "bob", { track: 1, index: 0 });
+  ask(q, "carol", { track: 0, index: 5 });
   expect(drain(q)).toEqual(["bob>1:0"]);
   for (let index = 3; index <= 5; index++) cut(q, index);
   expect(drain(q, 1)).toEqual(["carol>0:5"]);
@@ -127,10 +142,10 @@ test("a seek past what is cut waits for the cutting to reach it", () => {
 
 test("background requests go only when nothing else can", () => {
   const { q } = queue(2);
-  q.request("dave", { track: 2, index: 0 }, true);
+  ask(q, "dave", { track: 2, index: 0 }, "background");
   expect(drain(q)).toEqual(["3:0", "1:0", "0:0", "3:1", "1:1", "0:1", "dave>2:0"]);
-  q.request("dave", { track: 2, index: 1 }, true);
-  q.request("erin", { track: 0, index: 0 });
+  ask(q, "dave", { track: 2, index: 1 }, "background");
+  ask(q, "erin", { track: 0, index: 0 });
   expect(drain(q)).toEqual(["erin>0:0", "dave>2:1"]);
 });
 
@@ -143,30 +158,26 @@ test("an audio track selected late joins from the playhead", () => {
 });
 
 test("requests are cancelled, dropped with their peer, queued once, and refused past the last chunk", () => {
-  const { q } = queue(3);
+  const { q, answers } = queue(3);
   q.end();
   drain(q);
-  q.request("bob", { track: 0, index: 1 });
-  q.request("bob", { track: 0, index: 1 }, true);
-  q.request("bob", { track: 0, index: 1 });
-  q.request("bob", { track: 0, index: 2 });
-  q.request("carol", { track: 0, index: 0 }, true);
-  q.request("carol", { track: 0, index: 0 });
-  q.request("dave", { track: 3, index: 2 });
-  q.cancel("bob", { track: 0, index: 2 });
+  ask(q, "bob", { track: 0, index: 1 });
+  ask(q, "bob", { track: 0, index: 1 }, "background");
+  ask(q, "bob", { track: 0, index: 1 });
+  ask(q, "bob", { track: 0, index: 2 });
+  ask(q, "carol", { track: 0, index: 0 }, "background");
+  ask(q, "carol", { track: 0, index: 0 });
+  ask(q, "dave", { track: 3, index: 2 });
+  q.requested("bob", { type: "cancel", track: 0, index: 2 });
   q.left("dave");
-  const refused = [
-    q.request("bob", { track: 0, index: 3 }),
-    q.request("bob", { track: 9, index: 0 }),
-    q.request("bob", { track: 0, index: -1 }),
-    q.request("bob", { track: 0, index: 0.5 }),
-  ];
-  expect(refused).toEqual(["gone", "gone", "gone", "gone"]);
+  ask(q, "bob", { track: 0, index: 3 });
+  ask(q, "bob", { track: 9, index: 0 });
+  expect(answers).toEqual(["gone bob 0:3", "gone bob 9:0"]);
   expect(drain(q)).toEqual(["bob>0:1", "carol>0:0"]);
 });
 
 test("chunks of any length, from any start, are found by time", () => {
-  const q = createPushQueue({ tracks: tracks.filter((t) => t.kind === "video") });
+  const q = createPushQueue({ tracks: tracks.filter((t) => t.kind === "video"), send: () => {} });
   const starts = [5, 7, 12, 13, 21];
   for (const [i, s] of starts.entries()) q.cut(s * SECOND, (starts[i + 1] ?? 30) * SECOND);
   // Before the first chunk, it covers the playhead.
@@ -189,7 +200,7 @@ test("past the last chunk, once every chunk is cut, the last one covers the play
 test("a seek into what went live sends nothing again, and requests go next", () => {
   const { q } = queue(10);
   drain(q);
-  q.request("bob", { track: 1, index: 9 });
+  ask(q, "bob", { track: 1, index: 9 });
   q.seek(4 * SECOND);
   expect(drain(q)).toEqual(["bob>1:9"]);
 });
@@ -201,16 +212,13 @@ test("a deselected audio track's chunks stop", () => {
 });
 
 test("ending answers the requests queued past the last chunk", () => {
-  const { q } = queue(3);
+  const { q, answers } = queue(3);
   drain(q);
-  q.request("bob", { track: 0, index: 5 });
-  q.request("carol", { track: 0, index: 1 });
-  q.request("dave", { track: 1, index: 3 }, true);
-  const gone = q.end();
-  expect(gone).toEqual([
-    { peer: "bob", slot: { track: 0, index: 5 } },
-    { peer: "dave", slot: { track: 1, index: 3 } },
-  ]);
+  ask(q, "bob", { track: 0, index: 5 });
+  ask(q, "carol", { track: 0, index: 1 });
+  ask(q, "dave", { track: 1, index: 3 }, "background");
+  q.end();
+  expect(answers).toEqual(["gone bob 0:5", "gone dave 1:3"]);
   expect(drain(q)).toEqual(["carol>0:1"]);
 });
 
@@ -221,64 +229,78 @@ test("a chunk with no length, or that doesn't start where the last one ended, is
   expect(drain(q)).toEqual(["3:0", "1:0", "0:0", "3:1", "1:1", "0:1"]);
 });
 
-test("the source holds 4 requests from each peer, answers busy beyond, and a repeat takes no room", () => {
-  // The design's figure, independent of the code.
-  expect(SOURCE_ROOM).toBe(4);
+test("a repeat takes the newer priority, and keeps its place by when it was first asked", () => {
   const { q } = queue(10);
   drain(q);
-  const answers = [
-    q.request("bob", { track: 0, index: 0 }, true),
-    q.request("bob", { track: 0, index: 1 }),
-    q.request("bob", { track: 0, index: 2 }),
-    q.request("bob", { track: 0, index: 3 }, true),
-    q.request("bob", { track: 0, index: 4 }),
-    // Repeats at full room, one moving up from the background.
-    q.request("bob", { track: 0, index: 0 }),
-    q.request("bob", { track: 0, index: 3 }, true),
-    q.request("bob", { track: 0, index: 1 }, true),
-    // Another peer has its own room.
-    q.request("carol", { track: 0, index: 4 }),
-  ];
-  const queued = "queued";
-  expect(answers).toEqual([queued, queued, queued, queued, "busy", queued, queued, queued, queued]);
-
-  // A chunk sent, or a request cancelled, makes room for another.
-  expect(drain(q, 1)).toEqual(["bob>0:1"]);
-  expect(q.request("bob", { track: 0, index: 4 })).toBe(queued);
-  expect(q.request("bob", { track: 0, index: 5 })).toBe("busy");
-  q.cancel("bob", { track: 0, index: 2 });
-  expect(q.request("bob", { track: 0, index: 5 }, true)).toBe(queued);
-  expect(drain(q)).toEqual(["bob>0:0", "carol>0:4", "bob>0:4", "bob>0:3", "bob>0:5"]);
+  ask(q, "bob", { track: 0, index: 0 });
+  ask(q, "bob", { track: 0, index: 1 }, "background");
+  ask(q, "carol", { track: 0, index: 2 });
+  ask(q, "bob", { track: 0, index: 3 }, "background");
+  ask(q, "bob", { track: 0, index: 3 });
+  // Down to the background, ahead of 1, asked after it; then 1 up, ahead of carol's 2.
+  ask(q, "bob", { track: 0, index: 0 }, "background");
+  ask(q, "bob", { track: 0, index: 1 });
+  ask(q, "carol", { track: 0, index: 2 });
+  expect(drain(q)).toEqual(["bob>0:1", "carol>0:2", "bob>0:3", "bob>0:0"]);
 });
 
-test("a peer's request and cancel messages are answered busy or gone, and others change nothing", () => {
-  const { q } = queue(3);
+test("the source holds 4 requests from each peer, and an urgent one beyond takes a background one's place", () => {
+  // The design's figure, independent of the code.
+  expect(SOURCE_ROOM).toBe(4);
+  const { q, answers } = queue(10);
+  drain(q);
+  ask(q, "bob", { track: 0, index: 0 }, "background");
+  ask(q, "bob", { track: 0, index: 1 });
+  ask(q, "bob", { track: 0, index: 2 });
+  ask(q, "bob", { track: 0, index: 3 }, "background");
+  ask(q, "bob", { track: 0, index: 4 }, "background");
+  // Repeats at full room, either way, take no more room; another peer has its own.
+  ask(q, "bob", { track: 0, index: 0 });
+  ask(q, "bob", { track: 0, index: 3 }, "background");
+  ask(q, "bob", { track: 0, index: 1 }, "background");
+  ask(q, "carol", { track: 0, index: 4 });
+  ask(q, "carol", { track: 0, index: 9 }, "background");
+  expect(answers).toEqual(["busy bob 0:4"]);
+
+  // Urgent requests beyond the room take the places of bob's 3, then 1, newest first, never
+  // carol's; then none is left.
+  ask(q, "bob", { track: 0, index: 4 });
+  ask(q, "bob", { track: 0, index: 5 });
+  ask(q, "bob", { track: 0, index: 6 });
+  ask(q, "bob", { track: 0, index: 7 }, "background");
+  expect(answers).toEqual([
+    "busy bob 0:4",
+    "busy bob 0:3",
+    "busy bob 0:1",
+    "busy bob 0:6",
+    "busy bob 0:7",
+  ]);
+
+  // A chunk sent, or a request cancelled, makes room for another.
+  expect(drain(q, 1)).toEqual(["bob>0:0"]);
+  ask(q, "bob", { track: 0, index: 6 });
+  ask(q, "bob", { track: 0, index: 7 });
+  q.requested("bob", { type: "cancel", track: 0, index: 2 });
+  ask(q, "bob", { track: 0, index: 7 }, "background");
+  expect(answers.slice(5)).toEqual(["busy bob 0:7"]);
+  expect(drain(q)).toEqual(["carol>0:4", "bob>0:4", "bob>0:5", "bob>0:6", "carol>0:9", "bob>0:7"]);
+});
+
+test("a peer's request at each priority is queued, and a busy or gone from it changes nothing", () => {
+  const { q, answers, queued } = queue(3);
   q.end();
   drain(q);
-  const answers = [
-    q.requested("bob", { type: "request", track: 0, index: 2, priority: "background" }),
-    q.requested("bob", { type: "request", track: 1, index: 0, priority: "ahead" }),
-    q.requested("bob", { type: "request", track: 3, index: 1, priority: "urgent" }),
-    q.requested("bob", { type: "request", track: 0, index: 0, priority: "urgent" }),
-    q.requested("bob", { type: "request", track: 0, index: 1, priority: "urgent" }),
-    q.requested("bob", { type: "request", track: 0, index: 3, priority: "urgent" }),
-    q.requested("bob", { type: "request", track: 9, index: 0, priority: "urgent" }),
-    q.requested("bob", { type: "cancel", track: 3, index: 1 }),
-    q.requested("bob", { type: "busy", track: 0, index: 2 }),
-    q.requested("bob", { type: "gone", track: 0, index: 0 }),
-  ];
-  expect(answers).toEqual([
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { type: "busy", track: 0, index: 1 },
-    { type: "gone", track: 0, index: 3 },
-    { type: "gone", track: 9, index: 0 },
-    undefined,
-    undefined,
-    undefined,
-  ]);
+  const said = queued.count;
+  ask(q, "bob", { track: 0, index: 2 }, "background");
+  ask(q, "bob", { track: 1, index: 0 }, "ahead");
+  ask(q, "bob", { track: 3, index: 1 });
+  ask(q, "bob", { track: 0, index: 0 });
+  q.requested("bob", { type: "cancel", track: 3, index: 1 });
+  q.requested("bob", { type: "busy", track: 0, index: 2 });
+  q.requested("bob", { type: "gone", track: 0, index: 0 });
+  expect(answers).toEqual([]);
+  // The first request after the queue ran dry says so, once.
+  expect(queued.count).toBe(said + 1);
   // `ahead` goes with those asked, `background` after them; the cancelled one is out.
   expect(drain(q)).toEqual(["bob>1:0", "bob>0:0", "bob>0:2"]);
 });

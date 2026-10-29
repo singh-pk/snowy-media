@@ -471,7 +471,7 @@ The source sends the next chunk as soon as the relay stream will accept more dat
 - **A seek target's chunks** are the chunk covering the target in every pushed track. After them, pushing carries on ahead of the target as the new playhead.
 - **A chunk goes live once.** One that a seek or a newly selected track would push again isn't pushed again: a peer that missed it asks.
 - **What isn't cut yet waits.** Indexes are cut in order as the source demuxes, so a seek past what is cut, or a request for an index not cut yet, waits until cutting reaches it. Once every chunk is cut, a request past the last one is answered `gone`.
-- **A peer's requests are queued once each:** a chunk asked for urgently that was already asked for in the background moves up. A `cancel` takes a request out, and so does the peer leaving.
+- **A peer's requests are queued once each:** a chunk asked for again takes the newer priority, moving up or down, and keeps its place by when it was first asked. A `cancel` takes a request out, and so does the peer leaving.
 
 ### Which tracks are pushed
 
@@ -540,7 +540,7 @@ background (only while no urgent or ahead request is out), from the playhead to 
 
 - **A forwarder sends one chunk at a time on each link,** the most urgent first, and the oldest asked first within a priority. A whole chunk arriving soon is worth more to a player than two arriving late, and a seek's chunk then waits for at most the one already on the wire.
 - **A forwarder answers `busy`** when a request goes beyond the asker's room, by its own measures of the link (RTT from the connection stats, and throughput as the rate its `data` buffer drains), or when it has no slot for that asker. The two ends measure the link apart, so an asker takes `busy` as an ordinary answer, not a fault.
-- **The source holds at most 4 requests from each peer** and answers `busy` beyond them, so its queue stays bounded whatever a peer sends. It counts those waiting in its queue, not one it has begun sending, and a chunk asked for again takes no more room. It queues an `ahead` request with the urgent ones, ahead of the push.
+- **The source holds at most 4 requests from each peer** and answers `busy` beyond them, so its queue stays bounded whatever a peer sends. It counts those waiting in its queue, not one it has begun sending, and a chunk asked for again takes no more room. An urgent request beyond them takes the place of the peer's newest background request, which is answered `busy` instead, so a peer's background requests, sent last, never keep its urgent ones out. An `ahead` request, should one arrive, is queued with the urgent ones.
 - A request for a chunk asked before is the same request, with the newer priority; it keeps the time it was first asked.
 
 ### What each event costs

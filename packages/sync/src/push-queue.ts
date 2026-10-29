@@ -14,7 +14,8 @@
 // waits.
 //
 // It holds at most 4 requests from each peer, answering `busy` beyond them, so it stays bounded
-// whatever a peer sends.
+// whatever a peer sends; an urgent request beyond them takes the place of the peer's newest
+// background one, which is answered `busy` instead, as on a forwarder's link.
 
 import type { Catalog } from "./catalog";
 import type { ChunkSlot } from "./chunk";
@@ -31,11 +32,14 @@ export const SOURCE_ROOM = 4;
 /** A chunk to send: live on its `media/<track>`, or to one peer through its `deliver`. */
 export type Send = { to: "track"; slot: ChunkSlot } | { to: "peer"; peer: KeyId; slot: ChunkSlot };
 
-type Request = { peer: KeyId; slot: ChunkSlot };
+// A peer's request, and when it was first asked, counted.
+type Request = { peer: KeyId; slot: ChunkSlot; at: number };
 
 export type PushQueueOptions = {
   /** The catalog's tracks, fixed for the session. */
   tracks: Catalog["tracks"];
+  /** Answers a peer's request with `busy` or `gone`, over its link. */
+  send(peer: KeyId, message: ChunkBusy | ChunkGone): void;
   /**
    * Called when a change leaves something to send after `next` found nothing, so a source that
    * stopped asking asks again. It isn't called again until `next` finds nothing once more.
@@ -49,8 +53,6 @@ const ids = (tracks: Catalog["tracks"], kind: Catalog["tracks"][number]["kind"])
     .filter((t) => t.kind === kind)
     .map((t) => t.id)
     .toSorted((a, b) => a - b);
-
-const U32 = 0xffff_ffff;
 
 const sameSlot = (a: ChunkSlot, b: ChunkSlot) => a.track === b.track && a.index === b.index;
 
@@ -91,32 +93,43 @@ function createCuts() {
   };
 }
 
-// Peers' requests, urgent or in the background, each queued once per peer.
+// Peers' requests, urgent or in the background, each queued once per peer, in each tier in the
+// order first asked.
 function createRequests() {
-  const state = { asked: [] as Request[], background: [] as Request[] };
+  const state = { asked: [] as Request[], background: [] as Request[], asks: 0 };
 
   function drop(match: (r: Request) => boolean) {
     state.asked = without(state.asked, match);
     state.background = without(state.background, match);
   }
 
-  // Queues a request, at the more urgent tier if the peer asked for it already. Returns false,
-  // queueing nothing, for a new request beyond the peer's room.
-  function add(request: Request, background: boolean) {
-    const same = isRequest(request.peer, request.slot);
-    if (state.asked.some(same)) return true;
-    const repeat = state.background.some(same);
-    const held = countOf(state.asked, request.peer) + countOf(state.background, request.peer);
-    if (!repeat && held >= SOURCE_ROOM) return false;
+  // Puts a request in a tier among the others by when it was first asked.
+  function insert(tier: Request[], request: Request) {
+    const after = tier.findIndex((r) => r.at > request.at);
+    tier.splice(after === -1 ? tier.length : after, 0, request);
+  }
 
-    if (!background) {
-      state.background = without(state.background, same);
-      state.asked.push(request);
-    } else if (!repeat) {
-      state.background.push(request);
-    }
+  // The peer's newest background request, taken out to make room for a more urgent one.
+  function bump(peer: KeyId) {
+    const newest = state.background.findLast((r) => r.peer === peer);
+    if (newest !== undefined) state.background = without(state.background, (r) => r === newest);
+    return newest;
+  }
 
-    return true;
+  // Queues a request at its tier; one asked before moves there and keeps when it was first asked.
+  // A new urgent request beyond the peer's room takes the place of its newest background one,
+  // returned as `bumped`; with none to take, nothing is queued.
+  function add(peer: KeyId, slot: ChunkSlot, background: boolean) {
+    const same = isRequest(peer, slot);
+    const repeat = state.asked.find(same) ?? state.background.find(same);
+    const full =
+      repeat === undefined &&
+      countOf(state.asked, peer) + countOf(state.background, peer) >= SOURCE_ROOM;
+    const bumped = full && !background ? bump(peer) : undefined;
+    if (full && bumped === undefined) return { queued: false, bumped };
+    drop(same);
+    insert(background ? state.background : state.asked, repeat ?? { peer, slot, at: state.asks++ });
+    return { queued: true, bumped };
   }
 
   // The requests for an index past the last, taken out.
@@ -224,6 +237,9 @@ export function createPushQueue(options: PushQueueOptions) {
 
   const isCut = (r: Request) => cuts.has(r.slot.index);
 
+  const answer = (peer: KeyId, type: "busy" | "gone", { track, index }: ChunkSlot) =>
+    options.send(peer, { type, track, index });
+
   // What to send next, without taking it. It forgets a seek target whose chunks have all gone.
   function pick(): Send | undefined {
     const targeted = live.target();
@@ -262,14 +278,13 @@ export function createPushQueue(options: PushQueueOptions) {
   }
 
   /**
-   * Every chunk is cut: demuxing reached the end of the file. Returns the requests queued for an
-   * index past the last chunk, taken out, for the source to answer `gone`.
+   * Every chunk is cut: demuxing reached the end of the file. The requests queued for an index
+   * past the last chunk are taken out and answered `gone`.
    */
   function end() {
     cuts.end();
-    const gone = requests.takePast(cuts.count());
+    for (const r of requests.takePast(cuts.count())) answer(r.peer, "gone", r.slot);
     changed();
-    return gone;
   }
 
   /** The playhead moved, as playback does. */
@@ -290,39 +305,34 @@ export function createPushQueue(options: PushQueueOptions) {
     changed();
   }
 
-  /**
-   * A peer asks for a chunk, urgently or in the background. Returns `gone`, queueing nothing, for
-   * a track the catalog lacks, an index that isn't one, or an index past the last chunk once every
-   * chunk is cut, and `busy` for a new request beyond the peer's room.
-   * A chunk asked for again by the same peer is queued once, at the more urgent of the two, and
-   * takes no more room.
-   */
-  function request(peer: KeyId, slot: ChunkSlot, background = false) {
-    if (!known.has(slot.track)) return "gone";
-    if (!Number.isInteger(slot.index) || slot.index < 0 || slot.index > U32) return "gone";
-    if (cuts.ended() && !cuts.has(slot.index)) return "gone";
-    if (!requests.add({ peer, slot }, background)) return "busy";
-    changed();
-    return "queued";
-  }
+  // A peer asks for a chunk, urgently or in the background. A track the catalog lacks, or an index
+  // past the last chunk once every chunk is cut, is answered `gone`, and a request with no room
+  // `busy`.
+  function request(peer: KeyId, slot: ChunkSlot, background: boolean) {
+    if (!known.has(slot.track) || (cuts.ended() && !cuts.has(slot.index))) {
+      answer(peer, "gone", slot);
+      return;
+    }
 
-  /** A peer cancelled its request for a chunk. */
-  const cancel = (peer: KeyId, slot: ChunkSlot) => requests.drop(isRequest(peer, slot));
+    const { queued, bumped } = requests.add(peer, slot, background);
+    if (bumped !== undefined) answer(peer, "busy", bumped.slot);
+    if (queued) changed();
+    else answer(peer, "busy", slot);
+  }
 
   /** A peer left: its requests go with it. */
   const left = (peer: KeyId) => requests.drop((r) => r.peer === peer);
 
   /**
-   * Takes a peer's `request` or `cancel`, and returns the `busy` or `gone` to answer it with,
-   * or undefined for none. A request at any priority but `background` goes with those asked.
+   * Takes a peer's `request` or `cancel`; any other message is ignored. A request at any
+   * priority but `background` goes with those asked, and one asked before takes the newer
+   * priority, keeping when it was first asked and taking no more room.
    */
-  function requested(peer: KeyId, message: ChunkControl): ChunkBusy | ChunkGone | undefined {
+  function requested(peer: KeyId, message: ChunkControl) {
     const slot = { track: message.track, index: message.index };
-    if (message.type === "cancel") cancel(peer, slot);
-    if (message.type !== "request") return undefined;
-    const answer = request(peer, slot, message.priority === "background");
-    return answer === "queued" ? undefined : { type: answer, track: slot.track, index: slot.index };
+    if (message.type === "cancel") requests.drop(isRequest(peer, slot));
+    if (message.type === "request") request(peer, slot, message.priority === "background");
   }
 
-  return { next, cut, end, playhead, seek, select, request, cancel, left, requested };
+  return { next, cut, end, playhead, seek, select, left, requested };
 }
