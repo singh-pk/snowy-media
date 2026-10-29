@@ -22,7 +22,6 @@ import {
 import { guarded, skip } from "./skip";
 import { flicksToSource } from "./time";
 
-/** A clip, with its id. */
 type Piece = { id: ItemId; clip: Clip };
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -32,7 +31,6 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const pastSplit = (at: number, point: number, clip: Clip) =>
   clip.speed[0] > 0 ? at >= point : at <= point;
 
-// A clip with one of its fades set to `length`; a clip without audio has none.
 function withFade(clip: Clip, fade: "fadeIn" | "fadeOut", length: number) {
   return clip.audio === undefined ? clip : { ...clip, audio: { ...clip.audio, [fade]: length } };
 }
@@ -54,7 +52,6 @@ function pieceAnchor(records: Records, clip: Clip, offset: number, sequence: Ite
   return { ...anchor, at };
 }
 
-// Moves the keyframes of `from` at source points `moves` picks to `to`.
 function handKeyframes(records: Records, from: ItemId, to: ItemId, moves: (at: number) => boolean) {
   const own = records.keyframes.get(from);
   const target = records.keyframes.get(to) ?? new Map<string, KeyframeRecord>();
@@ -132,9 +129,10 @@ function splitPoint(records: Records, { id, clip, sequence, at, piece }: Split) 
 }
 
 /**
- * Splits a clip at a timeline time: it keeps what is before, and a new clip, `piece`, takes what
- * is after. Where the piece's anchor lands, rounded to its anchor's units and snapped to a frame,
- * is where the split falls, so the two pieces always meet. Returns the items changed.
+ * Splits a clip at timeline time `at`, in flicks: it keeps what is before, and a new clip,
+ * `piece`, takes what is after. Where the piece's anchor lands, rounded to its anchor's units and
+ * snapped to a frame, is where the split falls, so the two pieces always meet. Returns the items
+ * changed.
  */
 export function splitClip(records: Records, id: ItemId, at: number, piece: ItemId) {
   if (records.items.has(piece)) skip("stale", `${piece} exists`);

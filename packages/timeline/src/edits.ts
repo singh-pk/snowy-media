@@ -41,7 +41,6 @@ import {
 import { checked, checkRate, guarded, skip } from "./skip";
 import { createStoryline } from "./storyline";
 
-/** A leaf to set: its path in the record, and its new value. */
 export type Leaf = { path: string; value: Value };
 
 export function addItem(records: Records, id: ItemId, record: ItemRecord) {
@@ -174,7 +173,6 @@ export function removeEffect(records: Records, id: ItemId) {
   liveEffect(records, id).removed = true;
 }
 
-// Whether a parameter's new value is of the type its old one was.
 const sameType = (a: Value, b: Value) =>
   typeof a === typeof b && Array.isArray(a) === Array.isArray(b);
 

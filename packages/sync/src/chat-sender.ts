@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Sending this peer's chat (docs/architecture.md#sending). A message is chained and returned at
-// once, for the local log, then queued. Whenever the stream is free, everything queued goes as
-// one batch, so batching follows the network's speed rather than a clock; while the stream is
-// busy or closed, messages wait in the queue.
+// Sending this peer's chat (docs/architecture.md#sending). Whenever the stream is free, everything
+// queued goes as one batch, so batching follows the network's speed rather than a clock.
 
 import { encodeBatch } from "./chat-batch";
 import { checkMessage, messageHash, type ChatMessage } from "./chat";
@@ -29,8 +27,8 @@ export type ChatSenderOptions = {
    */
   pending?: ChatMessage[] | undefined;
   /**
-   * Hands a batch to the stream; `writable()` is called once the stream takes more. A throw
-   * keeps the batch's messages queued for then.
+   * Hands a batch to the stream. No other batch is handed over until `writable()` is called again,
+   * once the stream takes more; a throw keeps the batch's messages queued until then.
    */
   publish(key: string, bytes: Bytes): void;
 };
@@ -45,7 +43,7 @@ export function createChatSender(options: ChatSenderOptions) {
   const queue: ChatMessage[] = options.pending ?? [];
   const batches = createBatches(options, queue);
   const state: { last?: ChatMessage | undefined } = { last: options.last };
-  // Writes run one after another: each chains to the one before.
+  // Writes run one after another, since each message's `prev` is the hash of the one before.
   let written: Promise<unknown> = Promise.resolve();
 
   /**
@@ -97,8 +95,6 @@ export function createChatSender(options: ChatSenderOptions) {
   return { write, writable: batches.writable, closed: batches.closed };
 }
 
-// The queue sent as batches: whenever the stream is free, everything queued is sealed as one
-// batch and handed to it.
 function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
   const state: {
     writable: boolean;
@@ -107,8 +103,7 @@ function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
     sealing?: Promise<void> | undefined;
   } = { writable: false, closes: 0 };
 
-  // Sends what has queued if the stream is writable; one batch is sealed at a time, and a call
-  // made meanwhile waits for it, then looks again.
+  // One batch is sealed at a time; a call made meanwhile waits for it, then looks again.
   async function flush(): Promise<void> {
     if (state.sealing !== undefined) {
       try {
@@ -135,10 +130,9 @@ function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
     return flush();
   }
 
-  // Puts `messages` back at the front of the queue, in order, for the next writable event.
   function putBack(messages: ChatMessage[]) {
-    // copy: `unshift` takes the messages as arguments, a batch's few: those written while the
-    // stream was busy.
+    // copy: `unshift` takes the messages as arguments, which is cheap for a batch's few: those
+    // written while the stream was busy.
     queue.unshift(...messages);
   }
 
@@ -176,7 +170,7 @@ function createBatches(options: ChatSenderOptions, queue: ChatMessage[]) {
 
   /**
    * The stream takes more: the event that sends what has queued. Resolves once the batch is
-   * handed over; rejects, keeping the messages queued, if it couldn't be sealed.
+   * handed over; rejects, keeping the messages queued, if it couldn't be sealed or published.
    */
   function writable() {
     state.writable = true;

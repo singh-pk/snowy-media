@@ -1,15 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The video decode worker: decodes, with FFmpeg's `video` or `video-ext` module, the video
-// streams WebCodecs does not, for the render worker (src/wasm-video.ts). FFmpeg decodes
-// synchronously, in software, so it does so here, never in the render worker's animation
-// frames. Each frame, in a format VideoFrame takes (sny_to_video_format), stays where the
-// decoder left it in the module's shared memory, which the render worker uploads it from; the
-// render worker sends it back once it is uploaded or dropped. Records go both ways through the
-// rings the render worker sends at the start, with no message per packet or frame; a packet is
-// copied out of its play's packet ring, which comes by message, straight into the module's
-// memory.
+// The video decode worker (docs/architecture.md#video-output). FFmpeg decodes synchronously, so
+// it runs here, never in the render worker's animation frames. A decoded frame stays in the
+// module's shared memory, where the render worker uploads it from, until it is sent back.
 
 import {
   AVERROR_EAGAIN,
@@ -43,25 +37,21 @@ type Module = (typeof VIDEO_MODULES)[number];
 const LOG_ERRORS = 16;
 // The most planes a frame has: Y, Cb, Cr and alpha.
 const MAX_PLANES = 4;
-// Decoding threads: one a core, at most the module's pool of 8.
+// Decoding threads: one per core, at most the 8 in the module's thread pool.
 const THREADS = Math.min(navigator.hardwareConcurrency, 8);
 
-// Where a frame record's payload is put together.
 const payload = new Uint8Array(FRAME.bytes);
 const words = new Int32Array(payload.buffer);
 const doubles = new Float64Array(payload.buffer);
 // Where a failure's message is put; a longer one is cut short.
 const message = new Uint8Array(1024);
-// Where a packet record's payload is read.
 const placeWords = new Int32Array(PLACE.bytes / 4);
 const placeBytes = new Uint8Array(placeWords.buffer);
-// Whether a packet ring record of PART `part` completes its packet.
 const completes = (part: number | undefined) => part === PART.whole || part === PART.last;
 
-// Where the packet ring record is that the last packet record read places, filled by `placeOf`.
+// The place in the packet ring that the last packet record read points to, set by `placeOf`.
 const placed: Place = { start: 0, size: 0, part: PART.whole };
 
-// Reads where the packet ring record that packet record `record` places is into `placed`.
 function placeOf(record: Packet) {
   // copy: 12 bytes, into words to read them.
   placeBytes.set(record.data);
@@ -74,7 +64,8 @@ function placeOf(record: Packet) {
 // Each decoder's packet ring, by its id, as it comes by message.
 const packetRings = new Map<number, PromiseWithResolvers<SharedArrayBuffer>>();
 
-// Decoder `id`'s packet ring, whichever comes first, its message or its open.
+// Decoder `id`'s packet ring, made by whichever comes first: the message carrying the ring, or
+// the decoder's open.
 function packetRing(id: number) {
   const known = packetRings.get(id);
   if (known) return known;
@@ -117,8 +108,8 @@ function openDecoder(m: VideoModule, params: Uint8Array, heap: () => Uint8Array)
   return dec;
 }
 
-// The index of `held`'s format in PIXEL_FORMATS, remembered in `formats` by its name's pointer:
-// a static string.
+// The index of `held`'s pixel format in `PIXEL_FORMATS`, cached in `formats` by the pointer to
+// the format's name, which FFmpeg keeps as a static string.
 function pixelFormat(m: VideoModule, formats: Map<Ptr, number>, held: Ptr) {
   const ptr = m._sny_frame_video_format(held);
   const known = formats.get(ptr);
@@ -130,9 +121,9 @@ function pixelFormat(m: VideoModule, formats: Map<Ptr, number>, held: Ptr) {
   return index;
 }
 
-// Puts where each plane of `held` starts in memory, and its stride, in the payload, and
-// returns how many it has; 0 if one is stored bottom row first (a negative stride), as a
-// texture is never uploaded. A format's unused planes have no data.
+// Writes the address and stride of each plane of `held` into the payload and returns how many
+// planes it has, stopping at the first without data. Returns 0 if a plane is stored bottom row
+// first (a negative stride), as a texture cannot be uploaded that way; `pack` then flips it.
 function planes(m: VideoModule, held: Ptr) {
   let i = 0;
 
@@ -146,9 +137,9 @@ function planes(m: VideoModule, held: Ptr) {
   return i;
 }
 
-// `held`, stored bottom row first, as a raw AVI's or a BMP's RGB is, packed top row first into
-// a buffer of its own, of `size` bytes, which stands for it from then on. Such a frame is RGB:
-// one plane, 4 bytes a pixel, `width` pixels a row. Returns the buffer.
+// Packs `held`, stored bottom row first as a raw AVI's or a BMP's RGB is, top row first into a
+// new buffer of `size` bytes, which stands for the frame from then on, frees `held` and returns
+// the buffer. Such a frame is RGB: one plane, 4 bytes a pixel, `width` pixels a row.
 function pack(m: VideoModule, held: Ptr, size: number, width: number) {
   if (m._sny_frame_data(held, 1)) throw new Error("a planar frame stored bottom row first");
   const at = m._malloc(size);
@@ -166,8 +157,8 @@ function pack(m: VideoModule, held: Ptr, size: number, width: number) {
   return at;
 }
 
-// What copies packet ring records of `packets` into packet `pkt` of module `m`, whose memory
-// `heap` views, putting a packet's pieces back together first.
+// Copies packet ring records from `packets` into packet `pkt` of module `m`, joining a packet
+// split into pieces first; `heap` views `m`'s memory.
 function createTaker(m: VideoModule, pkt: Ptr, heap: () => Uint8Array, packets: SharedArrayBuffer) {
   // copy: a piece, out of a ring record freed before the next comes, and the packet's size
   // known only at its last piece.
@@ -182,8 +173,9 @@ function createTaker(m: VideoModule, pkt: Ptr, heap: () => Uint8Array, packets: 
 
   return {
     /**
-     * Copies the packet ring record at `place`, with its packet's header `record`, into memory,
-     * where the packet is decoded from once whole: a piece waits for the rest. Whether it is.
+     * Copies the packet ring record at `place`, whose packet header is `record`, into the
+     * module's memory, and returns whether the packet there is now whole and ready to decode; a
+     * piece waits for the rest.
      */
     take(record: Packet, place: Place) {
       if (place.part === PART.whole) {
@@ -205,9 +197,7 @@ function createTaker(m: VideoModule, pkt: Ptr, heap: () => Uint8Array, packets: 
   };
 }
 
-// What a decoder is made from: stream parameters `params` for the `module`th module, a time base
-// of `num`/`den`, the packet ring its packets are in, and `send`, which sends each frame it
-// decodes.
+// `num`/`den` is the stream's time base; `send` sends each frame decoded.
 interface DecoderOptions {
   module: number;
   params: Uint8Array;
@@ -217,7 +207,6 @@ interface DecoderOptions {
   send: () => void;
 }
 
-// A decoder in module `m`.
 function createDecoder(m: VideoModule, options: DecoderOptions) {
   const { module, params, num, den, packets, send } = options;
   // Rounded as src/video.ts rounds the packets' timestamps, so a frame's matches its packet's.
@@ -250,11 +239,10 @@ function createDecoder(m: VideoModule, options: DecoderOptions) {
     throw new Error("decoder: out of memory");
   }
 
-  // The index in PIXEL_FORMATS of each format name met, by its pointer.
   const formats = new Map<Ptr, number>();
 
-  // The decoded frame, held in a reference of its own (or converted into a frame of its own) so
-  // the decoder does not reuse its buffers before it goes back, put in the payload.
+  // Puts the decoded frame in the payload, held in a reference of its own (or converted into a
+  // frame of its own) so the decoder cannot reuse its buffers before the frame is sent back.
   function hold() {
     const held = m._sny_frame_alloc();
     if (!held) throw new Error("frame_alloc: out of memory");
@@ -300,7 +288,7 @@ function createDecoder(m: VideoModule, options: DecoderOptions) {
         send();
       }
 
-      // Full, it takes the packet once its frames are out.
+      // A full decoder (`EAGAIN` on send) takes the packet once its frames are out: send again.
       if (sent !== AVERROR_EAGAIN) return;
     }
   }
@@ -339,7 +327,6 @@ function createModules() {
   return { loaded, module };
 }
 
-// Serves the render worker through the rings of `start`.
 async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
   const records = createConsumer(to);
   const replies = createProducer(from);
@@ -367,9 +354,9 @@ async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
     decoders.set(id, createDecoder(m, options));
   }
 
-  // Takes the packet ring record that packet record `record` of decoder `id` places, then frees
-  // `record` and says the other is taken, so the render worker frees it, before any decoding.
-  // Whether its packet is whole, failed decoder or not.
+  // Takes the packet ring record that decoder `id`'s packet record `record` points to, then,
+  // before any decoding, frees `record` and tells the render worker it may free the other.
+  // Returns whether the packet is whole, even for a failed decoder.
   function take(record: Packet, id: number) {
     const place = placeOf(record);
 
@@ -383,8 +370,8 @@ async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
     return completes(place.part);
   }
 
-  // Handles any other `record` of decoder `id`; it is freed once this returns, or a packet's
-  // before decoding.
+  // Handles any record of decoder `id` but its open. The caller frees `record` once this
+  // returns, except a packet's, which `take` frees before decoding.
   function handle(record: Packet, id: number, kind: number) {
     const decoder = decoders.get(id);
 
@@ -416,7 +403,8 @@ async function serve({ to, from }: Extract<ToVideo, { type: "start" }>) {
     const id = record.stream >> KIND_BITS;
     const kind = record.stream & ((1 << KIND_BITS) - 1);
 
-    // A frame going back is of no decoder: id 0 is only its kind's.
+    // A frame sent back belongs to no decoder, so its id is 0: `duration` names its module, and
+    // a nonzero `pts` marks a packed buffer, which `_free` frees.
     if (kind === TO_VIDEO.release) {
       const m = loaded[record.duration];
       // A pointer, unsigned past 2 GiB.

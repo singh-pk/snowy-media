@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A peer's chat in one session (docs/architecture.md#chat): the local store, the log, sending,
-// receiving and repair, wired together and to the peer's links. Opening it restores what the
-// store holds, and queues this peer's messages that may never have been published. The chat
+// A peer's chat in one session (docs/architecture.md#chat), wired to the peer's links. The chat
 // track itself belongs to the transport: it hands this peer's batches to `publish` and reports
 // when the stream takes more, and passes other authors' batches to `received`.
 
@@ -38,7 +36,6 @@ type State = {
 const NOT_LATE = "0000000000000000";
 
 export type ChatOptions = {
-  /** This peer's key pair. */
   peer: CryptoKeyPair;
   /** The key batches are sealed with: in a watch session, the content key. */
   content: CryptoKey;
@@ -52,12 +49,10 @@ export type ChatOptions = {
   onChange?: () => void;
 };
 
-/** The chat was closed: it takes no more messages. */
 export class ChatClosedError extends Error {
   override name = "ChatClosedError";
 }
 
-// Waits for `work`, counted in each of `pending` until it settles.
 async function counted<T>(work: Promise<T>, ...pending: Pending[]) {
   for (const set of pending) set.add(work);
 
@@ -95,8 +90,8 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
   const writing: Pending = new Set();
   const state: State = { closed: false, catchUp: [] };
 
-  // A peer whose links have all gone, though an ask was ranked to it: the ask moves on, as on
-  // close.
+  // The peer's newest open link. For a peer whose links have all gone, though an ask was ranked
+  // to it, the ask moves on, as when a link closes.
   function linked(peer: KeyId) {
     if (state.closed) return undefined;
 
@@ -129,7 +124,6 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     try {
       await receiver.receive(key, bytes, from);
     } catch {
-      // Refused: nothing to do.
       return;
     }
 
@@ -147,7 +141,6 @@ async function wire(options: ChatOptions, self: KeyId, store: Store) {
     take,
   });
 
-  /** A batch from an author's chat track. */
   const received = (key: string, bytes: Bytes) => counted(take(key, bytes), writing);
 
   const { connect, reconnected } = createPeerLinks({
@@ -191,14 +184,13 @@ type OwnChatOptions = {
   log: ReturnType<typeof createChatLog>;
   clock: ReturnType<typeof createClock>;
   state: State;
-  /** What may still write to the store, shared with the session. */
   writing: Pending;
   /** Takes a batch into the log and holdings, as one from another author is. */
   take(key: string, bytes: Bytes): Promise<void>;
 };
 
-// This peer's own chat: each message stored and shown, then sent, and each batch taken back
-// into the holdings. Messages the store holds that may never have been published go first.
+// This peer's own chat. Messages the store holds that may never have been published are sent
+// first.
 function createOwnChat(options: OwnChatOptions) {
   const { chat, self, store, log, state, writing } = options;
   // This peer's own batches on their way into the holdings, for `writable` to wait for.
@@ -262,20 +254,16 @@ type PeerLinksOptions = {
   log: ReturnType<typeof createChatLog>;
   holdings: ReturnType<typeof createChatHoldings>;
   repairs: ReturnType<typeof createChatRepairs>;
-  /** Every open link, oldest first, per peer, shared with the session. */
   links: Map<KeyId, Link[]>;
   state: State;
   /** Takes a batch a peer delivered, counted among what may still write to the store. */
   take(key: string, bytes: Bytes, peer: KeyId): Promise<unknown>;
 };
 
-// The session's links to peers: each one's requests answered, the batches it delivers taken,
-// and the version vector sent after a reconnect, moving on as links close.
 function createPeerLinks(options: PeerLinksOptions) {
   const { self, log, repairs, links, state } = options;
   const newest = (peer: KeyId) => links.get(peer)?.at(-1);
 
-  // Sends the version vector to the best peer still linked, if a catch-up is under way.
   function catchUp() {
     const next = state.catchUp.findIndex((peer) => newest(peer) !== undefined);
     // Peers ranked above it have no link left.
@@ -286,7 +274,6 @@ function createPeerLinks(options: PeerLinksOptions) {
     newest(peer)?.send({ type: "chat-versions", versions: log.versions() });
   }
 
-  // A control message from a peer: a chat-gone for an ask of this peer's, or a request to answer.
   function handle(peer: KeyId, responder: Responder, value: unknown) {
     const message = checkChatControl(value);
     if (state.closed || message === undefined) return undefined;

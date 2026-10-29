@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The control record (docs/architecture.md#control-record): where the source's playback is, and
-// whether it plays, from a moment on the source's clock. Only the source writes it, as a signed
-// record (src/signed-record.ts), so a peer can take one from anyone. Each play, pause or seek has
-// the next epoch, and its object key, `control@<epoch>`, names it; a peer follows the highest.
+// The control record (docs/architecture.md#control-record). Only the source writes it, signed, so a
+// peer can take one from anyone; a peer follows the highest epoch.
 
 import { isCount, isRecord } from "./chat";
 import type { Bytes } from "./crypto";
@@ -27,13 +25,14 @@ export type Control = {
   mediaUs: number;
   /** A moment on the source's clock: wall time in whole microseconds. */
   atUs: number;
-  /** Playback reached the end: every peer stops, so it never plays. */
+  /** Playback reached the end, so every peer stops; an ended record is never `playing`. */
   ended: boolean;
 };
 
 const controlKey = (epoch: number) => `control@${epoch}`;
 
-// A control record in canonical shape: its fields in order.
+// `value` as a control record in canonical shape, its fields in order; throws an
+// `InvalidRecordError` for anything else.
 function checkControl(value: unknown): Control {
   if (!isRecord(value)) throw new InvalidRecordError("not an object");
   onlyFields(value, FIELDS);
@@ -48,8 +47,8 @@ function checkControl(value: unknown): Control {
 }
 
 /**
- * Signs a control record with the session key. Returns its object key and bytes. Throws an
- * `InvalidRecordError` for a malformed one.
+ * Signs a control record with the session key. Resolves to its object key and bytes. Rejects
+ * with an `InvalidRecordError` for a malformed one.
  */
 export async function encodeControl(session: CryptoKeyPair, control: Control) {
   const canonical = checkControl(control);

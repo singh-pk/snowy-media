@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// One play on the main thread: its rings and audio output, the output timestamp it publishes
-// for the render worker's clock, and whether it may start and is heard.
+// One play on the main thread (docs/architecture.md#playback): its rings and audio output, the
+// output timestamp it publishes for the render worker's clock, and whether it may start and is
+// heard.
 
 import { createAudioOutput } from "./audio";
 import type { VideoParams } from "./codec";
@@ -10,17 +11,16 @@ import { createPcmControl, createPcmProducer, createPcmRing } from "./pcm";
 import type { FromMedia, FromRender, ToMedia, ToRender } from "./protocol";
 import { closeRing, createRing, RING_CAPACITY } from "./ring";
 
-// The PCM ring's length at `rate`: a power of two, a second and more, so the media worker
-// can demux a second of video ahead of the audio it decodes (docs/architecture.md#playback).
+// The PCM ring's length at `rate`: the smallest power of two that holds a second, so the media
+// worker can demux a second of video ahead of the audio it decodes.
 const pcmFrames = (rate: number) => 2 ** Math.ceil(Math.log2(rate));
 // The packet ring of a file without video, which only ever carries the END record.
 const NO_VIDEO_RING = 64;
-// The audio buffered before it starts, in seconds, so a slow start does not underrun.
+// The audio buffered before a play starts, in seconds, so a slow start does not underrun.
 const PREROLL = 0.25;
-// The output timestamp has settled once this many in a row, each newer than the last, map
-// context time to performance time within SETTLED_MS of the one before. The first ones
-// after output starts are estimates: Chromium moves them by up to 35 ms. Coarse
-// timers may never agree, so it settles anyway after SETTLED_LIMIT newer ones.
+// The output timestamp has settled once this many newer ones in a row agree within SETTLED_MS:
+// Chromium moves the first ones after output starts by up to 35 ms. Coarse timers may never
+// agree, so it settles anyway after SETTLED_LIMIT newer ones.
 const SETTLED_COUNT = 2;
 const SETTLED_MS = 2;
 const SETTLED_LIMIT = 10;
@@ -35,8 +35,6 @@ type PlayMessage = Extract<ToRender, { type: "play" }>;
 /** How far the render worker has decoded, as it last reported, and for which play. */
 export type VideoReport = Omit<Extract<FromRender, { type: "video" }>, "type">;
 
-// What plays: play `id`, its clock, publishing the output timestamp now, whether it may
-// start and is heard, and stopping it.
 export interface Playback {
   id: number;
   clock: Clock;
@@ -47,7 +45,6 @@ export interface Playback {
   stop(): void;
 }
 
-/** What a play needs of the engine that starts it. */
 export interface PlaybackHost {
   render: Worker;
   /** Sends the media worker a demux request; `buffered` runs once its audio is buffered. */
@@ -67,7 +64,7 @@ export interface PlaybackOptions {
   /** The open file's video parameters, by stream; none for a composition without a file. */
   opened: { video: Record<number, VideoParams> } | undefined;
   played: Played;
-  /** Where it starts, in microseconds. */
+  /** The media time the play starts at, in microseconds. */
   from: number;
 }
 
@@ -94,10 +91,10 @@ interface Reading {
   preroll: number;
 }
 
-// Starts the render worker and the media worker on play `id`, from `from`: a clip's video and
-// audio at its in point at the earliest, its clock where the play starts. Resolves once the media
-// worker has read what it plays; with nothing to read, as in the gap after a clip, at once, the
-// clock running on to the composition's end.
+// A clip's video and audio are read from its in point at the earliest, while its clock starts
+// where the play starts. Resolves once the media worker has read what the play plays, or at once
+// with nothing to read, as in the gap after a clip, where the clock runs on to the composition's
+// end.
 function startReading(r: Reading, buffered: () => void): Promise<unknown> {
   const { host, id, ring, pcm, from, params, audio, played } = r;
   const { clip } = played;
@@ -126,14 +123,13 @@ function startReading(r: Reading, buffered: () => void): Promise<unknown> {
   return host.demux(message, buffered);
 }
 
-// The output timestamp, for the render worker (src/pcm.ts), on every animation frame and
-// as the context stops. It runs once it has settled, and stays so until the context stops.
-// Stopped by a pause at `stopping` (performance milliseconds), it holds the media time heard
-// then until a timestamp passes it, so the clock never goes back: the last timestamp
-// is up to an audio callback older, and the frame on screen went up by it carried forward.
+// Publishes the output timestamp for the render worker (src/pcm.ts) on every animation frame,
+// running once it has settled. A pause at `stopping` (milliseconds of `performance.now()`) holds
+// the media time heard then until the clock passes it, so the clock never goes back, though the
+// last timestamp is up to an audio callback old and carried forward.
 function createOutputClock(context: AudioContext, clock: Clock, changed: () => void) {
-  // The last output timestamp, as context minus performance milliseconds, and when; and the
-  // media time heard when a pause stopped it, until a timestamp passes it.
+  // `offset` is the last output timestamp's context time minus its performance time, in
+  // milliseconds, and `at` its performance time; `stopped` is the media time a pause holds.
   const output = { offset: Number.NaN, at: 0, agreed: 0, newer: 0, settled: false, stopped: NaN };
 
   function publish(stopping?: number) {
@@ -150,7 +146,8 @@ function createOutputClock(context: AudioContext, clock: Clock, changed: () => v
 
     const running = context.state === "running";
 
-    // Heard no further than the worklet rendered; paused again while held, never back.
+    // The time heard at the pause is no further than the worklet has rendered; a second pause
+    // while one is held keeps the later time, so the clock never goes back.
     if (stopping !== undefined && output.settled) {
       const at = clock.mediaTime(Math.min((stopping + output.offset) / 1000, clock.read().time));
       output.stopped = Number.isNaN(output.stopped) ? at : Math.max(output.stopped, at);
@@ -207,8 +204,8 @@ function createReadiness({ host, id, hasVideo, demux, output }: ReadinessOptions
     return hasVideo ? video.id === id && video.drawn : primed();
   }
 
-  // Whether it is heard, by a settled timestamp past a pause's, and the frame on screen went
-  // up by it.
+  // Whether the play is heard: the output timestamp has settled and no pause holds it, and the
+  // frame on screen was shown by that clock.
   function heard() {
     const video = host.video();
     const shown = !hasVideo || (video.id === id && video.shown);
@@ -218,7 +215,6 @@ function createReadiness({ host, id, hasVideo, demux, output }: ReadinessOptions
   return { primed, drawn, heard };
 }
 
-/** Starts what `played` says of the open file playing into `context` from `from`, as play `id`. */
 export async function startPlayback(options: PlaybackOptions): Promise<Playback> {
   const { host, context, id, opened, played, from } = options;
   // In the gap after a clip, nothing of it plays.

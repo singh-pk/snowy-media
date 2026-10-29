@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// One branch's linear history (docs/architecture.md#linear-history): the entries its sequencer
-// appends, each naming a batch, and the batches still pending. The document every peer shows is
-// the entries applied in order, then the pending batches in (hlc, author) order. The entries'
-// document is kept apart from the shown one, so an entry that orders batches as they are shown
-// changes nothing, and one that doesn't rebuilds the shown document from the entries' alone.
+// One branch's linear history (docs/architecture.md#linear-history): every peer shows the entries
+// in order, then the pending batches in (hlc, author) order. The entries' document is kept apart,
+// so an entry ordering batches as shown changes nothing; one that doesn't rebuilds the shown one.
 
 import { keyIdOf, type Batch } from "./batch";
 import { broughtTouches, clashesSince, touches, type BatchRef, type Touched } from "./concurrent";
@@ -29,8 +27,8 @@ type Merge = Extract<Operation, { op: "branch.merge" }>;
 type Project = ReturnType<typeof createProject>;
 
 /**
- * An entry as applied, with its hash and batch: the operations it skipped, the batches its merges
- * brought, and whether its author couldn't see a change.
+ * An entry applied. `concurrent` is whether its batch, or what a merge in it brought, clashes with
+ * a change on the branch that its author hadn't seen (docs/architecture.md#concurrent-edits).
  */
 type Entered = {
   entry: Entry;
@@ -42,10 +40,10 @@ type Entered = {
 };
 
 /**
- * The batches a merge brings, from the branch it names; the last entry of this branch their
- * authors could see, if that branch started from this one; and which batches they had seen,
- * those of the branch's document at the last entry merged. "missing" while this peer doesn't
- * have every entry it names; "stale" for entries it never will.
+ * Finds what a merge brings from the branch it names: its `batches`; `since`, the last entry of
+ * this branch their authors could see, when that branch started from this one; and `saw`, whether
+ * a batch is in that branch's document at the last entry merged. Returns "missing" while this peer
+ * lacks an entry the merge names, and "stale" for one it never will have.
  */
 export type Merging = (
   op: Merge,
@@ -63,7 +61,6 @@ export type Change = {
 
 type Held = { batch: Batch; hash: string };
 
-// A history's whole state, which the functions below share.
 type State = {
   branch: BranchId;
   sequencer: KeyId;
@@ -75,9 +72,7 @@ type State = {
   touched: Touched[][];
   // Each entry's skipped operations, by index, for undoing it.
   skips: Array<ReadonlySet<number>>;
-  // The entry that appended each batch, by author and seq.
   entryOf: Map<string, number>;
-  // Each author's appended batches, in the order appended.
   byAuthor: Map<KeyId, Batch[]>;
   // Batches by hash: an author who signs two batches with one seq has both held until an entry
   // picks one.
@@ -94,7 +89,6 @@ type State = {
   // The entries' document every SNAPSHOT_EVERY entries, from entry 0.
   snapshots: Map<number, Snapshot>;
   view: Project;
-  // The pending batches as applied to the shown document, in order.
   shown: Array<{ held: Held; applied: Applied }>;
   resolver: Resolver;
 };
@@ -107,8 +101,8 @@ export const SNAPSHOT_EVERY = 512;
 
 const keyOf = (ref: { author: KeyId; seq: number }) => `${ref.author} ${ref.seq}`;
 
-// The provisional order of pending batches: by clock, then author, by code unit, then seq, and
-// last by hash, for an author who signed two batches with one seq.
+// The provisional order of pending batches: by clock, then by author compared by code unit, then
+// by seq, and last by hash, for an author who signed two batches with one seq.
 function byClock(a: Held, b: Held) {
   const ka = `${a.batch.hlc} ${a.batch.author}`;
   const kb = `${b.batch.hlc} ${b.batch.author}`;
@@ -133,7 +127,7 @@ function record(change: Change, applied: Pick<Applied, "changed" | "ranges">) {
   widen(change.ranges, applied.ranges);
 }
 
-/** Adds what `more` changed to `change`. */
+/** Adds what `more` changed to `change`, widening each sequence's range to cover both. */
 export function combine(change: Change, more: Change) {
   record(change, more);
   change.entered.push(...more.entered);
@@ -148,7 +142,6 @@ function head(state: State) {
   return { n, hash: n === 0 ? "" : (state.hashes[n - 1] ?? "") };
 }
 
-// The batch an entry appended.
 function batchOf(state: State, n: number) {
   const each = state.held.get(state.appended[n - 1]?.batch.hash ?? "");
   if (each === undefined) throw new RangeError(`no batch for entry ${n}`);
@@ -159,10 +152,9 @@ function batchOf(state: State, n: number) {
 const named = (state: State, ref: EntryRef) =>
   ref.hash === (ref.n === 0 ? "" : state.hashes[ref.n - 1]);
 
-// The entries' document at an entry, from the nearest snapshot at or before it and the entries
-// after that; undefined for an entry this history doesn't have under that hash. An entry holding a
-// revert has a snapshot of its own, so the entries replayed never hold one, and going back never
-// recurses.
+// The entries' document at an entry, from the nearest snapshot at or before it; undefined for an
+// entry not here under that hash. An entry holding a revert has a snapshot of its own, so the
+// entries replayed never hold one, and going back never recurses.
 function atEntry(state: State, ref: EntryRef): Snapshot | undefined {
   if (ref.n > state.appended.length || !named(state, ref)) return undefined;
   if (ref.n === state.appended.length) return state.entered.snapshot();
@@ -253,9 +245,8 @@ function undoState(state: State, author: KeyId) {
   return { mine, undone, isUndo };
 }
 
-// The author's latest batch on the branch that isn't an undo, isn't undone, and applied an
-// operation undo can take back. A batch of only reverts and branch operations is passed over;
-// reverting to the entry before it takes it back.
+// Passes over a batch with nothing an undo takes back: only skipped operations, reverts and
+// branch operations, which `undoBatch` leaves alone.
 function undoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone } = undoState(state, author);
   const found = mine.find(
@@ -269,8 +260,8 @@ function undoable(state: State, author: KeyId): BatchRef | undefined {
   return found === undefined ? undefined : { author, seq: found.batch.seq };
 }
 
-// The author's latest undo that isn't itself undone, if no edit of theirs came after it. A redo is
-// an undo of an undo, so it is never redone itself.
+// Undefined once the author edits after their undo. A redo is an undo of an undo, so it is passed
+// over and never itself redone.
 function redoable(state: State, author: KeyId): BatchRef | undefined {
   const { mine, undone, isUndo } = undoState(state, author);
 
@@ -344,10 +335,8 @@ function applyNext(state: State, batch: Batch) {
   return { applied, reverts };
 }
 
-// An entry just applied to the entries' document: its hash, its batch, and what applying it did.
 type EnteredNow = { entry: Entry; hash: string; batch: Batch; applied: Applied; reverts: boolean };
 
-// Records an entry just applied, and whether it is concurrent.
 function appendEntered(
   state: State,
   { entry, hash, batch, applied, reverts }: EnteredNow,
@@ -396,7 +385,6 @@ function dropOthers(state: State, each: Held) {
   return others;
 }
 
-// Applies the next entry, whose batch is held, to the entries' document.
 function enter(state: State, entry: Entry, hash: string, change: Change) {
   const each = state.held.get(entry.batch.hash);
   if (each === undefined || !follows(state, entry))
@@ -485,7 +473,6 @@ const ready = (state: State, { batch }: Held) =>
     state.settled.has(keyOf({ author: batch.author, seq: batch.branchPrev }))) &&
   !waits(state, batch);
 
-// The received batches not yet appended, in clock order.
 function waiting(state: State) {
   return state.queue
     .splice(0)
@@ -501,8 +488,8 @@ async function sequenceNow(state: State, peer: CryptoKeyPair) {
   if (self !== state.sequencer) throw new RangeError("only the sequencer appends");
   const change = emptyChange();
   const made: Entry[] = [];
-  // Entries it signed that wait for their batches, as after opening a project with a log that
-  // didn't read, hold numbers it must not sign again.
+  // While entries wait for their batches, as after opening a project with a log that could not
+  // all be read, their numbers are taken, so the sequencer signs nothing.
   if (state.early.size > 0) return { entries: made, change };
   const queue = waiting(state);
   const isReady = (each: Held) => ready(state, each);

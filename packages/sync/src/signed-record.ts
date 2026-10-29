@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The source's signed records (docs/architecture.md#catalog): JSON signed by the session key
-// over a domain prefix, the session and every field in a fixed order. The prefix keeps a
-// signature over one kind of record from passing for another, or for anything else the session
-// key signs. Each kind checks its own fields into canonical shape; this signs and verifies that.
+// The source's signed records (docs/architecture.md#catalog). The domain prefix keeps a signature
+// over one kind of record from passing for another, or for anything else the session key signs.
 
 import { isRecord } from "./chat";
 import { keyId, sigBytes, sign, verify, type Bytes, type KeyId } from "./crypto";
@@ -33,7 +31,10 @@ export function onlyFields(value: Record<string, unknown>, fields: Set<string>) 
 const signedBytes = (domain: string, session: KeyId, record: object) =>
   encoder.encode(`${domain}\n${JSON.stringify({ session, ...record })}`);
 
-/** A record in canonical shape, signed with the session key under `domain`, as bytes. */
+/**
+ * The JSON bytes of `record` with `sig`, the session key's signature of it under `domain`.
+ * `record` must already be in canonical shape, since its fields are signed in the order given.
+ */
 export async function signRecord(session: CryptoKeyPair, domain: string, record: object) {
   const id = await keyId(session.publicKey);
   const sig = await sign(session.privateKey, signedBytes(domain, id, record));
@@ -41,7 +42,6 @@ export async function signRecord(session: CryptoKeyPair, domain: string, record:
   return encoder.encode(JSON.stringify({ ...record, sig: base64(sig) }));
 }
 
-// The JSON in `bytes`, or an `InvalidRecordError` for anything that isn't UTF-8 JSON.
 function parseJson(bytes: Bytes): unknown {
   try {
     return JSON.parse(decoder.decode(bytes));
@@ -50,7 +50,10 @@ function parseJson(bytes: Bytes): unknown {
   }
 }
 
-/** The record in `bytes`, split into its signature and the rest, or an `InvalidRecordError`. */
+/**
+ * The record in `bytes`, split into its signature and the rest, neither checked. Throws an
+ * `InvalidRecordError` for bytes that aren't a UTF-8 JSON object.
+ */
 export function parseRecord(bytes: Bytes) {
   const value = parseJson(bytes);
   if (!isRecord(value)) throw new InvalidRecordError("not an object");

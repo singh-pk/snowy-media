@@ -1,17 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media chunk (docs/architecture.md#media-chunk): a header the source signs, then the
-// chunk's packets in decode order. The header carries the body's SHA-256, so one signature
-// covers both, and a peer stores a chunk only once both check out. Everything is little-endian;
-// timestamps are microseconds on one timeline for every track.
-//
-// A signed header can never be taken back (the source stores it and never signs that chunk
-// again), so encoding refuses any field that would not read back as itself.
-//
-// On the wire a chunk is sealed with the content key under its object key,
-// `media/<track>/<index>`, which travels with it, so a peer can open it before reading the
-// header that names its slot.
+// The media chunk, version 1, encoded little-endian (docs/architecture.md#media-chunk). A signed
+// header can never be taken back, as the source never signs that chunk again, so encoding refuses
+// any field that would not read back as itself.
 
 import {
   keyBytes,
@@ -52,12 +44,12 @@ export type Chunk = {
   index: number;
   /** Inclusive: the pts of the chunk's keyframe. */
   startUs: number;
-  /** Exclusive: the next chunk's startUs. */
+  /** Exclusive: the next chunk's `startUs`. */
   endUs: number;
   packets: Packet[];
 };
 
-/** Where a chunk belongs: what a peer asked for, and checks it got. */
+/** Where a chunk belongs: what a peer asks for, and checks that it got. */
 export type ChunkSlot = { track: number; index: number };
 
 /** Thrown for a chunk that is truncated, misplaced, or fails its hash or signature. */
@@ -85,7 +77,7 @@ function checkTime(name: string, value: number) {
   }
 }
 
-// An i64 that doesn't fit a safe integer was never written by encodeChunk.
+// An i64 outside the safe integers was never written by `encodeChunk`.
 function readTime(view: DataView, at: number) {
   const value = view.getBigInt64(at, true);
 
@@ -147,8 +139,9 @@ function decodeBody(body: Bytes, count: number) {
 }
 
 /**
- * Cuts a chunk: the header, naming the session the key pair is, signed with its private key,
- * then the body. Throws a `RangeError` for a field that wouldn't read back as itself.
+ * Encodes a chunk: its header, naming the session whose key pair `session` is and signed with
+ * its private key, then its body. Rejects with a `RangeError` for a field that would not read
+ * back as itself, such as a track above 65535 or a time that is not a safe integer.
  */
 export async function encodeChunk(session: CryptoKeyPair, chunk: Omit<Chunk, "session">) {
   checkUint("track", chunk.track, U16);
@@ -180,7 +173,7 @@ export async function encodeChunk(session: CryptoKeyPair, chunk: Omit<Chunk, "se
 
 /**
  * Checks that a chunk names the session whose public key is given, is signed by it, holds the
- * body it signed, and is the chunk asked for, then reads it. Rejects with an
+ * body it signed, and is the chunk `slot` asks for, then reads it. Rejects with an
  * `InvalidChunkError` for anything that fails: a forwarder can't pass one chunk off as another.
  */
 export async function decodeChunk(
@@ -220,12 +213,14 @@ export async function decodeChunk(
   };
 }
 
-/** A chunk's object key: `media/<track>/<index>`. */
 export const chunkKey = ({ track, index }: ChunkSlot) => `media/${track}/${index}`;
 
 const CHUNK_KEY = /^media\/(0|[1-9]\d{0,4})\/(0|[1-9]\d{0,9})$/;
 
-/** The slot an object key names, or undefined for a key that isn't a chunk's, spelled as `chunkKey` spells it. */
+/**
+ * The slot an object key names, or undefined for a key that is not a chunk's as `chunkKey` spells
+ * it: decimal, without leading zeros.
+ */
 export function chunkSlot(key: string): ChunkSlot | undefined {
   const [, track, index] = CHUNK_KEY.exec(key) ?? [];
   if (track === undefined || index === undefined) return undefined;
@@ -234,8 +229,8 @@ export function chunkSlot(key: string): ChunkSlot | undefined {
 }
 
 /**
- * Cuts a chunk as `encodeChunk` does and seals it under its object key, for the source to send.
- * Throws a `RangeError` as `encodeChunk` does.
+ * Encodes a chunk as `encodeChunk` does and seals it under its object key, for the source to
+ * send. Rejects with a `RangeError` as `encodeChunk` does.
  */
 export async function sealChunk(
   session: CryptoKeyPair,

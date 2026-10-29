@@ -19,7 +19,8 @@ Then check, in this order, and report only real problems:
    - A behaviour change without a test, or a test that cannot fail.
    - Run `git diff -U0 origin/main...HEAD -- '*/test/*' '*/scripts/gen-fixtures.ts' '*/coverage-floor.json' .oxlintrc.json .jscpd.json` and look at every removed or changed `expect`, tolerance, fixture, minimum, floor and count. A blocker unless the pull request says why the old value was wrong: an assertion loosened, deleted or rewritten to match new output, a tolerance widened, a coverage floor lowered, or a lint rule or duplication setting loosened. Also look at every added `oxlint-disable` and `jscpd:ignore-start` in the diff (`git diff origin/main...HEAD | grep -E '^\+.*(oxlint-disable|jscpd:ignore-start)'`): each is a blocker unless its reason holds, since a limit has no other way around it.
    - An expected value computed by the code under test instead of an independent source.
-5. **Clarity.** The review rows of `## Standards`: names, one job per file, comments that say why, one way per concern, nothing written twice. Also dead code, and scope beyond the pull request's purpose.
+5. **Comments.** Every comment the diff adds or rewrites (`git diff -U0 origin/main...HEAD | grep -E '^\+\s*(//|/\*|\*)'`). Each one is a `should-fix` unless it states what the code can't: an export's contract (units, edge values, what throws), a reason that isn't obvious, an outside constraint, a performance choice or a trap. A comment that repeats a name, a type or the next line, or says what a field or variable holds, is deleted, or the name changes. A kept block longer than 3 lines is cut to its reason.
+6. **Clarity.** The review rows of `## Standards`: names, one job per file, one way per concern, nothing written twice. Also dead code, and scope beyond the pull request's purpose.
 
 Do not suggest rewrites for taste.
 

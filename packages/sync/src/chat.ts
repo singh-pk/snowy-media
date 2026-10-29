@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Chat messages and checkpoints (docs/architecture.md#chat). A message's bytes are its
-// canonical JSON: the fields in the order of `ChatMessage`, absent ones left out, as UTF-8.
-// Every peer re-encodes what it parses the same way, so they all hash a message alike: each
-// message names its predecessor's hash, and a signed checkpoint names the newest one, which
-// proves every message that chains back from it.
+// Chat messages and checkpoints (docs/architecture.md#chat). A message's bytes are its canonical
+// JSON (fields in `ChatMessage` order, absent ones left out), and every peer re-encodes what it
+// parses the same way, so they all hash a message alike and a checkpoint proves its chain.
 
 import { isHlc, type Hlc } from "./hlc";
 import {
@@ -49,7 +47,7 @@ export type ChatMessage = {
   /** The hash of the author's previous message, or "" for seq 1. */
   prev: string;
   hlc: Hlc;
-  /** The sender's playhead when sending. */
+  /** The sender's playhead when sending, in microseconds of media time. */
   mediaUs: number;
   kind: ChatKind;
   target?: ChatTarget;
@@ -86,7 +84,6 @@ function checkTarget(value: unknown): ChatTarget {
   return { author: value.author, seq: value.seq };
 }
 
-// What each kind carries besides the common fields.
 function checkKindFields(kind: ChatKind, m: Record<string, unknown>) {
   const has = (field: string) => m[field] !== undefined;
 
@@ -157,7 +154,6 @@ export function checkMessage(value: unknown): ChatMessage {
 export const encodeMessage = (message: ChatMessage): Bytes =>
   encoder.encode(JSON.stringify(checkMessage(message)));
 
-// The JSON in `bytes`, or an `InvalidMessageError` for anything that isn't UTF-8 JSON.
 function parseJson(bytes: Bytes): unknown {
   try {
     return JSON.parse(decoder.decode(bytes));
@@ -177,7 +173,8 @@ export async function messageHash(message: ChatMessage) {
   return new Uint8Array(hash).toBase64({ alphabet: "base64url", omitPadding: true });
 }
 
-// A domain prefix, so a checkpoint signature can't pass for anything else the peer key signs.
+// The bytes a checkpoint signs start with a domain prefix, so that its signature can't pass for
+// anything else the peer key signs.
 function checkpointBytes({ author, seq, head }: Omit<Checkpoint, "sig">) {
   const body = encoder.encode(JSON.stringify({ author, seq, head }));
   const bytes = new Uint8Array(CHECKPOINT_DOMAIN.byteLength + body.byteLength);
@@ -186,7 +183,6 @@ function checkpointBytes({ author, seq, head }: Omit<Checkpoint, "sig">) {
   return bytes;
 }
 
-/** Signs a checkpoint at the author's newest message with the author's peer key. */
 export async function signCheckpoint(
   peer: CryptoKeyPair,
   newest: ChatMessage,
@@ -229,12 +225,13 @@ export function checkCheckpoint(value: unknown): Checkpoint | undefined {
 }
 
 /**
- * The messages a checkpoint proves: its own, then each earlier one its successor's `prev`
- * names, stopping at the first missing or mismatched seq, in seq order. Messages after the
- * checkpoint wait for a later one. Pass the messages held for the author too, so a chain can
- * run through them, and `since`, the author's highest seq already shown: the walk stops once
- * it links to that message. Several messages for one seq are fine; only the one whose hash
- * the chain names counts, so a forged copy can't hide the real one.
+ * The messages a checkpoint proves, in seq order: the one it names, then each earlier one that
+ * the `prev` of the message after it names, stopping at the first seq missing or not matching.
+ * A checkpoint that doesn't verify proves none, and messages after it wait for a later one. Pass
+ * every message held for the author, so a chain can run through them, and `since`, the author's
+ * highest seq already shown: the walk stops once it links to that message, which is left out.
+ * Several messages for one seq are fine; only the one whose hash the chain names counts, so a
+ * forged copy can't hide the real one.
  */
 export async function proven(messages: ChatMessage[], checkpoint: Checkpoint, since = 0) {
   const valid = await verifyCheckpoint(checkpoint);
@@ -259,7 +256,6 @@ export async function proven(messages: ChatMessage[], checkpoint: Checkpoint, si
   return chain;
 }
 
-// The candidate whose hash is the one expected.
 async function chained(candidates: ChatMessage[], expected: string) {
   for (const message of candidates) {
     const hash = await messageHash(message);

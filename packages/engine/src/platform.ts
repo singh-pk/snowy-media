@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The platform baseline. createEngine checks it once, before anything starts, here for what
-// the main thread can see and in the render worker for the rest; nothing else in the engine
+// The platform check on the main thread (docs/architecture.md#one-platform). `createEngine` runs it
+// once, before anything starts, and the render worker checks the rest; nothing else in the engine
 // checks for features.
 
 import type { Missing, PlatformFeature } from "./protocol";
@@ -18,7 +18,7 @@ const WASM_THREADS = new Uint8Array([
   0, 254, 16, 2, 0, 26, 11,
 ]);
 
-/** Thrown by createEngine when the browser lacks a feature the engine needs. */
+/** What `createEngine` rejects with when the browser lacks a feature the engine needs. */
 export class UnsupportedPlatformError extends Error {
   /** The first missing feature. */
   readonly feature: PlatformFeature;

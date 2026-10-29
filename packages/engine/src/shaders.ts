@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The compositor's shaders, and the render pipelines made of them: drawing a picture into the
-// canvas from its Y′CbCr planes or from RGB, converting a frame with Chromium's conversion, and
-// measuring both conversions of a frame against each other (src/measure.ts).
+// The compositor's shaders (docs/architecture.md#colour), and the render pipelines made of them:
+// drawing a picture into the canvas from its Y′CbCr planes or from RGB, converting a frame with
+// Chromium's conversion, and measuring both conversions of a frame against each other
+// (src/measure.ts).
 
 const VERTEX = /* wgsl */ `
 struct View {
@@ -60,7 +61,6 @@ fn bilinear(t: texture_2d<u32>, uv: vec2f) -> vec2f {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// The planes' R′G′B′ at \`uv\`.
 fn convert(uv: vec2f) -> vec3f {
   let y = bilinear(luma, uv).r;
   let blue = bilinear(cb, uv);
@@ -92,10 +92,9 @@ const RGB_SHADER = /* wgsl */ `${VERTEX}
 }
 `;
 
-// A frame converted by Chromium into a picture of its size. Where Chromium took it for Apple's
-// BT.709, a gamma of 1.961, and encoded it as sRGB (`apple`), that is undone; and where it took
-// another matrix or range than the stream's, `undo` takes its R′G′B′ back through its matrix to
-// the planes and on through the stream's, leaving the frame's R′G′B′ (docs/architecture.md#colour).
+// A frame converted by Chromium. Where Chromium took it for Apple's BT.709, a gamma of 1.961, and
+// encoded it as sRGB (`apple`), that is undone; where it took another matrix or range than the
+// stream's, `undo` maps its R′G′B′ to the stream's (docs/architecture.md#colour).
 const IMPORT_SHADER = /* wgsl */ `${VERTEX}
 @group(0) @binding(0) var frame: texture_external;
 @group(0) @binding(1) var linear: sampler;
@@ -109,7 +108,7 @@ fn srgbDecode(c: vec3f) -> vec3f {
 @fragment fn fs(@location(0) clip: vec2f) -> @location(0) vec4f {
   let uv = clip * vec2f(0.5, -0.5) + 0.5;
   let rgb = textureSampleBaseClampToEdge(frame, linear, uv).rgb;
-  // Mirrored about 0, as Chromium encodes a value below 0: the matrix after mixes the channels.
+  // Mirrored about 0, as Chromium encodes values below 0, which \`undo\` needs: it mixes channels.
   let undone = sign(rgb) * pow(srgbDecode(abs(rgb)), vec3f(1.0 / 1.961));
   let encoded = select(rgb, undone, apple);
   return vec4f((undo * vec4f(encoded, 1.0)).rgb, 1.0);

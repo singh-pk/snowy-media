@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Where an item goes (docs/architecture.md#anchors): the sequence its anchor puts it in, what a
-// clip needs besides, and where it starts, worked out from anchors and durations as layout does,
-// never stored.
+// Where an item goes (docs/architecture.md#anchors). An item's start is worked out from anchors
+// and durations, as layout does, and never stored.
 
 import type { ItemRecord } from "./document";
 import type { ItemId } from "./ids";
@@ -38,7 +37,8 @@ function contains(records: Records, outer: ItemId, inner: ItemId, seen = new Set
   return false;
 }
 
-// The sequence of a connected item on a clip, if the clip is a live storyline clip of a sequence.
+// The sequence of item `id`, connected to `clip`. Skips unless `clip` is a storyline clip other
+// than `id` that exists and, unless `orphanOk`, isn't removed.
 function clipSequence(records: Records, id: ItemId, clip: ItemId, orphanOk: boolean) {
   const target = records.items.get(clip);
   if (target === undefined || (target.removed && !orphanOk)) skip("stale", `no item ${clip}`);
@@ -51,9 +51,10 @@ function clipSequence(records: Records, id: ItemId, clip: ItemId, orphanOk: bool
 }
 
 /**
- * The sequence an item in `record` belongs to, if its anchor fits: storyline clips and gaps,
- * connected clips and markers on a storyline clip or the origin, and transitions on a storyline
- * item's end. A restored item may stay on a removed clip, as an orphan.
+ * The sequence an item in `record` belongs to; skips the operation when its anchor doesn't fit.
+ * Storyline clips and gaps anchor in a storyline, connected clips and markers on a storyline clip
+ * or the origin, and transitions on a storyline item's end. With `orphanOk`, as when an item is
+ * restored, the clip it is connected to may be removed.
  */
 export function sequenceFor(records: Records, id: ItemId, record: ItemRecord, orphanOk: boolean) {
   if (record.kind === "transition") {
@@ -93,9 +94,10 @@ function mediaKind(records: Records, record: Extract<ItemRecord, { kind: "clip" 
 }
 
 /**
- * What a clip needs besides its anchor: a role of its sequence that takes its kind of media, its
- * asset and stream, and for a new compound clip, a sequence that doesn't hold this one (a clip's
- * source never changes, so that is checked only when it is added or restored).
+ * Skips the operation unless a clip has what it needs besides its anchor: a role of its sequence
+ * that takes its kind of media, its asset and stream, and, when `placing` a compound clip, a live
+ * source sequence that neither is nor holds the clip's own. A clip's source never changes, so only
+ * adding or restoring a clip needs that last check.
  */
 export function checkClip(
   records: Records,
@@ -130,7 +132,8 @@ export function timeBaseOf(records: Records, record: ItemRecord): Ratio {
   return found?.timeBase ?? [1, FLICKS_PER_SECOND];
 }
 
-// A sequence's rate when `record` is video, which snaps to frames, or undefined for audio.
+// The rate a connected item's start snaps to: its sequence's for a clip in a video role, and
+// undefined for any other item, which doesn't snap.
 function snapRate(records: Records, record: ItemRecord, sequence: ItemId): Ratio | undefined {
   if (record.kind !== "clip" || records.roles.get(record.role)?.record.kind !== "video")
     return undefined;
@@ -187,7 +190,7 @@ export function start(records: Records, id: ItemId): number | undefined {
   return startOf(records, id, state.record, state.sequence);
 }
 
-/** A connected item must start and end at a safe integer to be placed. */
+/** Skips placing a connected item unless it starts and ends at a safe integer. */
 export function checkPlaced(records: Records, id: ItemId, record: ItemRecord, sequence: ItemId) {
   if (inStoryline(record) || record.kind === "transition") return;
   const from = startOf(records, id, record, sequence);

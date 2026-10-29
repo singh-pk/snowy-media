@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Media chunks in the local store (docs/architecture.md#local-store): `media/<track>/<index>` in
-// the session's OPFS directory, each holding the sealed bytes as they came, so a peer forwards
-// them unchanged. A chunk is stored only once it checks out, and one whose key is stored, or
-// being stored, is thrown away unread. Each file is written through a writable stream, which
-// Chromium writes aside and moves into place on close, so a browser crash leaves a chunk whole or
-// empty, never torn. The store owns `media/`: on opening, it removes whatever isn't a chunk, such
-// as an empty file or a swap file a crash left, which would otherwise count against the quota.
-// The store is this origin's own, so what reads back after a reload isn't checked again.
+// Media chunks in the local store (docs/architecture.md#local-store), sealed as they came so a
+// peer forwards them unchanged. Chromium writes a writable stream aside and moves it into place on
+// close, so a crash leaves a chunk whole or its file empty; opening removes whatever isn't a
+// chunk, such as that empty file or a swap file, which uses up quota.
 
 import { chunkKey, chunkSlot, openChunk, type ChunkSlot } from "./chunk";
 import type { Bytes, SealedObject } from "./crypto";
@@ -16,19 +12,18 @@ import type { Bytes, SealedObject } from "./crypto";
 export type ChunkStoreOptions = {
   /** The session's public key, which signs every chunk. */
   sessionKey: CryptoKey;
-  /** The content key, which seals every chunk. */
   content: CryptoKey;
-  /** Called with each chunk stored. What it throws is reported, as the chunk stays stored. */
+  /** Called with each chunk stored. What it throws goes to `reportError`; the chunk is kept. */
   onStored?: (slot: ChunkSlot) => void;
-  /** Called with each chunk evicted. What it throws is reported, as the chunk stays gone. */
+  /** Called with each chunk evicted. What it throws goes to `reportError`; the chunk stays gone. */
   onEvicted?: (slot: ChunkSlot) => void;
 };
 
 const isError = (error: unknown, name: string) =>
   error instanceof DOMException && error.name === name;
 
-// Tells a callback, reporting what it throws rather than rejecting: the store has changed either
-// way.
+// Calls `callback`, passing what it throws to `reportError` rather than rejecting, as the store
+// has changed either way.
 function report(callback: ((slot: ChunkSlot) => void) | undefined, slot: ChunkSlot) {
   try {
     callback?.(slot);
@@ -37,8 +32,6 @@ function report(callback: ((slot: ChunkSlot) => void) | undefined, slot: ChunkSl
   }
 }
 
-// Whether an entry of a track's directory is a chunk: a file named as a chunk key spells it, with
-// bytes in it.
 async function isChunk(track: string, index: string, entry: FileSystemHandle) {
   if (!(entry instanceof FileSystemFileHandle)) return false;
   if (chunkSlot(`media/${track}/${index}`) === undefined) return false;
@@ -87,7 +80,7 @@ async function discard(
   try {
     await dir.removeEntry(name);
   } catch {
-    // Left empty.
+    // Left empty, for the next opening to remove.
   }
 }
 
@@ -100,7 +93,6 @@ export async function openChunkStore(
   options: ChunkStoreOptions,
 ) {
   const media = await session.getDirectoryHandle("media", { create: true });
-  // Each track's stored indexes.
   const held = new Map<number, Set<number>>();
   // Keys being stored or evicted, so a copy that arrives meanwhile is thrown away.
   const busy = new Set<string>();
@@ -199,7 +191,7 @@ export async function openChunkStore(
     return true;
   }
 
-  /** A track's stored indexes, in order. */
+  /** The indexes of a track's stored chunks, in ascending order. */
   // copy: a Set can't be sorted, so its indexes go into an array.
   const indexes = (track: number) => [...(held.get(track) ?? [])].toSorted((a, b) => a - b);
 

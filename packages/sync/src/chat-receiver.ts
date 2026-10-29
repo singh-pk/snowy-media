@@ -2,11 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Receiving chat (docs/architecture.md#chat). A batch proves itself, so one path takes them all:
-// from an author's track, from a repair reply, and this peer's own as it publishes them. Each
-// message moves the clock and goes into the log; the batch goes into the holdings, to answer
-// others' repairs, after the whole batch is in the local store; and a seq still missing below the
-// newest one held is asked for. After a reload, the store's records restore the holdings, the
-// log and the clock.
+// from an author's track, from a repair reply, and this peer's own as it publishes them. A batch
+// goes into the holdings, to answer others' repairs, only once all of it is in the local store.
 
 import { decodeBatch } from "./chat-batch";
 import type { createChatHoldings } from "./chat-holdings";
@@ -71,10 +68,9 @@ export function createChatReceiver(options: ChatReceiverOptions) {
   }
 
   /**
-   * Restores what the local store held at opening, before anything is received. Messages
-   * written but never proven, this peer's own unsent ones, go into the log but not the holdings,
-   * so they aren't offered to others until their batch comes back. It asks for no gaps: the
-   * version vector sent on reconnect fills them.
+   * Restores what the local store held at opening, before anything is received. This peer's own
+   * unsent messages go into the log but not the holdings, so they aren't offered to others until
+   * their batch comes back. It asks for no gaps: the version vector sent on reconnect fills them.
    */
   async function restore(records: ReadonlyMap<KeyId, ChatRecords>) {
     const restores = Array.from(records, ([author, { messages, checkpoints }]) =>
@@ -85,7 +81,7 @@ export function createChatReceiver(options: ChatReceiverOptions) {
     for (const { messages } of records.values()) {
       for (const message of messages) {
         clock.receive(message.hlc);
-        // Shown before: none of them is late now.
+        // These were shown in an earlier visit, so none of them is late now.
         log.add(message, NOT_LATE);
       }
     }

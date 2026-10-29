@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A project's document, changed only by applying batches (docs/architecture.md#applying). Every
-// operation is checked again as it is applied, against the document as it is then, and one that
-// doesn't fit is skipped and recorded, never half applied: a batch from a buggy or hostile peer
-// can't break anyone's document, and every peer skips the same operations. Applying uses only
-// the batch and the document: no clock, no random numbers, no locale.
+// A project's document, changed only by applying batches (docs/architecture.md#applying). An
+// operation that doesn't fit is skipped, never half applied, so a buggy or hostile peer can't break
+// anyone's document and every peer skips the same. No clock, no random numbers, no locale.
 
 import { apply, type Range, type Resolver } from "./apply";
 import type { Batch } from "./batch";
@@ -20,7 +18,6 @@ export type { Applied, Range, Resolver } from "./apply";
 export { leafOf } from "./leaf";
 export type { Snapshot } from "./snapshot";
 
-/** What a peer reads of a document: everything but applying. */
 export type Document = Omit<ReturnType<typeof createProject>, "apply">;
 
 /** A project's document, empty or as a snapshot left it. */
@@ -31,7 +28,8 @@ export function createProject(initial?: Snapshot) {
   return {
     /**
      * Applies a batch's operations in order, skipping any that doesn't fit the document. `history`
-     * resolves reverts and merges; without it they, and the other branch operations, are skipped.
+     * resolves reverts and merges; without it, reverts, merges and the other branch operations are
+     * skipped.
      */
     apply: (batch: Pick<Batch, "author" | "seq" | "ops">, history?: Resolver) =>
       apply(records, batch, history),
@@ -59,7 +57,7 @@ export function createProject(initial?: Snapshot) {
     itemBefore: (id: ItemId) => query.itemBefore(records, id),
     /** The live transitions on the end of a storyline item, by id. */
     transitions: (cut: ItemId) => query.transitions(records, cut),
-    /** A sequence's length: its storyline's, in flicks. */
+    /** A sequence's length in flicks: its storyline's duration, or 0 for an unknown sequence. */
     length: (sequence: ItemId) => records.sequences.get(sequence)?.storyline.duration() ?? 0,
     /** The time base a clip's source points are in: its stream's, or flicks'. */
     timeBase: (record: ItemRecord) => timeBaseOf(records, record),

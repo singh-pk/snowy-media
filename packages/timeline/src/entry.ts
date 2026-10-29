@@ -19,7 +19,6 @@ const entryFields = {
   batch: batchRef,
 };
 
-// Only the first entry follows no entry.
 const chained = (entry: { n: number; prev: string }) => (entry.n === 1) === (entry.prev === "");
 
 const unsignedEntry = refine(record(entryFields), chained, "prev doesn't fit n");
@@ -42,7 +41,10 @@ const refusalFields = {
 const unsignedRefusal = record(refusalFields);
 const signedRefusal = record({ ...refusalFields, sig: signature });
 
-/** A batch a sequencer refused, which settles its seq on the branch. */
+/**
+ * A batch a sequencer refused. It settles that seq on the branch, so the author's next batch can
+ * follow it.
+ */
 export type Refusal = ReturnType<typeof signedRefusal>;
 
 /** Entries' bytes, signatures and hashes, as `prev` and an `EntryRef` name them. */
@@ -53,7 +55,6 @@ export const entries = signedFormat<Entry>({
   signed: signedEntry,
 });
 
-/** Refusals' bytes and signatures. */
 export const refusals = signedFormat<Refusal>({
   noun: "a refusal",
   domain: "snowy refusal v1\n",

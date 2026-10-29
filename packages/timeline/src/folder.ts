@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The project folder (docs/architecture.md#the-project-folder): what the editor writes for each
-// author's batches and each branch's entries, and opening a project from it again. The package
-// never touches the folder; it says what to write and is handed the files it reads. A log or a
-// history is segments of records, each a 4-byte big-endian length and then an object's canonical
-// bytes. A segment is named by the first seq or n in it and grows to SEGMENT_BYTES, since
-// Chromium copies a whole file to append to it.
+// The project folder (docs/architecture.md#the-project-folder). Logs and histories are split into
+// segments that grow to `SEGMENT_BYTES`, because Chromium copies a whole file to append to it.
 
 import { batchHash, decodeBatch, encodeBatch, verifyBatch, type Batch } from "./batch";
 import { createBranches, type Changes } from "./branches";
@@ -14,10 +10,12 @@ import { entries as entryFormat } from "./entry";
 import type { KeyId } from "./ids";
 import { InvalidError } from "./schema";
 
-/** Bytes for the editor to write into the file at `path`, from `offset`: the file's length so far. */
+/**
+ * Bytes for the editor to write into the file at `path`, at `offset`, which is the file's length
+ * so far, keeping the data before it.
+ */
 export type Write = { path: string; offset: number; bytes: Uint8Array };
 
-/** A file of the project folder, as the editor read it. */
 export type FolderFile = { path: string; bytes: Uint8Array };
 
 /** The size a log or history segment grows to before the next one starts. */
@@ -25,8 +23,8 @@ export const SEGMENT_BYTES = 1 << 20;
 
 const LENGTH_BYTES = 4;
 
-// A log's or history's last segment: its name, its length, and whether it ends in a record cut
-// short, after which nothing written could be read.
+// A log's or history's last segment: its name (`first`), its length, and whether it ends in a
+// record cut short, after which nothing written could be read.
 type Tail = { first: number; size: number; cut: boolean };
 
 function frame(bytes: Uint8Array) {
@@ -54,9 +52,9 @@ function records(bytes: Uint8Array) {
 }
 
 /**
- * What to write to the project folder for batches and entries: for a new project, or given the
- * last segment of each log and history and the hashes of the batches and entries written, as
- * `openFolder` finds them. It keeps and updates what it is given.
+ * Says what to write to the project folder for batches and entries. With no arguments it is for a
+ * new project; `openFolder` passes the last segment of each log and history and the hashes of the
+ * batches and entries already written, which it then keeps up to date.
  */
 export function createFolder(
   tails = new Map<string, Tail>(),
@@ -81,7 +79,7 @@ export function createFolder(
   }
 
   return {
-    /** What to write for a batch committed here or received, or nothing if it is written. */
+    /** What to write for a batch committed here or received, or undefined if it is written. */
     batch(batch: Batch, hash: string): Write | undefined {
       if (written.batches.has(hash)) return undefined;
       written.batches.add(hash);
@@ -139,9 +137,9 @@ function readSegments<T>(
 
 const keyOf = (batch: { author: KeyId; seq: number }) => `${batch.author} ${batch.seq}`;
 
-// The batches whose signature is their author's and that follow a batch of their author's
-// before them, by hash, with each path holding one that doesn't. A batch after one that didn't
-// read doesn't follow it either, so its file is reported too.
+// The batches, by hash, that carry their author's signature and follow their author's batch of
+// the seq before; the file of each one that does not goes in `unreadable`. A batch after one that
+// did not read follows nothing, so its file is reported too.
 async function verified(read: Array<Read<Batch>>, unreadable: string[]) {
   const byHash = new Map<string, Batch>();
   const hashesOf = new Map<string, Set<string>>();
@@ -174,11 +172,11 @@ async function verified(read: Array<Read<Batch>>, unreadable: string[]) {
 
 /**
  * Opens a project from the files of its folder: every author's log and every branch's history,
- * with `sequencer` sequencing main. Batches and entries are checked as they would be received;
- * the paths of files holding one that isn't valid are in `unreadable`, and the rest open. That
- * includes a file whose batches follow one that didn't read, and an entry refused as it is
- * applied; an entry that waits, for its batch or its branch, is checked when it can apply.
- * Returns the branches and what to write from then on.
+ * with `sequencer` sequencing main. Each batch and entry is checked as it would be on arrival.
+ * `unreadable` lists every file that holds a record that does not read, a batch that fails or
+ * follows one that did, or an entry refused as it applies; the rest opens. An entry that waits for
+ * its batch or its branch is checked when it can apply. Returns the branches, `unreadable`, and
+ * the folder that says what to write from then on.
  */
 export async function openFolder(files: readonly FolderFile[], options: { sequencer: KeyId }) {
   const unreadable: string[] = [];
@@ -216,7 +214,8 @@ export async function openFolder(files: readonly FolderFile[], options: { sequen
   }
 
   const tails = new Map([...logs.tails, ...histories.tails]);
-  // An entry that waits for its batch is written when it applies unless it is known as read.
+  // Every entry read counts as written, so one that waits for its batch is not written again
+  // when it applies.
   const entries = await Promise.all(histories.found.map(({ value }) => entryFormat.hash(value)));
   const folder = createFolder(tails, {
     batches: new Set(batches.keys()),

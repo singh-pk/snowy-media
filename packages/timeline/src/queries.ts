@@ -47,7 +47,7 @@ export function storylineItems(records: Records, sequence: ItemId, range?: Range
   return found;
 }
 
-/** The live storyline item before a storyline item, with its start and duration, if any. */
+/** The live item before `id` in its storyline, if any. */
 export function itemBefore(records: Records, id: ItemId) {
   const state = records.items.get(id);
   if (state === undefined) return undefined;
@@ -88,7 +88,7 @@ export function connected(records: Records, role: ItemId) {
   return placed;
 }
 
-/** A clip's live effects in chain order, by position and then id, each with its id. */
+/** Live effects in chain order: by position, then id. */
 export function chain(records: Records, clip: ItemId) {
   const found = [];
 
@@ -102,7 +102,7 @@ export function chain(records: Records, clip: ItemId) {
   );
 }
 
-/** A sequence's live roles, each with its id, in order, by `order` and then id. */
+/** Live roles, by `order`, then id. */
 export function rolesOf(records: Records, sequence: ItemId) {
   return [...records.roles]
     .filter(([, state]) => !state.removed && state.record.sequence === sequence)
@@ -112,14 +112,14 @@ export function rolesOf(records: Records, sequence: ItemId) {
     );
 }
 
-/** The keyframes on a clip or effect, by param and then source point. */
+/** The keyframes of `target`, by param, then source point. */
 export function keyframesOf(records: Records, target: ItemId) {
   return [...(records.keyframes.get(target)?.values() ?? [])].toSorted((a, b) =>
     a.param === b.param ? a.at - b.at : byCodeUnit(a.param, b.param),
   );
 }
 
-/** The record with an id, of any kind, and whether it is removed. */
+/** The record with an id, of any kind. */
 export function recordOf(
   records: Records,
   id: string,

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A storyline's layout (docs/architecture.md#layout): its items ordered by (position, id), each
-// starting at the sum of the durations before it. They are kept in an AVL tree whose nodes also
-// hold their subtree's total duration, so inserting, removing, moving or changing the length of
-// an item costs O(log n), and so does finding an item's start or the item at a time. The tree's
-// shape depends on the order items arrived in, but no result does, and nothing in it is random.
+// A storyline's layout (docs/architecture.md#layout): items ordered by (position, id), in an AVL
+// tree whose nodes hold their subtree's total duration, so an edit, an item's start or the item at
+// a time is O(log n). Its shape depends on the order items arrived in, but no result does.
 
 import type { ItemId } from "./ids";
 import type { PositionKey } from "./position";
@@ -17,7 +15,6 @@ type Node = {
   left: Node | undefined;
   right: Node | undefined;
   height: number;
-  // The total duration of this node's subtree.
   total: number;
 };
 
@@ -139,7 +136,6 @@ function startIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   throw new RangeError(`not in the storyline: ${id}`);
 }
 
-// The item after the one at `position` and `id` in order, if there is one.
 function nextIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   let found: ItemId | undefined;
   let cursor = root;
@@ -154,7 +150,6 @@ function nextIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   return found;
 }
 
-// The item before the one at `position` and `id` in order, if there is one.
 function previousIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   let found: ItemId | undefined;
   let cursor = root;
@@ -169,7 +164,6 @@ function previousIn(root: Node | undefined, position: PositionKey, id: ItemId) {
   return found;
 }
 
-// The smallest position key in the tree after `position`, if there is one.
 function keyAfterIn(root: Node | undefined, position: PositionKey) {
   let found: PositionKey | undefined;
   let cursor = root;
@@ -184,7 +178,6 @@ function keyAfterIn(root: Node | undefined, position: PositionKey) {
   return found;
 }
 
-// The item playing at `t` flicks: the one with `start <= t < start + duration`.
 function atIn(root: Node | undefined, t: number): Placed | undefined {
   let before = 0;
   let cursor = root;
@@ -204,7 +197,6 @@ function atIn(root: Node | undefined, t: number): Placed | undefined {
   return undefined;
 }
 
-// Every item of the tree in order, with its start.
 function* itemsIn(root: Node | undefined): Generator<Placed> {
   const stack: Node[] = [];
   let cursor = root;
@@ -224,7 +216,11 @@ function* itemsIn(root: Node | undefined): Generator<Placed> {
   }
 }
 
-/** An empty storyline. Items are identified by id; each id is in it at most once. */
+/**
+ * Makes an empty storyline, in which each item id is at most once. Giving `insert` an id already
+ * in it, or any other method but `has` an id not in it, throws a `RangeError`, as does a duration
+ * that is not a non-negative safe integer or a storyline longer than a number holds exactly.
+ */
 export function createStoryline() {
   let root: Node | undefined;
   const nodes = new Map<ItemId, Node>();
@@ -260,7 +256,10 @@ export function createStoryline() {
     nodes.delete(id);
   }
 
-  /** Moves an item to `position`; what it leaves closes up, and what follows where it lands moves along. */
+  /**
+   * Moves an item to `position`: the gap it leaves closes up, and what follows where it lands
+   * moves along.
+   */
   function move(id: ItemId, position: PositionKey) {
     const { duration } = node(id);
     remove(id);
@@ -283,7 +282,7 @@ export function createStoryline() {
     setDuration,
     /** Where an item starts, in flicks from the sequence's start. */
     start: (id: ItemId) => startIn(root, node(id).position, id),
-    /** The item playing at `t` flicks: the one with `start <= t < start + duration`. */
+    /** The item at `t` flicks, the one with `start <= t < start + duration`, or undefined. */
     at: (t: number) => atIn(root, t),
     /** The smallest position key in the storyline after `position`, if there is one. */
     keyAfter: (position: PositionKey) => keyAfterIn(root, position),

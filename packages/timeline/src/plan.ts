@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The render plan (docs/architecture.md#queries-and-the-render-plan): what @snowy-media/engine
-// plays and exports for a range of a sequence. The range is cut into segments in which the set of
-// layers doesn't change; each layer says how to read its source and how to draw or mix it, with
-// every keyframe at its time on the timeline. Times are microseconds from here on, converted from
-// flicks once each; source points stay in their stream's units.
+// The render plan (docs/architecture.md#queries-and-the-render-plan): a range of a sequence, cut
+// into segments in which the set of layers doesn't change. Times are microseconds from here on,
+// converted from flicks once each; source points stay in their stream's units.
 
 import type { ItemRecord, KeyframeRecord, SequenceRecord, Value } from "./document";
 import type { ItemId } from "./ids";
@@ -30,13 +28,13 @@ type PlannedKeyframe = { at: number; value: Value; ease: KeyframeRecord["ease"] 
 /** A parameter: its value, or its keyframes in time order when it is animated. */
 type Animated = Value | { keyframes: PlannedKeyframe[] };
 
-/** An effect of a clip's chain, with its parameters. */
 type PlannedEffect = { id: ItemId; kind: string; params: Record<string, Animated> };
 
 /**
  * How a layer reads its source: the clip's in-point in its stream's `timeBase` (flicks for a
  * generator or a sequence), played from `start` on the timeline, in microseconds, at `speed`.
- * A source time is `in + (t − start) × speed`, in seconds converted to `timeBase`.
+ * The source time at timeline time `t` is `in + (t − start) × speed`, with `t − start`
+ * converted from microseconds to `timeBase`.
  */
 type Layer = {
   clip: ItemId;
@@ -47,20 +45,19 @@ type Layer = {
   in: number;
   timeBase: Ratio;
   start: number;
-  /** Where the clip ends on the timeline, in microseconds; a transition can play it past that. */
+  /** Where the clip ends, in microseconds; a transition can play it past either end. */
   end: number;
   speed: Ratio;
   effects: PlannedEffect[];
 };
 
-/** A video layer: a layer, drawn with its opacity, blend and transform. */
 type VideoLayer = Layer & {
   opacity: Animated;
   blend: Blend;
   transform: { x: Animated; y: Animated; scaleX: Animated; scaleY: Animated; rotation: Animated };
 };
 
-/** An audio layer: a layer, mixed with its gain and pan, faded, into its role's bus. */
+/** Mixed into its role's bus, `bus`. */
 type AudioLayer = Layer & {
   gainDb: Animated;
   pan: Animated;
@@ -100,9 +97,9 @@ type Plan = {
   next: Array<VideoLayer | AudioLayer>;
 };
 
-// A clip as placed: where it starts and ends, where it plays, which a transition can widen, and
-// what orders it among the others: the storyline first, then each role in order, then each lane
-// from the lowest up.
+// A clip as placed, in flicks: `start` and `end` on the timeline, `from` and `to` where it plays,
+// which a transition can widen, and `order`, its place in compositing order: the storyline first,
+// then each role in order, then each lane from the lowest up.
 type Placed = {
   clip: Clip & { id: ItemId };
   start: number;
@@ -116,7 +113,6 @@ type Placed = {
 // A transition as placed, its times in flicks.
 type Crossing = PlannedTransition;
 
-// The sequence a plan is of, with its record, in the document it is in.
 type Scope = { document: Document; sequence: ItemId; record: SequenceRecord };
 
 // What animates a placed clip's parameters: the keyframes on the clip or one of its effects.
@@ -256,11 +252,10 @@ function placedClips(scope: Scope, from: number, to: number) {
 
 type Story = { item: { id: ItemId; start: number; duration: number }; placed: Placed | undefined };
 
-// The transitions on the cuts after `stories`, widening the clips on each side to play through
-// them. Each half shortens on its own, so a transition can sit off centre: to the media its side
-// has past the cut, and to half the item next to the cut, so two transitions on one item never
-// meet. A transition with no clip on either side plays nothing, and of two on one cut, made at
-// once, the first by id plays.
+// The transitions on the cuts after `stories`, widening the clips each side to play through them.
+// Each half shortens on its own, to the media its side has past the cut and to half the item next
+// to the cut, so two transitions on one item never meet. One with no clip on either side plays
+// nothing, and of two on one cut, made at once, the first by id plays.
 function crossingsOf(
   { document, sequence, record }: Scope,
   stories: Story[],
@@ -282,7 +277,7 @@ function crossingsOf(
     const cut = item.start + item.duration;
     let after = stories[i + 1];
 
-    // The item after the last one in the range, which the transition can reach back into it.
+    // The item after the last one in the range: the transition can play it early, inside the range.
     if (after === undefined) {
       const [found] = document.storyline(sequence, { from: cut, to: cut });
       after = found && { item: found, placed: take(found.id, found.start, [0]) };

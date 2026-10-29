@@ -1,28 +1,24 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// How far a video decoder has decoded, whatever order it emits frames in: every frame up to a
-// time has come out of it. A packet that makes no frame (a VP8 alt-ref frame) is not waited
-// for, and nor is one whose frame a decoder never emits, once a frame fed far enough after it
-// has come out (docs/architecture.md#video-output).
+// How far a video decoder has decoded, whatever order it emits frames in. A packet that makes
+// no frame (a VP8 alt-ref frame), or whose frame is never emitted, stops being waited for once a
+// frame fed far enough after it comes out (docs/architecture.md#video-output).
 
 /**
- * How many packets, in decode order, a frame may be fed after one whose frame comes out after
- * it. How long a decoder holds frames delays them all alike, so this is how far the stream
- * reorders. Twice the 16 frames of an
- * H.264 or HEVC decoded picture buffer, as a margin; a stream that reorders further, or
- * stores a field a packet, may count a frame decoded before it comes, which then shows late
- * or is dropped, but never holds play.
+ * How far a stream may reorder, in packets fed: once a packet's frame comes out, a packet fed
+ * more than this many before it whose frame is still to come is taken to make none. Twice the 16
+ * frames of an H.264 or HEVC decoded picture buffer, as a margin; a stream that reorders further,
+ * or stores one field per packet, may show a frame late or drop it, but never holds play.
  */
 const HELD = 32;
 
-/** Tracks the packets given to a decoder whose frames have not come out. */
 export function createDecodeTracker(held = HELD) {
-  // Their timestamps, and their numbers in the order they were fed, in that order.
+  // The timestamps and feed numbers of the packets whose frames are still to come, in the order
+  // fed.
   const stamps: number[] = [];
   const numbers: number[] = [];
   const state = {
-    // The latest timestamp out.
     latest: -Infinity,
     // The dts of the last packet fed: every packet still to come is due after it.
     fed: -Infinity,
@@ -30,8 +26,8 @@ export function createDecodeTracker(held = HELD) {
   };
 
   /**
-   * A packet with timestamp `timestamp` and dts `dts` (microseconds) given to the decoder;
-   * `frame` is false if it makes no frame.
+   * Records a packet given to the decoder, with its `timestamp` and `dts` in microseconds;
+   * `frame` is false for a packet known to make no frame.
    */
   function feed(timestamp: number, dts: number, frame: boolean) {
     state.fed = dts;
@@ -42,8 +38,8 @@ export function createDecodeTracker(held = HELD) {
   }
 
   /**
-   * A frame with timestamp `timestamp` out. Packets fed more than `held` before its own will
-   * make no frame, and are no longer waited for.
+   * Records a frame with timestamp `timestamp` coming out. Packets fed more than `held` before
+   * its own are taken to make no frame, and are no longer waited for.
    */
   function out(timestamp: number) {
     state.latest = Math.max(state.latest, timestamp);
@@ -66,7 +62,7 @@ export function createDecodeTracker(held = HELD) {
     numbers.length = kept;
   }
 
-  /** The decoder is flushed: every frame is out, and no packet is to come. */
+  /** Records that the decoder is flushed: every frame is out, and no packet is to come. */
   function end() {
     stamps.length = 0;
     numbers.length = 0;

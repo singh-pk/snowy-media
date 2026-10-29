@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A peer's chat log (docs/architecture.md#chat): the messages it shows, in the order every peer
-// shows them, by (hlc, author). Chat is append-only, so edits, deletes and reactions are
-// messages too; what the interface shows is worked out from the whole log, and so is the same
-// on every peer that holds the same messages, whatever order they arrived in.
+// A peer's chat log (docs/architecture.md#chat), ordered by (hlc, author). Edits, deletes and
+// reactions are messages too, and what is shown is worked out from the whole log, so it is the
+// same on every peer that holds the same messages, whatever order they arrived in.
 
 import type { ChatMessage, ChatTarget } from "./chat";
 import type { KeyId } from "./crypto";
@@ -19,15 +18,15 @@ export type ChatEntry = {
   text: string;
   edited: boolean;
   /**
-   * It sorts below the clock this peer had when it arrived, such as one written offline. Local
-   * to each peer: it depends on when the message reached it.
+   * Whether the message sorts below the clock this peer had when it arrived, as one written
+   * offline does. Local to each peer, since it depends on when the message reached it.
    */
   late: boolean;
   /** Each emoji with the peers that reacted with it, in the order of their latest reactions. */
   reactions: Array<{ emoji: string; peers: KeyId[] }>;
 };
 
-/** Messages missing from one author, inclusive. */
+/** The messages missing from one author: seqs `firstSeq` to `lastSeq`, inclusive. */
 export type Gap = { author: KeyId; firstSeq: number; lastSeq: number };
 
 const key = ({ author, seq }: ChatTarget) => `${author}/${seq}`;
@@ -43,7 +42,6 @@ const compare = (a: ChatMessage, b: ChatMessage) =>
         : 1
       : a.seq - b.seq;
 
-// The index a message sorts at.
 function position(ordered: ChatMessage[], message: ChatMessage) {
   let low = 0;
   let high = ordered.length;
@@ -65,12 +63,11 @@ export function createChatLog() {
   const late = new Set<string>();
 
   /**
-   * Adds a message to show: the peer's own, one from its author's track, or one a checkpoint
-   * proved (`proven`), never a repaired one before that. The first message held for each
-   * `(author, seq)` stays; a later one is ignored. `clock` is the peer's clock value before it
-   * received the message: a message that sorts below it arrived late. Returns whether the
-   * message was new, and the gap before it if the author's newest message was more than one
-   * seq behind.
+   * Adds the peer's own message, one from its author's track, or one a checkpoint has proven
+   * (`proven` in src/chat.ts); never a repaired message before that. The first message held for
+   * each `(author, seq)` stays, and another returns `added: false`. `clock` is the peer's clock
+   * before the message arrived: one that sorts below it is marked late. `gap` is the seqs from its
+   * author that this message skips past, if any.
    */
   function add(message: ChatMessage, clock: Hlc): { added: boolean; gap?: Gap } {
     const author = authors.get(message.author) ?? { seqs: new Set(), newest: 0, contiguous: 0 };
@@ -97,11 +94,15 @@ export function createChatLog() {
   const versions = () =>
     Object.fromEntries(authors.entries().map(([author, { contiguous }]) => [author, contiguous]));
 
-  /** The text messages to show, in order, with edits, deletes and reactions applied. */
+  /**
+   * The text messages to show, in order, with edits, deletes and reactions applied. Only a
+   * message's own author can edit or delete it.
+   */
   function entries(): ChatEntry[] {
     const edits = new Map<string, string>();
     const deleted = new Set<string>();
-    // target, then reactor and emoji, to whether the reaction stands; later messages win.
+    // For each target, each reactor and emoji's latest reaction and whether it stands. A later one
+    // replaces it at the end, so a target's reactions stay in the order of their latest.
     const reactions = new Map<
       string,
       Map<string, { reactor: KeyId; emoji: string; on: boolean }>

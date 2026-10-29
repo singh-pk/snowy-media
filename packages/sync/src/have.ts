@@ -1,29 +1,20 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Have ranges (docs/architecture.md#have-ranges): what a forwarder holds, as index ranges per
-// track. A forwarder publishes them as `have/<peer>@n` on its `have` track, sealed like every
-// object, and sends them as a `have` message on `ctl` to the peers linked to it directly. They
-// aren't signed: on the relay, only the peer may publish its broadcast, and a direct link is the
-// peer's own. `n` counts up with each update, so a peer keeps the newest, whichever way it came.
-// It starts from the time the publisher was made, in milliseconds, so it keeps growing across
-// reconnects and reloads: an update from before one, arriving late on another path, can never
-// pass for a newer one.
-//
-// A forwarder doesn't publish on every store change: it notes the change and publishes when its
-// stream will accept more, so a burst of stores becomes one update.
+// Have ranges (docs/architecture.md#have-ranges). They aren't signed: on the relay, only the peer
+// may publish its broadcast, and a direct link is the peer's own. `n` starts from the publisher's
+// creation time in ms, so it grows across reconnects and reloads, and an update from before one,
+// arriving late on another path, can never pass for a newer one.
 
 import { isCount, isRecord } from "./chat";
 import type { ChunkSlot } from "./chunk";
 import { seal, unseal, type Bytes, type KeyId, type SealedObject } from "./crypto";
 
-/** One track's ranges: each `[start, end)` of indexes, in order, apart from each other. */
+/** One track's ranges: each `[start, end)` of indexes, in increasing order, with gaps between. */
 export type TrackRanges = { track: number; ranges: [number, number][] };
 
-/** A forwarder's ranges at update `n`. */
 export type Have = { n: number; tracks: TrackRanges[] };
 
-/** The `have` message on `ctl`. */
 export type HaveControl = { type: "have" } & Have;
 
 /** Have ranges that don't open or aren't well formed. */
@@ -37,7 +28,6 @@ const INDEXES = 0x1_0000_0000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** A forwarder's have object key: `have/<peer>@<n>`. */
 const haveKey = (peer: KeyId, n: number) => `have/${peer}@${n}`;
 
 /** Indexes as ranges, in order, each as long as it can be. */
@@ -55,13 +45,11 @@ export function rangesOf(indexes: Iterable<number>): [number, number][] {
   return ranges;
 }
 
-/** Whether ranges hold a chunk. */
 function holds(tracks: TrackRanges[], { track, index }: ChunkSlot) {
   const ranges = tracks.find((t) => t.track === track)?.ranges ?? [];
   return ranges.some(([start, end]) => start <= index && index < end);
 }
 
-// One track's ranges, checked: in order, apart, and within the indexes a chunk can have.
 function checkTrack(value: unknown): TrackRanges | undefined {
   if (!isRecord(value) || Object.keys(value).length !== 2) return undefined;
 
@@ -155,7 +143,10 @@ function parsed(bytes: Bytes): unknown {
 }
 
 export type HavePublisherOptions = {
-  /** What this forwarder holds now, read from the store when an update goes, leaving out tracks holding nothing. */
+  /**
+   * What this forwarder holds now, read from the store as each update goes, leaving out tracks
+   * that hold nothing.
+   */
   tracks(): TrackRanges[];
   /** Publishes an update: on the `have` track, and to the peers linked directly. */
   send(have: Have): void;
@@ -163,7 +154,8 @@ export type HavePublisherOptions = {
 
 /**
  * Publishes this forwarder's ranges: the first as soon as the stream will accept it, then one
- * whenever the store has changed and the stream will accept more.
+ * whenever the store has changed and the stream will accept more, so a burst of stores becomes one
+ * update.
  */
 export function createHavePublisher(options: HavePublisherOptions) {
   const state = { n: Date.now(), changed: true, writable: false };

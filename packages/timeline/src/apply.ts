@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Applying a batch (docs/architecture.md#applying): its operations in order, each checked against
-// the document as it is then and skipped if it doesn't fit, never half applied; what a merge
-// brings, once; and what each change redraws. Applying uses only the batch and the document: no
-// clock, no random numbers, no locale.
+// Applying a batch (docs/architecture.md#applying): each operation is checked against the document
+// as it is then and skipped if it doesn't fit, never half applied. Applying uses only the batch and
+// the document: no clock, no random numbers, no locale.
 
 import type { Batch } from "./batch";
 import { joinClips, splitClip } from "./cuts";
@@ -20,13 +19,18 @@ type Operation = Batch["ops"][number];
 type Merge = Extract<Operation, { op: "branch.merge" }>;
 type Applicable = Pick<Batch, "author" | "seq" | "ops">;
 
-/** A time range of a sequence that changed, in flicks; infinite at an end that reaches all the way. */
+/**
+ * A time range of a sequence, in flicks. An end is infinite when the change reaches all the way
+ * to it, as a revert's does.
+ */
 export type Range = { from: number; to: number };
 
-/** A batch a merge brought, by the merge's index, with the operations of it that were skipped. */
+/**
+ * `batch`, brought by the merge at `index` in the batch applied, and the operations of `batch`
+ * that were skipped.
+ */
 type Merged = { index: number; batch: Applicable; skipped: Skip[] };
 
-/** What applying a batch did. */
 export type Applied = {
   skipped: Skip[];
   /** The batches merges brought that the document didn't have, in the order applied. */
@@ -37,21 +41,22 @@ export type Applied = {
   ranges: Map<ItemId, Range>;
 };
 
-/**
- * What applying needs from the history: the branch applied to, the document at an entry of it,
- * for a revert, and the batches a merge brings, in their branch's order; "missing" while this peer
- * doesn't have every entry the merge names, "stale" for entries it never will.
- */
+/** What applying needs from the history. */
 export type Resolver = {
+  /** The branch the batch is applied to. */
   branch: Batch["branch"];
+  /** The document at an entry of the branch, for a revert; undefined for an entry not there. */
   at: (ref: EntryRef) => Snapshot | undefined;
+  /**
+   * The batches a merge brings, in their branch's order: "missing" while this peer doesn't have
+   * every entry the merge names, and "stale" for entries it never will have.
+   */
   merged: (op: Merge) => readonly Applicable[] | "missing" | "stale";
 };
 
 const EVERYTHING = { from: Number.NEGATIVE_INFINITY, to: Number.POSITIVE_INFINITY };
 
-// Applies an operation that adds, sets or removes one record; returns the ids it changed, or
-// undefined for an operation of another kind.
+// Undefined for an operation of another kind.
 function applyRecord(records: Records, op: Operation, id: ItemId): ItemId[] | undefined {
   switch (op.op) {
     case "project.set":
@@ -95,8 +100,7 @@ function applyRecord(records: Records, op: Operation, id: ItemId): ItemId[] | un
   }
 }
 
-// Applies an operation on items or keyframes; returns the ids it changed, or undefined for an
-// operation of another kind.
+// Undefined for an operation of another kind.
 function applyItem(records: Records, op: Operation, id: ItemId): ItemId[] | undefined {
   switch (op.op) {
     case "item.add":
@@ -149,8 +153,6 @@ function applyHistory(records: Records, op: Operation, history: Resolver | undef
   }
 }
 
-// What an operation redraws as a whole sequence: a sequence's settings, a role's order; and what a
-// revert redraws: every sequence.
 function wholeSequences(records: Records, op: Operation): ItemId[] {
   if (op.op === "revert") return [...records.sequences.keys()];
   if (op.op === "sequence.set") return [op.id];
@@ -184,7 +186,6 @@ function spans(records: Records, about: ItemId | undefined, clip: ItemId | undef
   ];
 }
 
-// A batch being applied: the document, the history, and what applying has done so far.
 type Applying = Omit<Applied, "changed"> & {
   records: Records;
   history: Resolver | undefined;
@@ -202,8 +203,8 @@ function widen({ ranges }: Applying, span: Span) {
 // merge brought, the index of that merge in the batch applied.
 type Step = { id: ItemId; index: number; skips: Skip[]; within?: number };
 
-// Applies one operation, or throws a skip. One a merge brought merges in turn, but doesn't revert
-// or open or close a branch: those name its own branch's entries.
+// Applies one operation, or throws a skip. An operation a merge brought may merge in turn, but
+// may not revert or open or close a branch: those name entries of the branch it came from.
 function run(applying: Applying, op: Operation, { id, index, within }: Step) {
   const { records, history } = applying;
   const names = op.op === "revert" || op.op === "branch.create" || op.op === "branch.close";
@@ -221,7 +222,6 @@ function run(applying: Applying, op: Operation, { id, index, within }: Step) {
   for (const changedId of ids) applying.changed.add(changedId);
 }
 
-// Applies one operation, recording what it changed, or records it as skipped.
 function step(applying: Applying, op: Operation, place: Step) {
   const { records } = applying;
   const about = subject(op, place.id);
@@ -240,8 +240,8 @@ function step(applying: Applying, op: Operation, place: Step) {
   for (const sequence of wholeSequences(records, op)) widen(applying, { sequence, ...EVERYTHING });
 }
 
-// Applies the batches a merge, the batch's operation `index`, brings that the document doesn't
-// have yet, each operation with the id it has on its own branch.
+// Applies the batches that the merge at `index` in the batch brings and the document doesn't have
+// yet, each operation with the id it has on its own branch.
 function merge(
   applying: Applying,
   op: Merge,

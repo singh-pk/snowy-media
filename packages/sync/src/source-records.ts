@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// A watch session's source records as a peer holds them (docs/architecture.md#catalog): the
-// newest catalog, the newest control record, each track's codec setup, and each page of the
-// chunk index listing the most chunks. Every record is signed by the session key, so one path
-// takes them all, from the source's tracks, from any peer that answers a joiner, and the source's
-// own as it publishes them. Each is kept with its sealed bytes, which a peer passes on unchanged.
+// A watch session's source records as a peer holds them (docs/architecture.md#catalog). Every
+// record is signed by the session key, so one path takes them all, from the source or any peer,
+// and each is kept with its sealed bytes, which a peer passes on unchanged.
 
 import { decodeCatalog, decodeSetup, encodeCatalog, encodeSetup } from "./catalog";
 import type { Catalog, CodecSetup } from "./catalog";
@@ -21,7 +19,6 @@ import { decodeControl, encodeControl, type Control } from "./control";
 import { seal, unseal, type Bytes, type SealedObject } from "./crypto";
 import { InvalidRecordError } from "./signed-record";
 
-/** A record of the source's, read. */
 export type SourceRecord =
   | { kind: "catalog"; catalog: Catalog }
   | { kind: "control"; control: Control }
@@ -31,23 +28,19 @@ export type SourceRecord =
 export type SourceRecordsOptions = {
   /** The session's public key, which signs every record. */
   sessionKey: CryptoKey;
-  /** The content key, which seals the records. */
   content: CryptoKey;
   /**
    * Called with each record kept: a newer catalog or control record, a track's first setup, or a
-   * page of the index listing more chunks.
-   * What it throws is reported, as the record stays kept.
+   * page of the index listing more chunks. What it throws is reported; the record stays kept.
    */
   onRecord?: (record: SourceRecord) => void;
 };
 
 type Held<T> = { value: T; object: SealedObject };
 
-/** Whether an object's key names one of the source's records. */
 export const isSourceKey = (key: string) =>
   ["catalog@", "control@", "init/", "index/"].some((prefix) => key.startsWith(prefix));
 
-// Reads a record whose object key names its kind.
 async function decoded(sessionKey: CryptoKey, key: string, bytes: Bytes): Promise<SourceRecord> {
   if (key.startsWith("catalog@")) {
     const catalog = await decodeCatalog(sessionKey, key, bytes);
@@ -72,7 +65,6 @@ async function decoded(sessionKey: CryptoKey, key: string, bytes: Bytes): Promis
   throw new InvalidRecordError(`not a source record: ${key}`);
 }
 
-// Opens a sealed object, rejecting with an `InvalidRecordError` for one that doesn't open.
 async function opened(content: CryptoKey, { key, sealed }: SealedObject) {
   try {
     return await unseal(content, key, sealed);
@@ -82,7 +74,7 @@ async function opened(content: CryptoKey, { key, sealed }: SealedObject) {
 }
 
 /**
- * Signs and seals one of the source's records, for the source to publish. Throws an
+ * Signs and seals one of the source's records, for the source to publish. Rejects with an
  * `InvalidRecordError` for a malformed one.
  */
 export async function sealSourceRecord(
@@ -110,8 +102,8 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     setups: Map<number, Held<CodecSetup>>;
   } = { setups: new Map(), pages: new Map() };
 
-  // Keeps a record if it is newer than what is held, checked once it is read, since another
-  // object may have been kept meanwhile. A track's setup is fixed for the session, so the first
+  // Keeps a record if it is newer than what is held, checked only once it is decoded, since
+  // another may have been kept meanwhile. A track's setup is fixed for the session, so the first
   // is kept and a later one, which can only repeat it, is not.
   function keep(record: SourceRecord, object: SealedObject) {
     if (record.kind === "catalog") {
@@ -146,7 +138,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
   }
 
   // Tells `onRecord`, reporting what it throws rather than rejecting `receive`: the record is
-  // kept already, and a later copy of it, kept no more, would never reach `onRecord` again.
+  // kept already, and a later copy of it would not be kept, so would never reach `onRecord`.
   function report(record: SourceRecord) {
     try {
       options.onRecord?.(record);
@@ -176,7 +168,6 @@ export function createSourceRecords(options: SourceRecordsOptions) {
     );
   }
 
-  /** The chunks the index lists so far, joined from its pages: their bounds and sizes. */
   const index = () => joinedIndex((page) => held.pages.get(page)?.value);
 
   // The highest page of the index held, or -1 for none, which any bounds reach.
@@ -189,7 +180,7 @@ export function createSourceRecords(options: SourceRecordsOptions) {
   /**
    * Whether this peer holds the whole state a joiner needs: a catalog, a control record, the setup
    * of every track in the catalog, and no page of the index missing before the last it holds. A
-   * full page never goes again, so a peer that missed one finds it only by asking for the state.
+   * full page is never sent again, so a peer that missed one gets it only by asking for the state.
    */
   function complete() {
     const { catalog, control } = held;

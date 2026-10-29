@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// The media worker: it reads the file and demuxes it with the FFmpeg core module, and decodes
-// and resamples its audio (src/audio-decoder.ts). It is the one thread that may block, so it
-// reads the file synchronously (src/io.ts) and waits for room in the packet ring (src/ring.ts)
-// and the PCM ring (src/pcm.ts).
+// The one thread that may block (docs/architecture.md#threads): it reads the file synchronously
+// (src/io.ts) and waits for room in the packet ring (src/ring.ts) and the PCM ring (src/pcm.ts).
 
 import {
   AV_NOPTS_VALUE,
@@ -27,12 +25,13 @@ import { createPcmProducer } from "./pcm";
 import { createProducer } from "./ring";
 import type { FromMedia, Opened, ToMedia, Track } from "./protocol";
 
-// The kinds of the other streams; data and an unknown type (-1) are "data".
+// The track kinds of streams that are neither video nor audio; any other type, data or unknown
+// (-1), is "data".
 const OTHER = new Map([
   [AVMEDIA_TYPE_SUBTITLE, "subtitle"],
   [AVMEDIA_TYPE_ATTACHMENT, "attachment"],
 ] as const);
-// Bytes per read: few reads, each one a slice of the file.
+// Bytes per read, 4 MiB, so the file is read in few, large slices.
 const BUFFER = 1 << 22;
 // The worker reads one file at a time (src/io.ts), so its one input has a fixed id.
 const IO = 1;
@@ -48,8 +47,8 @@ type DemuxRequest = Pick<
 >;
 type Clip = NonNullable<DemuxRequest["clip"]>;
 
-// `ahead` runs before packet `pkt` of `stream` is offered, `placed` once it is in the ring.
-// `ended` once no more packets come.
+// What a pump calls for each video packet: `ahead` before the packet in `pkt`, of `stream`, is
+// offered, `placed` once it is in the ring, and `ended` once no more packets come.
 interface Reach {
   ahead: (stream: number) => void;
   placed: () => void;
@@ -97,7 +96,7 @@ function track({ core, ctx, str }: Media, id: number): Track {
   return { id, kind: OTHER.get(type) ?? "data", codec };
 }
 
-// Stream `id's codec parameters, exported for a module that decodes it.
+// Stream `id`'s codec parameters, exported for the FFmpeg module that decodes it.
 function exportParams({ core, ctx, check }: Media, id: number) {
   const out = core._malloc(4);
   const size = core._sny_params_export(ctx, id, out);
@@ -110,7 +109,7 @@ function exportParams({ core, ctx, check }: Media, id: number) {
   return params;
 }
 
-// The FFmpeg module that decodes video stream `id`, or "none".
+// What decodes video stream `id`: WebCodecs, the FFmpeg module that holds its decoder, or "none".
 function videoDecoder({ core, ctx, str }: Media, id: number, codec: string) {
   if (WEBCODECS.has(codec)) return "webcodecs";
   const module = str(core._sny_codec_module(ctx, id));
@@ -158,8 +157,6 @@ function close(m: Media) {
   m.ctx = 0;
 }
 
-// Opens `file` in place of the open one and describes it, with its video streams'
-// parameters.
 function open(m: Media, file: File): Opened {
   const { core, check, str } = m;
   close(m);
@@ -194,9 +191,9 @@ function open(m: Media, file: File): Opened {
   return { info, video, index };
 }
 
-// The times of stream `id`'s keyframes in its demuxer's index, in microseconds, when they
-// are due or for some demuxers (MP4's) decoded, and of its last entry, up to which the index
-// is known: a fragmented MP4's, for one, holds only the fragments read so far.
+// The times, in microseconds, of stream `id`'s keyframes in its demuxer's index, and of the
+// index's last entry, up to which it is known (a fragmented MP4's holds only the fragments read
+// so far). A time is when the frame is due, or, for some demuxers such as MP4's, decoded.
 function keyframes({ core, ctx }: Media, id: number) {
   const st = core._sny_stream(ctx, id);
   const [num, den] = [core._sny_stream_tb_num(st), core._sny_stream_tb_den(st)];
@@ -226,8 +223,8 @@ function demuxer({ core, ctx }: Media, streams: number[]) {
   return ctx;
 }
 
-// The open file's demuxer, after checking that the core's decoders decode audio stream
-// `stream`: a codec in audio-ext fails.
+// The open file's demuxer, after checking that `stream` is audio that the core module decodes;
+// a codec in `audio-ext` throws.
 function audioDemuxer(m: Media, stream: number) {
   const { core, str } = m;
   const ctx = demuxer(m, [stream]);
@@ -261,8 +258,8 @@ function offer({ core, pkt }: Media, ring: Ring, stream: number) {
   return ring.offer(packet);
 }
 
-// What a pump does besides placing packets: decode `audio`, and tell `reach` of each packet
-// offered to the packet ring.
+// What a pump does besides placing packets: decode `audio`, tell `reach` of each packet offered
+// to the packet ring, and stop where `until` says.
 interface Pumped {
   audio?: Audio | undefined;
   reach?: Reach | undefined;
@@ -271,9 +268,9 @@ interface Pumped {
 
 type Until = ReturnType<typeof createUntil>;
 
-// Where a clip's demux stops: `past` says whether the packet in `pkt`, of a stream read, is at
-// or after `until` (microseconds), by its dts, so every packet after it in the stream is too;
-// and `done`, whether every stream read has got there.
+// Where a clip's demux stops. `past` says whether the packet in `pkt`, of a stream read, is at or
+// after `until` (microseconds) by its dts, and so is every later packet of that stream; `done`
+// says whether every stream read has got there.
 function createUntil({ core, ctx, pkt }: Media, until: number, streams: number[]) {
   const passed = new Uint8Array(core._sny_nb_streams(ctx));
   const left = { count: streams.length };
@@ -294,15 +291,11 @@ function createUntil({ core, ctx, pkt }: Media, until: number, streams: number[]
   return { past, done: () => left.count === 0 };
 }
 
-// What tells the clock in PCM ring `pcm` how far the packets placed reach, so it runs on past
-// the audio, or without any, to the end of the video; for a clip (`clip`), up to its `until`,
-// and once no more packets come, on to the composition's `end`, through the gap after the clip.
-// Without audio it also says so, and, but for a clip, whose gap before it runs, starts the clock
-// at the first packet where that is after `from` (seconds), the time the ring was made with: a
-// file whose video starts late, as an MPEG-TS file's may start hours in, starts there, played
-// from the start or sought to before it, as audio starts it at its first sample. It starts the
-// clock before the packet is offered, so the render worker never sees one before the start.
-// A packet of unknown duration reaches only to its pts.
+// Tells the clock in `pcm` how far the placed packets reach, so it runs on past the audio, or
+// without any, to the video's end; for a clip, to its `until`, then the composition's `end`.
+// Without audio or a clip, it starts the clock at the first packet's time where that is after
+// `from` (seconds), as a late-starting MPEG-TS file needs. It does so before that packet is
+// offered, so the render worker sees no earlier clock.
 function createReach(
   { core, ctx, pkt }: Media,
   pcm: ReturnType<typeof createPcmProducer>,
@@ -338,12 +331,10 @@ function createReach(
   return { ahead, placed, ended };
 }
 
-// Writes the packets of `streams` into `ring` and queues those of `audio`, decoding them into
-// its PCM ring as that has room, from where the demuxer is to the end of the file. The END
-// record follows the last packet as soon as it is read, and the audio drains after. Returns
-// early once the packet ring's consumer closes it; once the PCM ring's does, the audio stops
-// and the packets go on. It waits only when neither ring has room for what comes next: on the
-// PCM ring's doorbell, which both rings' consumers ring, or with no audio on the packet ring.
+// Writes the packets of `streams` into `ring`, and its end record once the last is read; decodes
+// `audio`'s into its PCM ring as that has room. It returns once the packet ring's consumer
+// closes it; once the PCM ring's does, only the audio stops. It waits only when neither ring has
+// room: on the PCM ring's doorbell, which both consumers ring, or else the packet ring's.
 function pump(m: Media, ring: Ring, streams: number[], { audio, reach, until }: Pumped) {
   const { core, check, pkt } = m;
   const ctx = demuxer(m, streams);
@@ -431,8 +422,8 @@ function pump(m: Media, ring: Ring, streams: number[], { audio, reach, until }: 
 }
 
 // Moves the demuxer to the keyframe of `stream` at or before `from` (microseconds), or to its
-// first keyframe when `from` is before it; whether it moved. A demuxer just opened is at the
-// start already.
+// first keyframe when `from` is before it, and returns whether it moved. A demuxer just opened
+// is at the start already.
 function seek(m: Media, stream: number, from: number) {
   const { core, ctx, check } = m;
   if (from === 0 && !m.read) return false;
@@ -448,8 +439,9 @@ function seek(m: Media, stream: number, from: number) {
   }
 
   // Some demuxers, MP4's among them, seek by dts, so the keyframe found can be due after the
-  // target, as an open-GOP CRA is, its leading pictures before it: then the one before.
-  // It stops at the stream's first keyframe, which a seek before it finds again.
+  // target, as an open-GOP CRA is when its leading pictures are due before it; then seek to the
+  // keyframe before.
+  // This stops at the stream's first keyframe, which a seek before it finds again.
   let previous: bigint | undefined;
 
   for (;;) {
@@ -479,7 +471,7 @@ function firstPacket({ core, ctx, check, pkt }: Media, stream: number) {
   }
 }
 
-// pump, and on an error fails the ring, so the thread reading it stops too; the
+// Runs `pump`, and on an error fails the packet ring, so the thread reading it stops too; the
 // error itself goes to whoever asked. `buffered` runs once the audio is buffered ahead.
 function demux(m: Media, request: DemuxRequest, buffered: () => void) {
   const { ring, streams, from, pcm, audio, clip } = request;

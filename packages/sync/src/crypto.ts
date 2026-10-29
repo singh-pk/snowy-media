@@ -1,11 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Keys, signatures and encryption for every object (docs/architecture.md#identity-sessions-and-access,
-// docs/architecture.md#encryption). Peers and the session are Ed25519 public keys, named by
-// their base64url; content is AES-256-GCM under a key derived from the session secret, with a
-// fresh random nonce for every encryption, so no object key, replaced object or lost counter
-// can ever reuse one.
+// Keys, signatures and encryption for every object
+// (docs/architecture.md#identity-sessions-and-access, docs/architecture.md#encryption). Every
+// encryption takes a fresh random nonce, so no object key, replaced object or lost counter can
+// ever reuse one.
 
 const NONCE = 12;
 const KEY = 32;
@@ -16,13 +15,15 @@ const encoder = new TextEncoder();
 /** Bytes WebCrypto accepts: never a view of a SharedArrayBuffer. */
 export type Bytes = Uint8Array<ArrayBuffer>;
 
-/** An object as it travels: its key, and its bytes sealed under that key. */
 export type SealedObject = { key: string; sealed: Bytes };
 
 /** An Ed25519 public key, as unpadded base64url: a `PeerId` or a `SessionId`. */
 export type KeyId = string;
 
-/** A new Ed25519 key pair. The private key is non-extractable; the public key always is. */
+/**
+ * A new Ed25519 key pair. The private key is non-extractable; the public key is always
+ * extractable.
+ */
 export function generateKeyPair() {
   return crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]);
 }
@@ -66,7 +67,6 @@ export function sigBytes(sig: unknown) {
   return canonical ? bytes : undefined;
 }
 
-/** The public key a key id names, for verifying. */
 export const publicKey = (id: KeyId) =>
   crypto.subtle.importKey("raw", keyBytes(id), { name: "Ed25519" }, true, ["verify"]);
 
@@ -74,7 +74,7 @@ export const publicKey = (id: KeyId) =>
 export const base64url = (bytes: Bytes) =>
   bytes.toBase64({ alphabet: "base64url", omitPadding: true });
 
-/** Whether `sig`, in its one spelling, is the signature by the key `key` names of `data`. */
+/** Whether `sig`, in its one spelling, is a signature of `data` by the key that `key` names. */
 export async function signedBy(key: KeyId, sig: unknown, data: Bytes) {
   const bytes = sigBytes(sig);
   if (bytes === undefined) return false;

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Signed objects: batches, entries and refusals (docs/architecture.md#batches). Each one's bytes
-// are its canonical JSON (src/schema.ts), at most 1 MiB. A peer re-encodes every object it reads
-// and refuses one whose bytes differ, so every peer hashes and verifies the same bytes. A
-// signature covers a domain naming the kind, such as `snowy batch v1\n`, then the canonical bytes
-// without `sig`, so it can't pass for anything else a peer key signs.
+// Signed objects (docs/architecture.md#batches): canonical JSON, at most 1 MiB, refused unless it
+// re-encodes to its bytes, so every peer hashes and verifies the same bytes. A signature covers a
+// domain naming the kind, then the bytes without `sig`, so it can't pass for another kind.
 
 import type { KeyId } from "./ids";
 import { InvalidError, string, type Schema } from "./schema";
@@ -28,7 +26,6 @@ function parseJson(bytes: Uint8Array): unknown {
   }
 }
 
-/** Bytes as unpadded base64url. */
 export const base64url = (bytes: ArrayBuffer) =>
   new Uint8Array(bytes).toBase64({ alphabet: "base64url", omitPadding: true });
 
@@ -54,7 +51,10 @@ export function signedFormat<S extends { sig: string }>(options: {
   /** An object's canonical bytes. Throws an `InvalidError` for a malformed or oversized one. */
   const encode = (value: S) => bytesOf(check(value));
 
-  /** Reads an object's bytes, refusing any that aren't its canonical bytes. */
+  /**
+   * Reads an object's bytes. Throws an `InvalidError` for bytes that are over 1 MiB, malformed, or
+   * not the object's canonical bytes.
+   */
   function decode(bytes: Uint8Array): S {
     if (bytes.byteLength > MAX_SIGNED_BYTES) throw new InvalidError("", `${noun} over 1 MiB`);
     const value = check(parseJson(bytes));
@@ -74,7 +74,6 @@ export function signedFormat<S extends { sig: string }>(options: {
     return bytes;
   }
 
-  /** Signs an object with a peer's private key. */
   async function sign(privateKey: CryptoKey, value: Omit<S, "sig">): Promise<S> {
     const sig = await crypto.subtle.sign("Ed25519", privateKey, signedBytes(value));
     const result = check({ ...value, sig: base64url(sig) });

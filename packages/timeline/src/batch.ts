@@ -25,7 +25,7 @@ const fields = {
   ops: array(operation, 1),
 };
 
-// Rules between fields, which no one field's schema can see.
+// Rules that span fields, which no single field's schema can check.
 function chained(batch: { seq: number; prev: string; branchPrev: number }) {
   return (batch.seq === 1) === (batch.prev === "") && batch.branchPrev < batch.seq;
 }
@@ -39,7 +39,6 @@ const signedBatch = refine(
 
 /** A signed batch, in canonical shape. */
 export type Batch = ReturnType<typeof signedBatch>;
-/** A batch before its author signs it. */
 export type UnsignedBatch = ReturnType<typeof unsignedBatch>;
 
 const format = signedFormat<Batch>({
@@ -55,7 +54,9 @@ export const checkBatch = format.check;
 /** A batch's canonical bytes. Throws an `InvalidError` for a malformed or oversized batch. */
 export const encodeBatch = format.encode;
 
-/** Reads a batch's bytes, refusing any that aren't its canonical bytes. Throws an `InvalidError`. */
+/**
+ * Reads a batch's bytes, refusing any that aren't its canonical bytes. Throws an `InvalidError`.
+ */
 export const decodeBatch = format.decode;
 
 /** The id of a peer's public key, as `author` names it. */

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
-// Schemas for canonical JSON (docs/architecture.md#batches). A schema checks an untrusted value
-// and returns it in canonical shape: a record's fields in the order its schema declares them,
-// absent ones left out, and an open record's keys in code-point order. JSON.stringify of that
-// shape is the canonical bytes, so a peer that parses, checks and re-encodes bytes gets them
-// back exactly only if they were canonical.
+// Schemas for canonical JSON (docs/architecture.md#batches): a checked value comes back with its
+// fields in schema order, absent ones left out, and an open record's keys in code-point order, so
+// `JSON.stringify` of it is the canonical bytes, and re-encoding gives back only canonical bytes.
 
 /** Thrown for a value that doesn't fit its schema. */
 export class InvalidError extends Error {
@@ -52,7 +50,6 @@ export function string(pattern?: RegExp, max = Number.POSITIVE_INFINITY): Schema
   };
 }
 
-/** One of `values`. */
 export function oneOf<const T extends string>(...values: T[]): Schema<T> {
   return (value, at) => {
     const found = values.find((v) => v === value);
@@ -90,7 +87,6 @@ export const boolean: Schema<boolean> = (value, at) => {
   return value;
 };
 
-/** `expected`, exactly. */
 export function literal<const T extends string>(expected: T): Schema<T> {
   return (value, at) => {
     if (value !== expected) throw new InvalidError(at, `not ${expected}`);
@@ -150,7 +146,7 @@ export function record(fields: Fields): Schema<Record<string, unknown>> {
 function byCodePoint(a: string, b: string) {
   let i = 0;
 
-  // Equal so far, so both strings are at the same index i.
+  // Equal so far, so both strings are at the same index `i`.
   while (i < a.length && i < b.length) {
     const left = a.codePointAt(i) ?? 0;
     const right = b.codePointAt(i) ?? 0;
@@ -161,7 +157,10 @@ function byCodePoint(a: string, b: string) {
   return a.length - b.length;
 }
 
-/** An open record: keys matching `key`, in code-point order, each value checked by `value`. */
+/**
+ * An open record of at most `max` keys, each matching `key`, returned in code-point order, with
+ * each value checked by `value`.
+ */
 export function map<T>(
   key: RegExp,
   value: Schema<T>,

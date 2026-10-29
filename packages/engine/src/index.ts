@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: 2026 The Snowy Authors
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
-//
-// The public API of @snowy-media/engine.
 
 import type { VideoParams } from "./codec";
 import { type Clip, clipOf, type Composition } from "./composition";
@@ -28,76 +26,93 @@ export { UnsupportedPlatformError } from "./platform";
 export type { MediaInfo, PlatformFeature, Track } from "./protocol";
 
 export interface EngineOptions {
-  /** The canvas the engine draws video into; the engine takes control of it. */
+  /**
+   * The canvas the engine draws into. The engine takes control of it with
+   * `transferControlToOffscreen`, so the app can no longer draw into it or get a context for it.
+   */
   canvas: HTMLCanvasElement;
 }
 
 export interface Engine {
   /**
-   * Opens the file behind `handle` in place of the open one, stopping it and clearing the
-   * canvas to black, and resolves with what it holds. The handle comes from
-   * `showOpenFilePicker` or a drop, and may be one the app kept in IndexedDB, once
-   * `handle.requestPermission` has granted reading it again; without that, it rejects with
-   * the NotAllowedError of `handle.getFile`. Rejects with an AbortError if a later open is
-   * called before it resolves.
+   * Opens the file behind `handle` in place of whatever is open: it stops playback, clears the
+   * canvas to black and resolves with the file's format, duration and tracks. The handle comes from
+   * `showOpenFilePicker` or a dropped item, or is one the app kept in IndexedDB; a kept handle
+   * needs `handle.requestPermission` to grant reading it again first, or this rejects with the
+   * `NotAllowedError` of `handle.getFile`. Rejects with an `Error` giving FFmpeg's reason if the
+   * file cannot be opened, and with an `AbortError` if a later `open` or `compose` replaces it
+   * before it resolves.
    */
   open(handle: FileSystemFileHandle): Promise<MediaInfo>;
   /**
-   * Opens `composition` in place of what is open, as `open` does, and resolves once the file it
-   * plays is open: one clip of one file, its video and its audio in step, at any place on the
-   * composition, with black and silence before and after it, and the clock running on to its
-   * end. Its plan is read from start to end. Rejects with a NotSupportedError naming what the
-   * plan asks for that the engine does not play, such as a second layer, a transition, an
-   * effect or a speed; and as `open` does.
+   * Opens `composition` in place of whatever is open, as `open` does, and resolves once the file
+   * its clip plays from is open. The engine plays one clip of one file: its video and audio in
+   * step, placed anywhere in the composition, with black and silence before and after it, and
+   * the clock running on to the composition's end. It reads the plan once, from start to end.
+   * Rejects with a `NotSupportedError` naming what the plan asks for beyond that, such as a
+   * second layer, a transition, an effect or a speed; with a `RangeError` if the duration is not
+   * a positive whole number of microseconds, or if the clip's video or audio stream is not a
+   * video or audio track of its file; and for the reasons `open` does.
    */
   compose(composition: Composition): Promise<void>;
   /**
-   * Reads the open composition's plan and duration again, after an edit: a clip that has not
-   * changed plays on; otherwise it opens again and goes on from the time it was at, playing if
-   * it was, unless a seek or a pause came while it opened.
+   * Call after an edit to the open composition: reads its plan and duration again. If the
+   * duration and the clip are unchanged, playback goes on untouched. Otherwise the composition
+   * opens again and goes on from the time it was at (at most the new duration), playing if it
+   * was, unless the app seeks or pauses while it opens. Rejects if no composition is open, and
+   * for the reasons `compose` does.
    */
   changed(): Promise<void>;
   /**
-   * Plays the open file's first video and first audio track, or the open composition with its
-   * clip's, from where it is, once the browser allows audio to start (after a user gesture), unless a pause comes first: once
-   * video is decoded and audio buffered ahead, it starts the audio, and resolves once
-   * it is heard. Rejects if playing has failed, or with an AbortError if an open stops it
-   * while it starts.
+   * Plays the open file's first video and first audio track, or the composition's clip, from
+   * `currentTime`. It waits for the page to be visible and for the browser to allow audio (after
+   * a user gesture), and resolves once audio is heard, or as soon as `pause` is called while it
+   * waits. Rejects if nothing is open, the file has neither video nor audio, or playback has
+   * failed, and with an `AbortError` if an `open` or `compose` stops it while it starts.
    */
   play(): Promise<void>;
-  /** Pauses; `play` goes on from here. Rejects if playing has failed. */
+  /**
+   * Pauses, so that `play` goes on from here; `currentTime` holds still once it resolves.
+   * Rejects if playback has failed.
+   */
   pause(): Promise<void>;
   /**
-   * Goes to `time`, in seconds, at most the duration: the frame due then is on screen once it
-   * resolves, and audio goes on from there if it was playing. A play still starting goes on
-   * from `time` instead; a seek that a later one replaces resolves. Rejects if playing has
-   * failed, or with an AbortError if an open stops it. Paused in a hidden page, it resolves
-   * once the page is shown.
+   * Goes to `time`, in seconds; a time past the end goes to the end. Once it resolves, the frame
+   * due at `time` is on screen, and if it was playing, audio goes on from there. A `play` still
+   * starting starts from `time` instead. A seek that a later one replaces resolves. Paused in a
+   * hidden page, it resolves once the page is shown. Rejects with a `RangeError` if `time` is
+   * negative or not finite; if nothing is open or playback has failed; and with an `AbortError`
+   * if an `open` or `compose` stops it.
    */
   seek(time: number): Promise<void>;
   /**
-   * Goes to `time` as a scrub does, paused: the frame due then is on screen once it resolves,
-   * as with `seek`, but calls while one is under way only replace where it goes next, so
-   * however often it is called the screen follows as fast as it can decode. Forward, with no
-   * keyframe on the way, it decodes on instead of starting again, showing the frames it passes.
-   * Each call resolves once the frame of the last target is up; paused in a hidden page, once
-   * the page is shown. Playing, it is `seek`.
+   * Goes to `time` for scrubbing while paused. As with `seek`, the frame due at `time` is on
+   * screen once it resolves, but a call made while an earlier one is still under way only
+   * changes where it goes next, so the screen follows a dragged playhead as fast as frames
+   * decode, however often it is called. Going forward with no keyframe in between, it decodes on
+   * from the frame on screen instead of starting from a keyframe, and shows the frames it passes.
+   * Every call made during one scrub resolves once the frame due at the last target is on
+   * screen; paused in a hidden page, once the page is shown. While playing, it is `seek`.
+   * Rejects as `seek` does.
    */
   fastSeek(time: number): Promise<void>;
-  /** The time, in seconds, of what is being heard and seen now: the file's or the composition's. */
+  /** The time being heard and seen now, in seconds, on the open file's or composition's clock. */
   readonly currentTime: number;
-  /** Stops the engine's workers. */
+  /**
+   * Stops playback, closes the audio context and terminates the engine's workers. Calling it
+   * again does nothing.
+   */
   close(): void;
 }
 
-// A hidden page starts no audio: its animation frames, and so video, wait until it is shown.
+// Playback starts only in a visible page: a hidden page gets no animation frames, so its video
+// would not start with the audio.
 const visible = () => document.visibilityState === "visible";
 
 // A worker that fails to load fires a plain Event, without a message.
 const loadError = (e: Event, worker: string) =>
   new Error(e instanceof ErrorEvent ? e.message : `the ${worker} worker failed to load`);
 
-// Sends `message` to `worker` and resolves with its reply, or rejects if the worker fails to load.
 function request(worker: Worker, message: ToRender, transfer: Transferable[]) {
   return new Promise<FromRender>((resolve, reject) => {
     worker.addEventListener("message", (e: MessageEvent<FromRender>) => resolve(e.data), {
@@ -110,8 +125,7 @@ function request(worker: Worker, message: ToRender, transfer: Transferable[]) {
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-// The media worker, as a function per request; replies may come in any order. `buffered`
-// runs when a demux request says its audio is buffered.
+// Replies may come in any order, so each request carries an id.
 function createMedia() {
   const worker = new Worker(new URL("./media.worker.js", import.meta.url), { type: "module" });
   const pending = new Map<number, PromiseWithResolvers<FromMedia> & { buffered(): void }>();
@@ -163,8 +177,9 @@ function createMedia() {
 }
 
 /**
- * Starts an engine that draws into `canvas`. Rejects with an UnsupportedPlatformError naming
- * the first missing feature when the browser cannot run it.
+ * Starts an engine that draws into `canvas`. Rejects with an `UnsupportedPlatformError` naming
+ * the first missing feature when the browser cannot run it, and with an `InvalidStateError` if
+ * `canvas` already has a context or has been handed to another engine.
  */
 export async function createEngine({ canvas }: EngineOptions): Promise<Engine> {
   const missing = checkMainThread();
@@ -190,10 +205,9 @@ export async function createEngine({ canvas }: EngineOptions): Promise<Engine> {
 type Player = ReturnType<typeof createPlayerState>;
 
 function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>) {
-  // Wakes the waits of `until`.
   const waits = new Set<() => void>();
 
-  // Has each wait of `until` look again; on every event that may change what it waits for.
+  // Called on every event that may change a condition an `until` is waiting on.
   function changed() {
     for (const wake of waits) wake();
   }
@@ -204,8 +218,9 @@ function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>
     waits,
     changed,
     opened: undefined as { info: MediaInfo; video: Record<number, VideoParams> } | undefined,
-    // What plays of the open file, and, for a composition, its clip, how much later than the
-    // file's its times are (microseconds), and its length (seconds).
+    // The streams of the open file that play; for a composition, also its clip and how many
+    // microseconds later on the composition the file's times fall (`offset`). `duration` is the
+    // length of what is open, in seconds.
     streams: { video: undefined, audio: undefined } as Played,
     composition: undefined as Composition | undefined,
     clip: undefined as Clip | undefined,
@@ -213,35 +228,35 @@ function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>
     duration: undefined as number | undefined,
     // Whether a file or a composition is open.
     ready: false,
-    // Made on the first play, and kept: a page may only start so many.
+    // Made on the first play and kept, as a page may create only a limited number of them.
     context: undefined as AudioContext | undefined,
     // Set at once, so a second play while the first starts joins it.
     playback: undefined as Promise<Playback> | undefined,
-    // What plays, once it has started.
     started: undefined as Playback | undefined,
     // Why playing stopped, until the next open.
     failure: undefined as Error | undefined,
-    // The id of what plays, whose failures count, or -1; and the next one.
+    // The id of the play under way, or -1: only its failures count. `next` is the next play's id.
     current: -1,
     next: 0,
-    // Whether the last call was play, not pause, and nothing has stopped it since: an open, a
-    // failure, or a play rejecting with no seek taking over. A seek or a scrub plays on only
-    // then. And how many pauses there have been, so a play knows a pause stopped it.
+    // Whether the last call was `play`, not `pause`, and nothing has stopped it since: an open, a
+    // failure, or a play rejecting with no seek taking over. Only then does a seek or a scrub
+    // play on. `pauses` counts pauses, so a play can tell that a pause stopped it.
     playing: false,
     pauses: 0,
-    // Where the next play starts, in microseconds, or where a scrub has moved the paused one
-    // on to (`moved`, so its audio starts before); and how many seeks there have been.
+    // Where the next play starts, in microseconds, or where a scrub has moved the paused play on
+    // to; `moved` says which, as that play's audio is still where the scrub began. `seeks`
+    // counts seeks.
     from: 0,
     moved: false,
-    // Whether what plays has played: paused, its frame is then where the clock stopped, or a
-    // frame on, not at `from`.
+    // Whether the current play has played: if so, its paused frame is where the clock stopped,
+    // or a frame past it, not the frame due at `from`.
     played: false,
     seeks: 0,
     // How many opens there have been, so one that a later open replaces stops there.
     opens: 0,
     // The first video stream's keyframe times, in microseconds, as far as its index goes.
     index: { keyframes: [] as number[], end: -Infinity },
-    // The target of the scrub under way, which it goes on to next, and the scrub.
+    // The scrub under way (`running`) and the target it goes to next (`to`).
     scrub: { to: undefined as number | undefined, running: undefined as Promise<void> | undefined },
     // How far the render worker has decoded, as it last reported, and for which play.
     video: {
@@ -279,7 +294,6 @@ function failPlayer(p: Player, error: Error) {
   stop(p);
 }
 
-// What a play needs of the player.
 function playbackHost(p: Player): PlaybackHost {
   return {
     render: p.render,
@@ -291,7 +305,7 @@ function playbackHost(p: Player): PlaybackHost {
   };
 }
 
-// Starts what is open playing into `context` from `p.from`, as play `id`, in the file's time.
+// Starts what is open playing into `context` as play `id`, from `p.from` in the file's time.
 async function startPlay(p: Player, context: AudioContext, id: number) {
   if (!p.ready) throw new Error("play: no file is open");
   const { opened, streams: played } = p;
@@ -316,7 +330,8 @@ function stop(p: Player) {
   p.changed();
 }
 
-// Stops what plays, clears the canvas and forgets what was open, for an open of `id`.
+// Stops what plays, clears the canvas and forgets what was open, for the open of `id`; throws
+// an `AbortError` instead if a later open has replaced it.
 function reset(p: Player, id: number) {
   if (id !== p.opens) throw new DOMException("open: replaced", "AbortError");
   stop(p);
@@ -341,7 +356,8 @@ async function load(p: Player, handle: FileSystemFileHandle, id: number) {
   reset(p, id);
   const reply = await p.media.send({ type: "open", file });
   if (reply.type !== "opened") throw new Error(`open: unexpected ${reply.type}`);
-  // The later open has stopped this one, and its file is the one the media worker has open.
+  // A later open replaced this one while the media worker opened the file, so this one must not
+  // set `p.opened`: that is the later open's to do.
   if (id !== p.opens) throw new DOMException("open: replaced", "AbortError");
   p.opened = { info: reply.info, video: reply.video };
   return reply;
@@ -364,7 +380,6 @@ async function open(p: Player, handle: FileSystemFileHandle) {
   return reply.info;
 }
 
-// Throws unless `stream` of what is open is of `kind`.
 function checkStream(p: Player, stream: number | undefined, kind: "video" | "audio") {
   if (stream === undefined) return;
   const track = p.opened?.info.tracks.find((t) => t.id === stream);
@@ -376,7 +391,7 @@ async function compose(p: Player, composition: Composition) {
   if (!Number.isSafeInteger(duration) || duration <= 0)
     throw new RangeError(`compose: a duration of ${duration} µs`);
   const clip = clipOf(composition.plan(0, duration), duration);
-  // Only once the composition is known to play, so a refused one leaves what opens alone.
+  // Counted only once `clipOf` accepts the plan, so a refused composition aborts no other open.
   const id = ++p.opens;
   // Without a clip, nothing is read, and the clock runs on to the end.
   const played: Played = { video: clip?.video, audio: clip?.audio };
@@ -421,7 +436,7 @@ async function recompose(p: Player) {
   if (playing) await play(p);
 }
 
-// What plays, started from `p.from` unless something does, and its context.
+// The play under way, or a new one from `p.from` if there is none, and its audio context.
 async function begin(p: Player) {
   const context = (p.context ??= new AudioContext({ latencyHint: "playback" }));
 
@@ -444,7 +459,8 @@ async function play(p: Player) {
   p.played = true;
   p.scrub.to = undefined;
 
-  // Moved on by a scrub, its audio starts before where it is: it starts again from there.
+  // A play a scrub has moved on has its audio where the scrub began, so start again from where
+  // the scrub is.
   if (p.moved) {
     stop(p);
     p.moved = false;
@@ -566,9 +582,9 @@ async function scrub(p: Player) {
   }
 }
 
-// Whether the paused play can go on to `to` by decoding on: it has not played, so the frame
-// up is the one due at `from`, `to` is ahead of it, and the index says no keyframe comes up to
-// it, which starting again would decode from instead.
+// Whether the paused play can reach `to` by decoding on: it has not played, so the frame up is
+// the one due at `from`; `to` is ahead of it; and the index has no keyframe after `from` up to
+// `to`, as starting again would decode from that keyframe, with fewer frames to go.
 function movable(p: Player, to: number) {
   const { started, offset, clip } = p;
   if (p.played || !started?.drawn() || p.video.id !== started.id) return false;
