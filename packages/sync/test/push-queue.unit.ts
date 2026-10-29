@@ -8,12 +8,13 @@
 // selected late joins from the playhead, and one deselected stops; chunks of any length are found
 // by time, each with a length and starting where the last ended; and requests are cancelled,
 // dropped with their peer, queued once, refused when they name no chunk, and handed back for
-// `gone` once the last chunk comes before them.
+// `gone` once the last chunk comes before them; at most 4 wait from each peer; and a peer's
+// `request` and `cancel` messages are answered `busy` or `gone` where they must be.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import type { Catalog } from "../src/catalog";
-import { createPushQueue, PUSH_HORIZON_US, type Send } from "../src/push-queue";
+import { createPushQueue, PUSH_HORIZON_US, SOURCE_ROOM, type Send } from "../src/push-queue";
 
 const tracks: Catalog["tracks"] = [
   { id: 0, kind: "video", codec: "avc1.640028", bitrateKbps: 4_800 },
@@ -160,7 +161,7 @@ test("requests are cancelled, dropped with their peer, queued once, and refused 
     q.request("bob", { track: 0, index: -1 }),
     q.request("bob", { track: 0, index: 0.5 }),
   ];
-  expect(refused).toEqual([false, false, false, false]);
+  expect(refused).toEqual(["gone", "gone", "gone", "gone"]);
   expect(drain(q)).toEqual(["bob>0:1", "carol>0:0"]);
 });
 
@@ -218,4 +219,66 @@ test("a chunk with no length, or that doesn't start where the last one ended, is
   expect(() => q.cut(5 * SECOND, 7 * SECOND)).toThrow(RangeError);
   expect(() => q.cut(4 * SECOND, 4 * SECOND)).toThrow(RangeError);
   expect(drain(q)).toEqual(["3:0", "1:0", "0:0", "3:1", "1:1", "0:1"]);
+});
+
+test("the source holds 4 requests from each peer, answers busy beyond, and a repeat takes no room", () => {
+  // The design's figure, independent of the code.
+  expect(SOURCE_ROOM).toBe(4);
+  const { q } = queue(10);
+  drain(q);
+  const answers = [
+    q.request("bob", { track: 0, index: 0 }, true),
+    q.request("bob", { track: 0, index: 1 }),
+    q.request("bob", { track: 0, index: 2 }),
+    q.request("bob", { track: 0, index: 3 }, true),
+    q.request("bob", { track: 0, index: 4 }),
+    // Repeats at full room, one moving up from the background.
+    q.request("bob", { track: 0, index: 0 }),
+    q.request("bob", { track: 0, index: 3 }, true),
+    q.request("bob", { track: 0, index: 1 }, true),
+    // Another peer has its own room.
+    q.request("carol", { track: 0, index: 4 }),
+  ];
+  const queued = "queued";
+  expect(answers).toEqual([queued, queued, queued, queued, "busy", queued, queued, queued, queued]);
+
+  // A chunk sent, or a request cancelled, makes room for another.
+  expect(drain(q, 1)).toEqual(["bob>0:1"]);
+  expect(q.request("bob", { track: 0, index: 4 })).toBe(queued);
+  expect(q.request("bob", { track: 0, index: 5 })).toBe("busy");
+  q.cancel("bob", { track: 0, index: 2 });
+  expect(q.request("bob", { track: 0, index: 5 }, true)).toBe(queued);
+  expect(drain(q)).toEqual(["bob>0:0", "carol>0:4", "bob>0:4", "bob>0:3", "bob>0:5"]);
+});
+
+test("a peer's request and cancel messages are answered busy or gone, and others change nothing", () => {
+  const { q } = queue(3);
+  q.end();
+  drain(q);
+  const answers = [
+    q.requested("bob", { type: "request", track: 0, index: 2, priority: "background" }),
+    q.requested("bob", { type: "request", track: 1, index: 0, priority: "ahead" }),
+    q.requested("bob", { type: "request", track: 3, index: 1, priority: "urgent" }),
+    q.requested("bob", { type: "request", track: 0, index: 0, priority: "urgent" }),
+    q.requested("bob", { type: "request", track: 0, index: 1, priority: "urgent" }),
+    q.requested("bob", { type: "request", track: 0, index: 3, priority: "urgent" }),
+    q.requested("bob", { type: "request", track: 9, index: 0, priority: "urgent" }),
+    q.requested("bob", { type: "cancel", track: 3, index: 1 }),
+    q.requested("bob", { type: "busy", track: 0, index: 2 }),
+    q.requested("bob", { type: "gone", track: 0, index: 0 }),
+  ];
+  expect(answers).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { type: "busy", track: 0, index: 1 },
+    { type: "gone", track: 0, index: 3 },
+    { type: "gone", track: 9, index: 0 },
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  // `ahead` goes with those asked, `background` after them; the cancelled one is out.
+  expect(drain(q)).toEqual(["bob>1:0", "bob>0:0", "bob>0:2"]);
 });
