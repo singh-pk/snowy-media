@@ -16,7 +16,8 @@ import {
   signRecord,
 } from "./signed-record";
 
-const INDEX_PAGE = 64;
+/** How many chunks a page lists once full. */
+export const INDEX_PAGE = 64;
 
 export type IndexPage = {
   /** Which page: it lists chunks from `page × INDEX_PAGE`. */

@@ -26,6 +26,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/chunk-index.ts` | the chunk index: where each chunk cut so far begins, in signed pages of 64 chunks, joined, and the chunk covering a time |
 | `src/control.ts` | the control record: the source's playback position and state from a moment on its clock |
 | `src/source-cut.ts` | the source's cut of its file: each chunk signed once and its header kept, with its sealed size, each index reported once all its tracks are kept, carrying on after a reload |
+| `src/source-index.ts` | the source's chunk index: its pages built from each index cut, and which to publish next, the page still filling once per burst and a full page once |
 | `src/source-records.ts` | the source's records as a peer holds them: the newest catalog and control record, each track's setup and each page of the chunk index, sealed as they came |
 | `src/state-requests.ts` | getting the session's state on join: asking the source or the best-ranked peer for the source's records, and answering such asks |
 | `src/chunk-requests.ts` | the chunk request messages between peers, checked, and a forwarder's side that answers them, one chunk at a time on each link, most urgent first |

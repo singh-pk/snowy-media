@@ -13,6 +13,9 @@ import { sealedSize, type Bytes } from "./crypto";
 /** What the source keeps of a chunk: its signed header, and how many bytes it is sealed. */
 export type KeptChunk = { header: Bytes; bytes: number };
 
+/** An index cut in every track: `[startUs, endUs)`, its video chunk `bytes` long sealed. */
+export type IndexedCut = { index: number; startUs: number; endUs: number; bytes: number };
+
 export type SourceCutOptions = {
   session: CryptoKeyPair;
   /** The video track, whose keyframes bound every chunk. */
@@ -25,8 +28,7 @@ export type SourceCutOptions = {
   kept(slot: ChunkSlot): KeptChunk | undefined;
   /** Keeps what the source keeps of a chunk; cutting waits for it. */
   keep(slot: ChunkSlot, chunk: KeptChunk): Promise<void>;
-  /** An index is cut in every track: `[startUs, endUs)`, its video chunk `bytes` long sealed. */
-  indexed(cut: { index: number; startUs: number; endUs: number; bytes: number }): void;
+  indexed(cut: IndexedCut): void;
   /**
    * After a reload, the last index every track's chunk of which is kept, and its `startUs`:
    * cutting carries on after it, and the indexes up to it are the caller's to report.
