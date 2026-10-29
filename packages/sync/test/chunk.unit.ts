@@ -6,7 +6,8 @@
 // altered, signed by or naming another session, or sent for another slot is rejected, as is a
 // correctly signed header whose packet records don't match its body. Sealed, a chunk opens under
 // the object key its slot names, and one under another key, another content key, or a key that
-// isn't a chunk's is rejected.
+// isn't a chunk's is rejected. Packets cut again join the header first signed only when they are
+// its body, and the header gives the start it signed.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
@@ -15,8 +16,10 @@ import {
   chunkSlot,
   decodeChunk,
   encodeChunk,
+  chunkStartUs,
   HEADER,
   InvalidChunkError,
+  joinChunk,
   openChunk,
   RECORD,
   sealChunk,
@@ -248,4 +251,34 @@ test("a sealed chunk opens under the key its slot names, and nowhere else", asyn
     new InvalidChunkError("not a chunk key: init/3"),
     new InvalidChunkError("another slot"),
   ]);
+});
+
+test("packets cut again join the header first signed only when they are its body", async () => {
+  const encoded = await encodeChunk(pair, chunk);
+  const header = encoded.slice(0, HEADER);
+  const [keyframe, p, b] = chunk.packets;
+  const reordered = [keyframe!, b!, p!];
+  const altered = [keyframe!, p!, { ...b!, data: new Uint8Array([9]) }];
+
+  // Longer than the chunk, as its header with more after it may be.
+  const longer = new Uint8Array(HEADER + 1000);
+  longer.set(header);
+
+  const joined = await Promise.all([
+    joinChunk(header, chunk.packets),
+    joinChunk(longer, chunk.packets),
+    joinChunk(header, reordered),
+    joinChunk(header, altered),
+    joinChunk(header, [keyframe!, p!]),
+  ]);
+
+  expect(joined).toEqual([encoded, encoded, undefined, undefined, undefined]);
+});
+
+test("a header gives the start it signed", async () => {
+  const early = await encodeChunk(pair, { ...chunk, startUs: -5 });
+  const whole = await encodeChunk(pair, chunk);
+
+  expect(chunkStartUs(early.subarray(0, HEADER))).toBe(-5);
+  expect(chunkStartUs(whole)).toBe(82_000_000);
 });

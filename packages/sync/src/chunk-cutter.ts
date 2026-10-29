@@ -29,7 +29,7 @@ export type ChunkCutterOptions = {
    * `startUs`, which starts chunk `index`: cutting starts at that keyframe, and every chunk after
    * `index` comes out as it first did. Chunk `index` itself isn't cut.
    */
-  from?: { index: number; startUs: number };
+  from?: { index: number; startUs: number } | undefined;
 };
 
 // A packet of another track, with the video chunk that was open when it was read: one before
