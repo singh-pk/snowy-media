@@ -71,6 +71,7 @@ const RANK: Record<string, number> = {
   deliver: 1,
   chat: 2,
   catalog: 3,
+  index: 3,
   caps: 3,
   have: 3,
   init: 4,
@@ -78,8 +79,8 @@ const RANK: Record<string, number> = {
 };
 const LOWEST = 6;
 
-// MoQ serves a higher priority first.
-const priority = (name: string) => LOWEST - (RANK[name.split("/")[0] ?? name] ?? LOWEST);
+/** A track's MoQ priority, from its name; MoQ serves a higher one first. */
+export const priority = (name: string) => LOWEST - (RANK[name.split("/")[0] ?? name] ?? LOWEST);
 
 // Every frame carries the same timestamp. `@moq/net` skips a group once a newer one is further
 // ahead in time than the subscriber's age budget, which suits media; here nothing may be

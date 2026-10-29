@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // Framing an object with its key for the relay (src/relay.ts), in Chromium: it comes back as it
-// went, from any offset, and bytes too short for their key length are no object.
+// went, from any offset, and bytes too short for their key length are no object. Tracks rank as
+// docs/architecture.md#mapping-to-moq lists them.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
-import { frame, unframe } from "../src/relay";
+import { frame, priority, unframe } from "../src/relay";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
 
@@ -39,4 +40,22 @@ test("bytes shorter than their key length are no object", () => {
 
 test("a key longer than 65535 bytes is refused", () => {
   expect(() => frame("k".repeat(65_536), bytes())).toThrow(RangeError);
+});
+
+test("tracks rank in the order the design lists, the chunk index with the catalog", () => {
+  // The design's order, highest first; names on one line rank alike.
+  const order = [
+    ["control"],
+    ["ctl", "deliver"],
+    ["chat"],
+    ["catalog", "index", "caps", "have"],
+    ["init/0"],
+    ["media/0", "media/1"],
+    ["probe"],
+  ];
+  const ranks = order.map((names) => new Set(names.map(priority)));
+  expect(ranks.map((rank) => rank.size)).toEqual(order.map(() => 1));
+  const values = ranks.map((rank) => [...rank][0] ?? 0);
+  expect(values).toEqual(values.toSorted((a, b) => b - a));
+  expect(new Set(values).size).toBe(order.length);
 });
