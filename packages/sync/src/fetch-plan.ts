@@ -11,6 +11,7 @@
 import { chunkKey, type ChunkSlot } from "./chunk";
 import { chunkAt, type JoinedIndex } from "./chunk-index";
 import type { KeyId } from "./crypto";
+import { SOURCE_ROOM } from "./push-queue";
 
 /** How soon an interest needs its chunks, most first. */
 export type FetchPriority = "urgent" | "ahead" | "background";
@@ -52,8 +53,6 @@ const PRIORITIES: FetchPriority[] = ["urgent", "ahead", "background"];
 // Requests a link may have out whatever its throughput: one chunk arriving and the next already
 // asked, so the link never waits a round trip between them.
 const LINK_DEPTH = 2;
-// The source answers `busy` beyond this many requests from one peer.
-const SOURCE_HOLDS = 4;
 
 const remaining = (request: Request) => Math.max(0, request.bytes - request.arrived);
 
@@ -265,14 +264,14 @@ function createRoom(options: FetchPlanOptions, out: Map<string, Request>) {
   const blocked = new Set<KeyId>();
 
   // Whether a link takes another request: fewer than `LINK_DEPTH` out, or bytes out under
-  // throughput × RTT. The source is never sent more than `SOURCE_HOLDS`, past which it answers
+  // throughput × RTT. The source is never sent more than `SOURCE_ROOM`, past which it answers
   // `busy`.
   function room(peer: KeyId) {
     const measures = options.links().get(peer);
     if (measures === undefined || blocked.has(peer)) return false;
     const on = out.values().filter((r) => r.peer === peer);
     const [count, bytes] = on.reduce(([n, b], r) => [n + 1, b + remaining(r)], [0, 0]);
-    if (peer === options.source && count >= SOURCE_HOLDS) return false;
+    if (peer === options.source && count >= SOURCE_ROOM) return false;
     return count < LINK_DEPTH || bytes < measures.bytesPerMs * measures.rttMs;
   }
 
