@@ -21,6 +21,7 @@ The relay tests (`test/relay.test.ts`) start a MoQ relay in Docker. On Colima, s
 | `src/chunk.ts` | the media chunk: its signed header and packet records, encoded and checked, and sealed under its object key |
 | `src/signed-record.ts` | the source's records as JSON signed by the session key, over a domain prefix and the session |
 | `src/catalog.ts` | the catalog and each track's codec setup, as signed records |
+| `src/chunk-cutter.ts` | cutting a file's packets into chunks as the demuxer reads them: video at keyframes at least 2 s apart, other tracks by pts along the video's bounds |
 | `src/chunk-index.ts` | the chunk index: where each chunk cut so far begins, in signed pages of 64 chunks, joined, and the chunk covering a time |
 | `src/control.ts` | the control record: the source's playback position and state from a moment on its clock |
 | `src/source-records.ts` | the source's records as a peer holds them: the newest catalog and control record, each track's setup and each page of the chunk index, sealed as they came |

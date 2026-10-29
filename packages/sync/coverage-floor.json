@@ -10,6 +10,7 @@
   "src/chat-session.ts": 95,
   "src/chat-store.ts": 95,
   "src/chat.ts": 100,
+  "src/chunk-cutter.ts": 100,
   "src/chunk-index.ts": 100,
   "src/chunk-links.ts": 100,
   "src/chunk-requests.ts": 100,
