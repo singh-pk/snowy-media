@@ -19,7 +19,7 @@ import { chunkAt, type JoinedIndex } from "./chunk-index";
 import type { KeyId } from "./crypto";
 
 /** How soon an interest needs its chunks, most first. */
-type FetchPriority = "urgent" | "ahead" | "background";
+export type FetchPriority = "urgent" | "ahead" | "background";
 
 /** What an interest covers, its tracks resolved to ids. */
 export type Want = { tracks: number[]; fromUs: number; toUs: number; priority: FetchPriority };
