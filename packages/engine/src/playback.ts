@@ -7,7 +7,7 @@
 
 import { createAudioOutput } from "./audio";
 import type { VideoParams } from "./codec";
-import { type Clip, endOf } from "./composition";
+import { type Clip, clipsFrom, tracksOf } from "./composition";
 import { createPcmControl, createPcmProducer, createPcmRing } from "./pcm";
 import type { FromMedia, FromRender, Opened, ToMedia, ToRender, VideoClip } from "./protocol";
 import { closeRing, createRing, RING_CAPACITY } from "./ring";
@@ -50,6 +50,8 @@ export interface PlaybackHost {
   render: Worker;
   /** Sends the media worker a read request; `buffered` runs once its audio is buffered. */
   demux: (message: ReadMessage, buffered: () => void) => Promise<FromMedia>;
+  /** Sends a track to the media worker of the composition's `reader`th track after the first. */
+  read: (reader: number, message: ReadMessage, buffered: () => void) => Promise<FromMedia>;
   /** Has whatever waits on the engine's state look again. */
   changed: () => void;
   /** Whether play `id` is what plays, so its failures count. */
@@ -76,12 +78,13 @@ export interface Asset extends Opened {
 
 /**
  * What a play plays: the open file's streams, or a composition's clips (src/composition.ts) in
- * the order they play, on a composition that ends at `end`, in microseconds, from `assets`.
+ * the order they play, on a composition that ends at `end`, in microseconds, from `assets`, as
+ * the open `opens` opened them.
  */
 export interface Played {
   video: number | undefined;
   audio: number | undefined;
-  track?: { clips: Clip[]; end: number; assets: Record<string, Asset> } | undefined;
+  track?: { clips: Clip[]; end: number; assets: Record<string, Asset>; opens: number } | undefined;
 }
 
 interface Reading {
@@ -93,18 +96,32 @@ interface Reading {
   params: VideoParams | undefined;
   audio: number | undefined;
   played: Played;
-  // A composition's clips the play reaches.
+  // A composition's clips of its first track the play reaches, and its other tracks.
   clips: Clip[];
+  layers: Layer[];
   preroll: number;
 }
 
-// The clips a play from `from` reaches, the first cut to start there.
-function clipsFrom(clips: Clip[], from: number) {
-  const reached = clips.filter((c) => endOf(c) > from);
-  const [first] = reached;
-  // copy: the clip the play starts in, once a play, so the plan's own is left as it is.
-  if (first) reached[0] = { ...first, in: Math.max(first.in, from - first.offset) };
-  return reached;
+// A composition's track after the first, of audio alone, read into rings of its own.
+interface Layer {
+  clips: Clip[];
+  ring: SharedArrayBuffer;
+  pcm: SharedArrayBuffer;
+}
+
+// The request to read `clips` of a play into `ring` and `pcm`, with the file of each.
+function trackMessage(r: Reading, track: NonNullable<Played["track"]>, into: Layer): ReadMessage {
+  const { clips, ring, pcm } = into;
+  const files: Record<string, File> = {};
+
+  for (const { asset } of clips) {
+    const file = track.assets[asset]?.file;
+    if (file) files[asset] = file;
+  }
+
+  const { from, preroll } = r;
+  const { end, opens } = track;
+  return { type: "track", ring, pcm, from, clips, files, opens, end, preroll };
 }
 
 // The clips of `clips` with video, as the render worker plays them.
@@ -114,33 +131,27 @@ const videoOf = (clips: Clip[], assets: Record<string, Asset>) =>
     return params ? [{ params, in: place.in, out: place.out, offset: place.offset }] : [];
   });
 
-// Resolves once the media worker has read what the play plays, or at once with nothing to read,
-// as after the last clip, where the clock runs on in silence to the composition's `end`.
+// Resolves once the media workers have read what the play plays, or at once with nothing to
+// read, as after the last clip, where the clock runs on in silence to the composition's `end`.
 function startTrack(r: Reading, track: NonNullable<Played["track"]>, buffered: () => void) {
   const { host, id, ring, pcm, from, clips } = r;
-  const { end, assets } = track;
-  const shown = videoOf(clips, assets);
+  const shown = videoOf(clips, track.assets);
   if (shown.length > 0)
     host.render.postMessage({ type: "play", id, ring, pcm, from, clips: shown });
   else host.render.postMessage({ type: "clear" } satisfies ToRender);
 
-  if (clips.length === 0) {
-    const producer = createPcmProducer(pcm);
-    producer.finish();
-    producer.reach(end / 1e6);
-    buffered();
-    return Promise.resolve();
-  }
+  const layers = r.layers.map((layer, k) => host.read(k, trackMessage(r, track, layer), buffered));
+  return Promise.all([readFirst(r, track, buffered), Promise.all(layers)]);
+}
 
-  const files: Record<string, File> = {};
-
-  for (const { asset } of clips) {
-    const file = assets[asset]?.file;
-    if (file) files[asset] = file;
-  }
-
-  const { preroll } = r;
-  return host.demux({ type: "track", ring, pcm, from, clips, files, end, preroll }, buffered);
+// Reads the first track, or with nothing in it, has the clock run on in silence to the end.
+function readFirst(r: Reading, track: NonNullable<Played["track"]>, buffered: () => void) {
+  if (r.clips.length > 0) return r.host.demux(trackMessage(r, track, r), buffered);
+  const producer = createPcmProducer(r.pcm);
+  producer.finish();
+  producer.reach(track.end / 1e6);
+  buffered();
+  return Promise.resolve();
 }
 
 // A file's video and audio, read from `from`; its video plays as one clip to its end.
@@ -260,16 +271,22 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
   if (!track && audio === undefined && !params)
     throw new Error("play: the file has no video or audio to play");
 
-  const clips = track ? clipsFrom(track.clips, from) : [];
+  // copy: the tracks after the first, once a play.
+  const [clips, ...more] = track ? tracksOf(clipsFrom(track.clips, from)) : [[]];
   const hasVideo = Boolean(params) || clips.some((c) => c.video !== undefined);
 
   const frames = pcmFrames(context.sampleRate);
   const pcm = createPcmRing(frames, CHANNELS, context.sampleRate, from / 1e6);
   const clock = createPcmControl(pcm);
+  const layers = more.map((each) => ({
+    clips: each,
+    ring: createRing(NO_VIDEO_RING),
+    pcm: createPcmRing(frames, CHANNELS, context.sampleRate, from / 1e6),
+  }));
   // Held while it prerolls: a context made in a user gesture starts running by itself, and
   // one that played the last file still runs.
   await context.suspend();
-  const node = await createAudioOutput(context, pcm);
+  const node = await createAudioOutput(context, pcm, { layers: layers.map((l) => l.pcm) });
 
   // An open may have stopped this play while the worklet loaded, and the media worker may
   // hold another file already.
@@ -282,10 +299,13 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
   const ring = createRing(hasVideo ? RING_CAPACITY : NO_VIDEO_RING);
   const demux = { buffered: false, done: false };
   const preroll = PREROLL * context.sampleRate;
-  const reading = { host, id, ring, pcm, from, params, audio, played, clips, preroll };
+  const reading = { host, id, ring, pcm, from, params, audio, played, clips, layers, preroll };
+  // Each track's reader says once that its audio is buffered.
+  const unbuffered = { tracks: 1 + layers.length };
 
   const buffered = () => {
-    demux.buffered = true;
+    unbuffered.tracks--;
+    demux.buffered = unbuffered.tracks === 0;
     host.changed();
   };
 
@@ -316,12 +336,18 @@ export async function startPlayback(options: PlaybackOptions): Promise<Playback>
     }
   }
 
-  // Stops both rings' producer, so the media worker is free for the next request.
+  // Stops every ring's producer, so the media workers are free for the next request.
   function stop() {
     cancelAnimationFrame(frame.id);
     host.render.postMessage({ type: "stop" } satisfies ToRender);
     clock.close();
     closeRing(ring);
+
+    for (const layer of layers) {
+      createPcmControl(layer.pcm).close();
+      closeRing(layer.ring);
+    }
+
     node.disconnect();
   }
 

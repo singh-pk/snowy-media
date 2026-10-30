@@ -52,6 +52,8 @@ export const AUDIO_PROCESSOR = "snowy-audio";
 
 export interface AudioOptions {
   ring: SharedArrayBuffer;
+  /** Rings of more audio on the same time, mixed into `ring`'s (`createPcmConsumer`). */
+  layers: SharedArrayBuffer[];
 }
 
 /**
@@ -216,9 +218,47 @@ export function createPcmProducer(ring: SharedArrayBuffer, blocking: () => void 
   return { start, finish, reach, offer, bell, sleep, waitingForRoom, write };
 }
 
-/** The AudioWorklet's side of `ring`: it never blocks. */
-export function createPcmConsumer(ring: SharedArrayBuffer) {
+// The AudioWorklet's side of a layer: a ring of audio on the same time as the one that holds the
+// clock, such as a track of a composition's audio alone.
+function createPcmLayer(ring: SharedArrayBuffer) {
+  const { control, samples, channels, capacity } = views(ring);
+
+  // How many frames it can add now: what it holds, or any number once no more comes, as silence
+  // follows its last.
+  function playable() {
+    const available = (Atomics.load(control, WRITE) - Atomics.load(control, READ)) | 0;
+    return Atomics.load(control, FINISHED) === 1 ? Infinity : available;
+  }
+
+  function add(output: Float32Array[], most: number) {
+    const at = Atomics.load(control, READ);
+    const n = Math.min(most, (Atomics.load(control, WRITE) - at) | 0);
+
+    for (let c = 0; c < Math.min(channels, output.length); c++) {
+      const out = output[c];
+      if (out) addChannel(out, c, at, n);
+    }
+
+    if (n <= 0) return;
+    Atomics.store(control, READ, (at + n) | 0);
+    if (Atomics.load(control, PRODUCER_WAITING)) ringBell(control);
+  }
+
+  function addChannel(out: Float32Array, c: number, at: number, n: number) {
+    for (let i = 0; i < n; i++)
+      out[i] = (out[i] ?? 0) + (samples[((at + i) & (capacity - 1)) * channels + c] ?? 0);
+  }
+
+  return { playable, add };
+}
+
+/**
+ * The AudioWorklet's side of `ring`, mixed with `layers`: it never blocks. The clock is
+ * `ring`'s, and runs only while every layer has its frames.
+ */
+export function createPcmConsumer(ring: SharedArrayBuffer, layers: SharedArrayBuffer[] = []) {
   const { control, times, samples, channels, capacity, rate } = views(ring);
+  const mixed = layers.map(createPcmLayer);
   // Frames played since the start, exact in a double for millions of years at any rate.
   let played = 0;
   // The context frame after the last one played, which an underrun keeps.
@@ -256,20 +296,30 @@ export function createPcmConsumer(ring: SharedArrayBuffer) {
     return Math.max(0, Math.min(most, reach - from));
   }
 
+  // How many of `most` frames every layer can add. Indexed loops here and below: an iterator
+  // would allocate on the audio thread every quantum.
+  function mixable(most: number) {
+    let n = most;
+    for (let k = 0; k < mixed.length; k++) n = Math.min(n, mixed[k]?.playable() ?? 0);
+    return n;
+  }
+
   /**
-   * Fills `output`, one array per channel, with the next frames, and silence where the ring
-   * runs out; `frame` is the context's frame of its first frame (`currentFrame`). Once the
-   * audio is finished, the silence after it counts as played as far as the video reaches.
-   * Publishes the clock.
+   * Fills `output`, one array per channel, with the next frames mixed with the layers', and
+   * silence where the ring or a layer runs out; `frame` is the context's frame of its first
+   * frame (`currentFrame`). Once the audio is finished, the silence after it counts as played as
+   * far as the video reaches. Publishes the clock.
    */
   function read(output: Float32Array[], frame: number) {
     const frames = output[0]?.length ?? 0;
     const at = control[READ] ?? 0;
     const open = !Atomics.load(control, CLOSED);
     const available = open ? (Atomics.load(control, WRITE) - at) | 0 : 0;
-    const n = Math.min(frames, available);
+    const finished = open && available < frames && Atomics.load(control, FINISHED) === 1;
+    const own = Math.min(frames, available);
+    const moved = mixable(own + (finished ? silence(frames - own, played + own) : 0));
+    const n = Math.min(own, moved);
 
-    // Indexed loops: an iterator would allocate on the audio thread every quantum.
     for (let c = 0; c < output.length; c++) {
       const out = output[c];
       if (!out) continue;
@@ -279,13 +329,13 @@ export function createPcmConsumer(ring: SharedArrayBuffer) {
       out.fill(0, filled);
     }
 
+    for (let k = 0; k < mixed.length; k++) mixed[k]?.add(output, moved);
+
     if (n > 0) {
       Atomics.store(control, READ, (at + n) | 0);
       if (Atomics.load(control, PRODUCER_WAITING)) ringBell(control);
     }
 
-    const finished = open && n < frames && Atomics.load(control, FINISHED) === 1;
-    const moved = n + (finished ? silence(frames - n, played + n) : 0);
     played += moved;
     if (moved > 0) end = frame + moved;
     publish(end, moved === frames && moved > 0);

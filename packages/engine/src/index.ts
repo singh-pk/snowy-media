@@ -49,11 +49,12 @@ export interface Engine {
    * its clips play from are open. The engine plays clips one after another, of any of its files:
    * each its video and audio in step, or either alone, placed anywhere in the composition, with
    * black and silence between and around them, and the clock running on to the composition's end.
+   * Audio may play over other clips, mixed in.
    * It reads the plan once, from start to end. Rejects with a `NotSupportedError` naming what the
-   * plan asks for beyond that, such as two clips at once, a transition, an effect or a speed; with
-   * a `RangeError` if the duration is not a positive whole number of microseconds, or if a clip's
-   * video or audio stream is not a video or audio track of its file; and for the reasons `open`
-   * does.
+   * plan asks for beyond that, such as two clips of video at once, a transition, an effect or a
+   * speed; with a `RangeError` if the duration is not a positive whole number of microseconds, or
+   * if a clip's video or audio stream is not a video or audio track of its file; and for the
+   * reasons `open` does.
    */
   compose(composition: Composition): Promise<void>;
   /**
@@ -216,6 +217,8 @@ function createPlayerState(render: Worker, media: ReturnType<typeof createMedia>
   return {
     render,
     media,
+    // Made when a play first needs one, and kept: each loads FFmpeg.
+    readers: [] as ReturnType<typeof createMedia>[],
     waits,
     changed,
     // The file `open` opened; a composition's are in `streams.track`.
@@ -296,6 +299,8 @@ function playbackHost(p: Player): PlaybackHost {
   return {
     render: p.render,
     demux: (message, buffered) => p.media.send(message, [], buffered),
+    read: (reader, message, buffered) =>
+      (p.readers[reader] ??= createMedia()).send(message, [], buffered),
     changed: p.changed,
     plays: (id) => p.current === id,
     video: () => p.video,
@@ -349,7 +354,7 @@ function reset(p: Player, id: number) {
 // and resolves with what it holds, once a later open has not replaced it: if one has, it must
 // not set what is open, as that is the later open's to do.
 async function load(p: Player, file: File, id: number, asset?: string): Promise<Opened> {
-  const reply = await p.media.send({ type: "open", file, asset });
+  const reply = await p.media.send({ type: "open", file, asset, opens: id });
   if (reply.type !== "opened") throw new Error(`open: unexpected ${reply.type}`);
   if (id !== p.opens) throw new DOMException("open: replaced", "AbortError");
   return { info: reply.info, video: reply.video, index: reply.index };
@@ -420,7 +425,7 @@ async function compose(p: Player, composition: Composition) {
   const files = await filesOf(composition, clips);
   reset(p, id);
   const assets = await loadAssets(p, files, clips, id);
-  const track = { clips, end: duration, assets };
+  const track = { clips, end: duration, assets, opens: id };
   const played: Played = { video: undefined, audio: undefined, track };
   Object.assign(p, { streams: played, composition, clips });
   p.duration = duration / 1e6;
@@ -603,7 +608,7 @@ const within = (c: Clip, time: number) => time >= startOf(c) && time < endOf(c);
 function movable(p: Player, to: number) {
   const { started } = p;
   if (p.played || !started?.drawn() || p.video.id !== started.id) return false;
-  const clip = p.clips.find((c) => within(c, p.from));
+  const clip = p.clips.find((c) => c.video !== undefined && within(c, p.from));
   if (p.composition && !(clip && within(clip, to))) return false;
   // In the file's time, where the index is.
   const offset = clip?.offset ?? 0;
@@ -676,6 +681,7 @@ function closePlayer(p: Player) {
   void p.context?.close();
   p.render.terminate();
   p.media.close();
+  for (const reader of p.readers) reader.close();
 }
 
 // The engine on a render worker that is ready and a media worker.

@@ -203,20 +203,24 @@ function clipOf({ v, a }: Pair, duration: number): Clip | undefined {
   };
 }
 
-// Throws unless clip `b`, which starts no earlier than `a`, starts once `a` has ended.
-function checkCut(a: Clip, b: Clip) {
-  if (startOf(b) >= endOf(a)) return;
-  const both = (kind: "video" | "audio") => a[kind] !== undefined && b[kind] !== undefined;
-  if (both("video")) throw unsupported("more than one video layer at a time");
-  if (both("audio")) throw unsupported("more than one audio layer at a time");
-  throw unsupported("video and audio that are not in step");
+// Throws if two of `clips`, in the order they play, show video at once.
+function checkVideoCuts(clips: Clip[]) {
+  const shown = { until: -Infinity };
+
+  for (const clip of clips) {
+    if (clip.video === undefined) continue;
+    if (startOf(clip) < shown.until) throw unsupported("more than one video layer at a time");
+    shown.until = Math.max(shown.until, endOf(clip));
+  }
 }
+
+const overlap = (a: Clip, b: Clip) => startOf(a) < endOf(b) && startOf(b) < endOf(a);
 
 /**
  * The clips `plan` plays within `duration` microseconds, in the order they play: each a layer
- * of video and a layer of audio of one file in step, or either alone. Throws a NotSupportedError
- * for what the engine does not play: clips that play at the same time, as video and audio that
- * are not in step do, a source other than a file, a transition, an effect, a speed other than 1,
+ * of video and a layer of audio of one file in step, or either alone. Audio may play at once;
+ * video may not. Throws a NotSupportedError for what the engine does not play: two video layers
+ * at once, a source other than a file, a transition, an effect, a speed other than 1,
  * and any opacity, blend, transform, gain, pan or fade but the plain one.
  */
 export function clipsOf(plan: Plan, duration: number): Clip[] {
@@ -228,11 +232,43 @@ export function clipsOf(plan: Plan, duration: number): Clip[] {
     return clip ? [clip] : [];
   });
   clips.sort((a, b) => startOf(a) - startOf(b));
+  checkVideoCuts(clips);
+  return clips;
+}
 
-  for (const [i, clip] of clips.entries()) {
-    const before = clips[i - 1];
-    if (before) checkCut(before, clip);
+/**
+ * The clips of `clips` a play from `from` microseconds reaches, each it starts in cut to start
+ * there.
+ */
+export function clipsFrom<T extends Placed>(clips: T[], from: number) {
+  const reached: T[] = [];
+
+  for (const clip of clips) {
+    if (endOf(clip) <= from) continue;
+    // copy: a clip the play starts in, once a play, so the plan's own is left as it is.
+    reached.push(startOf(clip) < from ? { ...clip, in: from - clip.offset } : clip);
   }
 
-  return clips;
+  return reached;
+}
+
+/**
+ * `clips` (from `clipsOf`) on as few tracks as play none of theirs at once, each in the order
+ * they play: the first holds every clip with video, and a clip of audio alone goes on the first
+ * track free for all of its time.
+ */
+export function tracksOf(clips: Clip[]): [Clip[], ...Clip[][]] {
+  const first: Clip[] = [];
+  const tracks: [Clip[], ...Clip[][]] = [first];
+  for (const clip of clips) if (clip.video !== undefined) first.push(clip);
+
+  for (const clip of clips) {
+    if (clip.video !== undefined) continue;
+    const free = tracks.find((track) => !track.some((other) => overlap(other, clip)));
+    if (free) free.push(clip);
+    else tracks.push([clip]);
+  }
+
+  for (const track of tracks) track.sort((a, b) => startOf(a) - startOf(b));
+  return tracks;
 }

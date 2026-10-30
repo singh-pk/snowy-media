@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: LicenseRef-Snowy-License-1.0
 //
 // The clips of a plan, in Chromium: where each reads its file and where it plays on the
-// composition, from a plan in the shape @snowy-media/timeline's render plan has, and a
-// NotSupportedError for each thing a plan may ask that the engine does not play.
+// composition, from a plan in the shape @snowy-media/timeline's render plan has; the tracks they
+// play on; and a NotSupportedError for each thing a plan may ask that the engine does not play.
 // Usage: bun run test
 
 import { expect, test } from "../../../tooling/unit";
 import {
+  clipsFrom,
   clipsOf,
+  tracksOf,
   type Plan,
   type PlanAudioLayer,
   type PlanSegment,
@@ -141,6 +143,37 @@ test("clips of two files play one after another, each from its own", () => {
   ]);
 });
 
+test("audio not in step with the video plays as a clip of its own, on a track of its own", () => {
+  const apart = [
+    audio({ in: 24_048 }),
+    audio({ end: 2_400_000, fadeOut: 2_400_000 }),
+    audio({ source: { asset: "b", stream: 1 } }),
+  ];
+
+  for (const each of apart) {
+    const clips = clipsOf(plan(segment({ video: [video()], audio: [each] })), DURATION);
+    expect(clips.map((c) => [c.clip, c.video, c.audio])).toEqual([
+      ["c1", 0, undefined],
+      ["a1", undefined, 1],
+    ]);
+    expect(tracksOf(clips).map((t) => t.map((c) => c.clip))).toEqual([["c1"], ["a1"]]);
+  }
+});
+
+// An audio layer placed from `start` to `end`, without a fade.
+const placed = (start: number, end: number) => ({ start, end, fadeIn: start, fadeOut: end });
+
+test("audio over other clips goes on the first track free for all of its time", () => {
+  // c1 with its sound from 1 s to 2.5 s; m under it all; v over c1's start; s just after c1.
+  const under = audio({ clip: "m", ...placed(0, 3_000_000) });
+  const over = audio({ clip: "v", ...placed(500_000, 1_500_000) });
+  const after = audio({ clip: "s", ...placed(2_500_000, 3_000_000) });
+  const all = plan(segment({ video: [video()], audio: [audio(), under, over, after] }));
+  const tracks = tracksOf(clipsOf(all, DURATION));
+  expect(tracks.map((t) => t.map((c) => c.clip))).toEqual([["c1", "s"], ["m"], ["v"]]);
+  expect(tracksOf([])).toEqual([[]]);
+});
+
 test("a plan with no layers plays nothing", () => {
   expect(clipsOf(plan(segment()), DURATION)).toEqual([]);
   expect(clipsOf(plan(), DURATION)).toEqual([]);
@@ -149,7 +182,6 @@ test("a plan with no layers plays nothing", () => {
 test("what the engine does not play is a NotSupportedError that says what", () => {
   const cases: [string, Plan][] = [
     ["more than one video layer", plan(segment({ video: [video(), video({ clip: "c2" })] }))],
-    ["more than one audio layer", plan(segment({ audio: [audio(), audio({ clip: "c2" })] }))],
     [
       "more than one video layer at a time",
       plan(segment({ video: [video(), video({ clip: "c2", start: 2_000_000, end: 3_000_000 })] })),
@@ -174,15 +206,6 @@ test("what the engine does not play is a NotSupportedError that says what", () =
       plan(segment({ audio: [audio({ source: { generator: "tone", params: {} } })] })),
     ],
     ["a layer from 1000000 to 1000000", plan(segment({ video: [video({ end: 1_000_000 })] }))],
-    ["not in step", plan(segment({ video: [video()], audio: [audio({ in: 24_048 })] }))],
-    [
-      "not in step",
-      plan(segment({ video: [video()], audio: [audio({ end: 2_400_000, fadeOut: 2_400_000 })] })),
-    ],
-    [
-      "not in step",
-      plan(segment({ video: [video()], audio: [audio({ source: { asset: "b", stream: 1 } })] })),
-    ],
   ];
 
   for (const [what, each] of cases) {
@@ -192,4 +215,14 @@ test("what the engine does not play is a NotSupportedError that says what", () =
     expect(`${what}: ${name}`).toBe(`${what}: NotSupportedError`);
     expect(`${what}: ${String(error).includes(what)}`).toBe(`${what}: true`);
   }
+});
+
+test("a play reaches the clips that end after it starts, the one it starts in cut there", () => {
+  // From 1 s to 2 s, from 2 s to 3 s and from 3 s to 4 s on the composition, read from 0.5 s.
+  const clips = [1, 2, 3].map((k) => ({ in: 500_000, out: 1_500_000, offset: k * 1e6 - 500_000 }));
+  const [, second, third] = clips;
+  // At 2.4 s, 0.4 s into the second: its file from 0.9 s.
+  expect(clipsFrom(clips, 2_400_000)).toEqual([{ ...second, in: 900_000 }, third]);
+  expect(clipsFrom(clips, 2_000_000)).toEqual([second, third]);
+  expect(clipsFrom(clips, 4_000_000)).toEqual([]);
 });

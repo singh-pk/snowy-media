@@ -117,7 +117,16 @@ test("a pump that fails ends the ring with FAILED", async () => {
           const clip = { clip: "", asset, video: 0, audio: undefined, in: 0, out: 1e6, offset: 0 };
           const ring = support.createRing(1 << 16);
           const pcm = support.createPcmRing(1 << 16, 2, 48_000);
-          const read = { ring, pcm, from: 0, clips: [clip], files: {}, end: 1e6, preroll: 0 };
+          const read = {
+            ring,
+            pcm,
+            from: 0,
+            clips: [clip],
+            files: {},
+            opens: 0,
+            end: 1e6,
+            preroll: 0,
+          };
 
           try {
             await media.request({ type: "track", ...read });

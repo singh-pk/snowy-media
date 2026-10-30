@@ -6,15 +6,23 @@
 
 import { AUDIO_PROCESSOR, type AudioOptions, pcmFormat } from "./pcm";
 
+interface OutputOptions {
+  layers?: SharedArrayBuffer[];
+  worklet?: string;
+}
+
 /**
- * Plays PCM ring `ring` on `context` once the context runs, through the worklet module at
- * `worklet`, which a page that bundles this file elsewhere passes. Rejects with a `RangeError`
- * if the ring's sample rate is not the context's.
+ * Plays PCM ring `ring`, mixed with the rings `layers` on the same time, on `context` once the
+ * context runs, through the worklet module at `worklet`, which a page that bundles this file
+ * elsewhere passes. Rejects with a `RangeError` if the ring's sample rate is not the context's.
  */
 export async function createAudioOutput(
   context: BaseAudioContext,
   ring: SharedArrayBuffer,
-  worklet = new URL("./audio.worklet.js", import.meta.url).href,
+  {
+    layers = [],
+    worklet = new URL("./audio.worklet.js", import.meta.url).href,
+  }: OutputOptions = {},
 ) {
   const { channels, rate } = pcmFormat(ring);
 
@@ -23,7 +31,7 @@ export async function createAudioOutput(
   }
 
   await context.audioWorklet.addModule(worklet);
-  const processorOptions: AudioOptions = { ring };
+  const processorOptions: AudioOptions = { ring, layers };
   const node = new AudioWorkletNode(context, AUDIO_PROCESSOR, {
     numberOfInputs: 0,
     outputChannelCount: [channels],

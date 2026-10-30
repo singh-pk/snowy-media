@@ -229,6 +229,63 @@ test("closing the ring stops the producer and silences the consumer", () => {
   expect(output[0]?.every((v) => v === 0)).toBe(true);
 });
 
+test("a layer mixes in while it has frames, stopping the clock where it runs out, and then silence", () => {
+  const [ring, layer] = [createPcmRing(1024, 2, RATE), createPcmRing(1024, 2, RATE)];
+  const producer = createPcmProducer(ring);
+  const mixing = createPcmProducer(layer);
+  const consumer = createPcmConsumer(ring, [layer]);
+  const control = createPcmControl(ring);
+  producer.write(frames(0, 300), 0, 300);
+  mixing.write(frames(0, 200), 0, 200);
+  const output = quantum();
+
+  // Both rings' frames, summed.
+  consumer.read(output, 0);
+  expect([output[0]?.[5], output[1]?.[5]]).toEqual([10, -10]);
+  expect(control.read()).toEqual({ pts: 0.128, time: 0.128, playing: true });
+
+  // The layer has 72 frames left: the clock stops after them, though the ring has more, and the
+  // layer's producer, waiting for room, is woken.
+  mixing.waitingForRoom(true);
+  const seen = mixing.bell();
+  consumer.read(output, 128);
+  expect(output[0]?.[71]).toBe(398);
+  expect(output[0]?.subarray(72).every((v) => v === 0)).toBe(true);
+  expect(control.read()).toEqual({ pts: 0.2, time: 0.2, playing: false });
+  expect(mixing.bell()).not.toBe(seen);
+
+  // Finished, the layer adds silence: the ring's last 100 frames play alone.
+  mixing.finish();
+  consumer.read(output, 256);
+  expect([output[0]?.[0], output[0]?.[99]]).toEqual([200, 299]);
+  expect(control.read()).toEqual({ pts: 0.3, time: 0.356, playing: false });
+});
+
+test("a layer that runs out stops the clock in the silence of a finished ring", () => {
+  const [ring, layer] = [createPcmRing(1024, 2, RATE), createPcmRing(1024, 2, RATE)];
+  const producer = createPcmProducer(ring);
+  const mixing = createPcmProducer(layer);
+  const consumer = createPcmConsumer(ring, [layer]);
+  const control = createPcmControl(ring);
+  producer.write(frames(0, 50), 0, 50);
+  producer.finish();
+  producer.reach(1);
+  mixing.write(frames(0, 100), 0, 100);
+  const output = quantum();
+
+  // The ring's 50 frames with the layer's, then the layer's alone in the ring's silence, to its
+  // 100th frame, where the clock stops though the ring reaches on.
+  consumer.read(output, 0);
+  expect([output[0]?.[49], output[0]?.[50], output[0]?.[99]]).toEqual([98, 50, 99]);
+  expect(output[0]?.subarray(100).every((v) => v === 0)).toBe(true);
+  expect(control.read()).toEqual({ pts: 0.1, time: 0.1, playing: false });
+
+  // Finished, the layer lets the clock run on through the silence.
+  mixing.finish();
+  consumer.read(output, 128);
+  expect(control.read()).toEqual({ pts: 0.228, time: 0.256, playing: true });
+});
+
 test("offer writes what fits, and the doorbell rings as room frees up for a waiting producer", () => {
   const ring = createPcmRing(256, 2, RATE);
   const producer = createPcmProducer(ring);
