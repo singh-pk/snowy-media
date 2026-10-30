@@ -181,10 +181,13 @@ function createOutputClock(context: AudioContext, clock: Clock, changed: () => v
 
     const running = context.state === "running";
 
-    // The time heard at the pause is no further than the worklet has rendered; a second pause
-    // while one is held keeps the later time, so the clock never goes back.
+    // The time heard at the pause: no earlier than the timestamp still published gives then,
+    // which the fresh offset can undercut by a fraction of a millisecond, and no further than
+    // the worklet has rendered. A second pause while one is held keeps the later time.
     if (stopping !== undefined && output.settled) {
-      const at = clock.mediaTime(Math.min((stopping + output.offset) / 1000, clock.read().time));
+      const fresh = clock.mediaTime((stopping + output.offset) / 1000);
+      const given = clock.heard(performance.timeOrigin + stopping);
+      const at = Math.min(Math.max(fresh, given), clock.mediaTime(clock.read().time));
       output.stopped = Number.isNaN(output.stopped) ? at : Math.max(output.stopped, at);
     }
 

@@ -25,7 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A paused `seek`, and a `fastSeek` that scrubs, resolves with its frame on screen, as it says, not just sent to the GPU: the first frame of a page could still be black, or the frame before, on a GPU slow to draw it.
-- `engine.currentTime` no longer goes back as `pause` stops it, by up to 20 ms, which could leave the frame on screen two frames ahead of the paused clock.
+- `engine.currentTime` no longer goes back as `pause` stops it, by up to 20 ms, which could leave the frame on screen two frames ahead of the paused clock, nor by the fraction of a millisecond a fresh output timestamp could take off it.
 - Paused while video runs behind, the frame due no longer stays off screen for the whole pause, an older frame showing instead.
 - A `pause`, `open` or `close` settles a `play` still waiting for the browser to allow audio; it no longer stays pending until a user gesture.
 - `play` resolves once the frame due by the clock heard is on screen, not as soon as the clock runs, and a `seek` while playing that a `pause` interrupts resolves once its frame is on screen, as a paused seek does.
