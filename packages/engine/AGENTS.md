@@ -22,7 +22,7 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | Path | What it holds |
 | --- | --- |
 | `src/index.ts` | the public API, and the player on the main thread: open, compose, play, pause, seek and scrub |
-| `src/composition.ts` | what a composition is to the engine: the shape of the plan it reads, and the clips of a plan it plays, checked |
+| `src/composition.ts` | what a composition is to the engine: the shape of the plan it reads, the clips of a plan it plays, checked, and the tracks they go on |
 | `src/playback.ts` | one play on the main thread: its rings and audio output, the output timestamp it publishes, and whether it may start and is heard |
 | `src/platform.ts` | the platform check on the main thread, and `UnsupportedPlatformError` |
 | `src/media.worker.ts` | the media worker: reads and demuxes the file, or a composition's clips in turn, and decodes and resamples its audio, with the FFmpeg core |
@@ -43,9 +43,9 @@ The tests and benchmarks build what they run, and need `@snowy-media/ffmpeg` bui
 | `src/measure.ts` | how a stream's frames go up: Chromium's conversion measured against the compositor's on a grid of points |
 | `src/view.ts` | where a picture is drawn: the map from the canvas to it by its display matrix, fitted and centred |
 | `src/webgpu.d.ts` | the WebGPU flag constants TypeScript's libraries leave out |
-| `src/pcm.ts` | the PCM ring from the media worker to the AudioWorklet, and the clock |
+| `src/pcm.ts` | the PCM ring from the media worker to the AudioWorklet, the mixing of other tracks' rings into it, and the clock |
 | `src/audio.ts` | the audio output on the main thread |
-| `src/audio.worklet.ts` | the AudioWorklet: plays the PCM ring and publishes the clock |
+| `src/audio.worklet.ts` | the AudioWorklet: plays the PCM ring, mixed with other tracks', and publishes the clock |
 | `src/render.worker.ts` | the render worker: the platform check, then video on its animation frames |
 | `src/protocol.ts` | the messages between threads, and the records between the render worker and the video decode worker |
 | `scripts/build.ts` | bundles each thread's entry point into `dist/`, or for the tests into `test/dist/` |

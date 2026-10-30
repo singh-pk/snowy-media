@@ -131,6 +131,8 @@ export type ToMedia =
       file: File;
       /** The composition's asset that `file` holds, so a `track` of it need not open it again. */
       asset?: string | undefined;
+      /** Which open of a composition `asset` is of, as its id may hold another file in the next. */
+      opens?: number | undefined;
     }
   | {
       type: "demux";
@@ -170,6 +172,8 @@ export type ToMedia =
       from: number;
       clips: Clip[];
       files: Record<string, File>;
+      /** The open of the composition `files` are of, as sent with its `open`s. */
+      opens: number;
       end: number;
       preroll: number;
     };

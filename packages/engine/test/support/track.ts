@@ -54,6 +54,7 @@ export async function renderTrack(
     from: 0,
     clips: placed,
     files: {},
+    opens: 0,
     end,
     preroll: 0,
   };

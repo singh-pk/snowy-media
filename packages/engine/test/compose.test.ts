@@ -49,8 +49,11 @@ interface Placed {
 }
 
 const CLIP: Placed = { in: IN, start: START, end: END };
-// The sound alone of a clip after it, which shows black.
-const SOUND: Placed = { in: 0.2, start: 3.3, end: 3.8 };
+// The sound alone of a clip over the end of CLIP and on after it, on a track of its own; after
+// CLIP it shows black.
+const SOUND: Placed = { in: 0.2, start: 2.5, end: 3.2 };
+// And sound alone after CLIP, on its track.
+const LAST_SOUND: Placed = { in: 1, start: 3.4, end: 3.8 };
 // Three clips, each read from after a keyframe: the second, of SECOND, cut straight after the
 // first, and the third after a gap.
 // Each is longer than LATE, so some of it is clear of its edges on every runner.
@@ -69,7 +72,7 @@ const LATE = SLOW_DRAWING ? 1 : SOFTWARE_GPU ? 0.05 : 0.02;
 // How early a frame may be drawn, in seconds: test/play.test.ts measured up to 15 ms in software.
 const EARLY = 0.02;
 const REAL_TIME = SLOW_DRAWING ? 1 : 0.25;
-// Seeks: in the gap before the clip, in it, and in the gap after it.
+// Seeks: in the gap before the clip, in it, and in the gap after it, where LAST_SOUND plays.
 const SEEKS = [0.5, 1.7, 3.5];
 // How far the clock may be from a seek's target, in seconds: the audio starts on a whole sample.
 const SAMPLE = 1e-4;
@@ -163,11 +166,12 @@ function twoLayers(): Engine.Plan {
   return plan;
 }
 
-// The plan of CLIP, and after it the sound of SOUND alone.
-function soundAfter(): Engine.Plan {
+// The plan of CLIP, and the sound of SOUND and LAST_SOUND alone.
+function withSound(): Engine.Plan {
   const plan = planOf([CLIP]);
   const [, sound] = layersOf(SOUND, 1);
-  plan.segments[0]?.audio.push(sound);
+  const [, last] = layersOf(LAST_SOUND, 2);
+  plan.segments[0]?.audio.push(sound, last);
   return plan;
 }
 
@@ -219,8 +223,8 @@ function checkPlay(reads: [number, number][], clips: Placed[], duration: number)
   return checked;
 }
 
-test(`plays a clip of ${FILE} with black around it, and sound alone after it, to the end`, async () => {
-  const reads = await watchPlay(soundAfter(), DURATION);
+test(`plays a clip of ${FILE} with black around it, and sound alone over its end and after it, to the end`, async () => {
+  const reads = await watchPlay(withSound(), DURATION);
   const checked = checkPlay(reads, [CLIP], DURATION);
   // The gaps before and after the clip were seen too.
   expect(checked.filter(([t]) => t < START).length).toBeGreaterThan(MIN_READS / 2);
@@ -294,9 +298,9 @@ test(`seeks into clips of ${FILE} and ${SECOND} and the gaps between them, pause
   checkSeeks(got, CUT_SEEKS, CUTS);
 }, 60_000);
 
-test(`seeks into the gaps and the clip of ${FILE}, paused, and follows an edit`, async () => {
+test(`seeks into the gaps and the clip of ${FILE}, paused, with sound alone over them, and follows an edit`, async () => {
   const moved = planOf([{ in: IN, start: 2, end: 4 }]);
-  const got = await seekPaused(planOf([CLIP]), DURATION, SEEKS, moved);
+  const got = await seekPaused(withSound(), DURATION, SEEKS, moved);
   checkSeeks(got, SEEKS, [CLIP]);
 
   // Moved to start at 2 s, the clip leaves 1.7 s in the gap before it.

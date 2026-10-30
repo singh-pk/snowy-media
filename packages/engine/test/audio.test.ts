@@ -11,7 +11,14 @@
 import { afterAll, expect, test } from "bun:test";
 import { PCM_RATE, SAMPLE_FRAMES } from "./support/audio";
 import { launch } from "./support/browsers";
-import { AUDIO_WORKLET, MEDIA_WORKER, PAGE, serveEngine } from "./support/serve";
+import {
+  AUDIO_WORKLET,
+  MEDIA_WORKER,
+  OFFLINE_AUDIO_PAGE,
+  PAGE,
+  serveEngine,
+} from "./support/serve";
+import type * as OfflineAudio from "./support/offline-audio";
 import type * as PageSupport from "./support/page";
 import type { Page } from "playwright";
 
@@ -34,39 +41,66 @@ const server = await serveEngine("<!doctype html><title>test</title>");
 
 afterAll(() => server.stop(true));
 
-type Played = Awaited<ReturnType<typeof PageSupport.play>>;
+type Played = Awaited<ReturnType<typeof OfflineAudio.play>>;
 
-type Track = Parameters<typeof PageSupport.play>[2]["track"];
+type Track = Omit<NonNullable<Parameters<typeof OfflineAudio.play>[2]["track"]>, "files" | "opens">;
 
 // Plays the audio of fixture `name` on `channels` channels, a second longer than it lasts, or
-// than the track `track` of it does.
+// than the track `track` of it does, each of its layers read by a media worker of its own. With
+// `stale`, each worker holds that fixture open first, as of an earlier open of a composition.
 async function play(
   tab: Page,
   name: string,
   audio: Audio,
-  { channels, track }: { channels: number; track?: Track },
+  { channels, track, stale }: { channels: number; track?: Track; stale?: string | undefined },
 ) {
   const { frames } = audio.resampled;
   const end = track ? (track.end - track.from) / 1e6 : frames / PCM_RATE;
   const seconds = Math.ceil(end) + 1;
 
   return tab.evaluate(
-    async ({ page, worker, worklet, n, s, options }) => {
+    async ({ page, offline, worker, worklet, n, s, held, options }) => {
       const support: typeof PageSupport = await import(page);
-      const media = support.startMedia(worker);
-      const res = await fetch(`/test/fixtures/${n}`);
-      const blob = await res.blob();
-      await media.request({ type: "open", file: new File([blob], n), asset: "" });
-      const played = await support.play(media, s, { worklet, ...options });
-      media.stop();
+      const output: typeof OfflineAudio = await import(offline);
+      const names = held ? [n, held] : [n];
+      const responses = await Promise.all(names.map((each) => fetch(`/test/fixtures/${each}`)));
+      const blobs = await Promise.all(responses.map((res) => res.blob()));
+      const [file, first] = blobs.map((blob, i) => new File([blob], names[i] ?? ""));
+      if (!file) throw new Error(`no ${n}`);
+      const readers = Array.from({ length: 1 + (options.track?.layers?.length ?? 0) }, () =>
+        support.startMedia(worker),
+      );
+
+      for (const reader of readers) {
+        await reader.request({
+          type: "open",
+          file: first ?? file,
+          asset: "",
+          opens: held ? 1 : 0,
+        });
+      }
+
+      const [media, ...more] = readers;
+      if (!media) throw new Error("no media worker");
+      const again = options.track && held && { ...options.track, files: { "": file }, opens: 2 };
+      const read = again || options.track;
+      const played = await output.play(media, s, {
+        worklet,
+        ...options,
+        track: read,
+        readers: more,
+      });
+      for (const reader of readers) reader.stop();
       return played;
     },
     {
       page: PAGE,
+      offline: OFFLINE_AUDIO_PAGE,
       worker: MEDIA_WORKER,
       worklet: AUDIO_WORKLET,
       n: name,
       s: audio.id,
+      held: stale ?? null,
       options: { seconds, channels, frames, ...(track ? { track } : {}) },
     },
   );
@@ -144,8 +178,20 @@ const TRACK = {
   end: 4_000_000,
 };
 const CLICKS = [1.5, 2.7];
+// The first of them, mixed with a layer that plays the file's 1.2 s to 2.5 s from 1.8 s, over
+// its end: the layer's click at 2 s plays at 2.6 s, and the clock runs on through both to 4 s.
+const MIXED = {
+  ...TRACK,
+  clips: TRACK.clips.slice(0, 1),
+  layers: [[{ in: 1_200_000, out: 2_500_000, offset: 600_000 }]],
+};
+const MIXED_CLICKS = [1.5, 2.6];
+// The same played from 2 s: the first clip has ended, and the layer, cut to start there, still
+// plays its click at 2.6 s.
+const MIXED_FROM = { ...MIXED, from: 2_000_000 };
+const LAYER_CLICKS = [2.6];
 
-test("a track's clips play their audio at their places, in silence around them", async () => {
+test("a track's clips play their audio at their places, in silence around them, mixed with a layer's, from any time and from a file opened again", async () => {
   const browser = await launch();
 
   try {
@@ -153,16 +199,25 @@ test("a track's clips play their audio at their places, in silence around them",
     await tab.goto(server.url.href);
     const { audio } = expected[CLIP_FILE] ?? {};
     if (!audio) throw new Error(`no ${CLIP_FILE} in expected.json`);
-    const played = await play(tab, CLIP_FILE, audio, { channels: 2, track: TRACK });
-    const shift = played.offsets.map((o) => Math.abs(o - played.start));
-    // From the composition's start, without a gap, through the silence, to its end.
-    expect(played.start).toBe(TRACK.from / 1e6);
-    expect(Math.max(0, ...shift)).toBeLessThan(1e-9);
-    expect(played.end.playing).toBe(false);
-    expect(played.end.pts).toBeCloseTo(TRACK.end / 1e6, 6);
-    const late = played.clicks.map((t, k) => Math.abs(t + played.start - (CLICKS[k] ?? 0)));
-    expect(played.clicks.length).toBe(CLICKS.length);
-    expect(Math.max(...late)).toBeLessThanOrEqual(CLICK_TOLERANCE);
+
+    for (const [track, clicks, stale] of [
+      [TRACK, CLICKS],
+      [MIXED, MIXED_CLICKS],
+      [MIXED_FROM, LAYER_CLICKS],
+      // Each media worker holds a file without audio from an earlier open, and opens the track's.
+      [MIXED, MIXED_CLICKS, "no-audio-h264.mp4"],
+    ] as const) {
+      const played = await play(tab, CLIP_FILE, audio, { channels: 2, track, stale });
+      const shift = played.offsets.map((o) => Math.abs(o - played.start));
+      // From the composition's start, without a gap, through the silence, to its end.
+      expect(played.start).toBe(track.from / 1e6);
+      expect(Math.max(0, ...shift)).toBeLessThan(1e-9);
+      expect(played.end.playing).toBe(false);
+      expect(played.end.pts).toBeCloseTo(track.end / 1e6, 6);
+      const late = played.clicks.map((t, k) => Math.abs(t + played.start - (clicks[k] ?? 0)));
+      expect(played.clicks.length).toBe(clicks.length);
+      expect(Math.max(...late)).toBeLessThanOrEqual(CLICK_TOLERANCE);
+    }
   } finally {
     await browser.close();
   }

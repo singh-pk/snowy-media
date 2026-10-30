@@ -8,11 +8,9 @@
 // what a playing engine shows.
 
 import { AV_NOPTS_VALUE, AV_PKT_FLAG_KEY } from "@snowy-media/ffmpeg/core";
-import { createAudioOutput } from "../../src/audio";
 import { type VideoParams, videoConfig } from "../../src/codec";
 import { createCompositor } from "../../src/compositor";
 import { createRoute, type Route } from "../../src/measure";
-import { createPcmControl, createPcmRing } from "../../src/pcm";
 import type { FromMedia, ToMedia } from "../../src/protocol";
 import {
   createConsumer,
@@ -26,7 +24,6 @@ import {
 import { createVideoOutput } from "../../src/video";
 import { createWasmVideo } from "../../src/wasm-video";
 import type * as EngineModule from "../../src/index";
-import { PCM_CHANNELS, PCM_RATE, probe, SAMPLE_FRAMES } from "./audio";
 import { brightnessGrid, CELL, readFrameId } from "./frame-id";
 
 export { createAudioOutput } from "../../src/audio";
@@ -145,84 +142,6 @@ export async function hashRing(ring: SharedArrayBuffer, dts: boolean) {
   return hashes;
 }
 
-/**
- * Plays audio stream `stream` of the file open in `media` through the engine's worklet (at
- * `worklet`) into an OfflineAudioContext of `seconds`, resampled to `channels` channels. The
- * ring holds `frames` frames, room for all of the audio, which is decoded before rendering
- * starts, so it underruns only at the end. Returns the media time of the first frame; the
- * clock's media time less its context time, every SAMPLE_FRAMES frames while it runs; the
- * clock at the end; when channel 0 clicks, in context time; and, in stereo, the probe of what
- * played (test/support/audio.ts). A track (src/protocol.ts) plays the stream's `clips`, in
- * microseconds of the file, `offset` later on a clock that starts at `from` and runs on to `end`.
- */
-export async function play(
-  media: ReturnType<typeof startMedia>,
-  stream: number,
-  {
-    worklet,
-    seconds,
-    channels,
-    frames,
-    track,
-  }: Record<"seconds" | "channels" | "frames", number> & {
-    worklet: string;
-    track?: { from: number; clips: { in: number; out: number; offset: number }[]; end: number };
-  },
-) {
-  const start = (track?.from ?? 0) / 1e6;
-  const pcm = createPcmRing(2 ** Math.ceil(Math.log2(frames)), channels, PCM_RATE, start);
-  const control = createPcmControl(pcm);
-  const length = seconds * PCM_RATE;
-  const context = new OfflineAudioContext({
-    numberOfChannels: channels,
-    length,
-    sampleRate: PCM_RATE,
-  });
-  await createAudioOutput(context, pcm, worklet);
-  // No packets: the ring only gets the END record.
-  const ring = createRing(64);
-  const audio = { stream, preroll: 0 };
-  const clip = { clip: "", asset: "", video: undefined, audio: stream };
-  const clips = track?.clips.map((c) => ({ ...c, ...clip }));
-  const demux = { type: "demux" as const, ring, streams: [], from: 0, pcm, audio };
-  await media.request(
-    track && clips ? { type: "track", ring, pcm, ...track, clips, files: {}, preroll: 0 } : demux,
-  );
-  const offsets: number[] = [];
-
-  // Samples the clock, which only the audio thread moves, with rendering suspended at
-  // `frame`; the next suspend is set before it resumes.
-  async function sample(frame: number) {
-    if (frame >= length) return;
-    await context.suspend(frame / PCM_RATE);
-    const clock = control.read();
-    if (clock.playing) offsets.push(clock.pts - clock.time);
-    const next = sample(frame + SAMPLE_FRAMES);
-    await context.resume();
-    await next;
-  }
-
-  const sampling = sample(SAMPLE_FRAMES);
-  const buffer = await context.startRendering();
-  await sampling;
-  const { pts, playing } = control.read();
-  const left = buffer.getChannelData(0);
-  const clicks: number[] = [];
-
-  for (let i = 0; i < left.length; i++) {
-    if (Math.abs(left[i] ?? 0) < 0.3) continue;
-    clicks.push(i / PCM_RATE);
-    i += PCM_RATE / 2;
-  }
-
-  const planes = Array.from({ length: channels }, (_, c) => buffer.getChannelData(c));
-  const probed =
-    channels === PCM_CHANNELS
-      ? probe(frames * channels, (i) => planes[i % channels]?.[Math.floor(i / channels)] ?? 0)
-      : [];
-  return { start: control.start(), offsets, end: { pts, playing }, clicks, probe: probed };
-}
-
 /** Starts the media worker at `url`, as a function per request; an error reply rejects. */
 export function startMedia(url: string) {
   const worker = new Worker(url, { type: "module" });
@@ -257,7 +176,7 @@ export async function openVideo(worker: string, name: string, stream: number) {
   const res = await fetch(`/test/fixtures/${name}`);
   const blob = await res.blob();
   const file = new File([blob], name);
-  const opened = await media.request({ type: "open", file, asset: "" });
+  const opened = await media.request({ type: "open", file, asset: "", opens: 0 });
   if (opened.type !== "opened") throw new Error(`${name}: ${opened.type}`);
   const params = opened.video[stream];
   if (!params) throw new Error(`${name}: no parameters for stream ${stream}`);

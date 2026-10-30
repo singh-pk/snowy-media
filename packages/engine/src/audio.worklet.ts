@@ -15,7 +15,8 @@ registerProcessor(
 
     constructor(options: { processorOptions: AudioOptions }) {
       super();
-      this.#pcm = createPcmConsumer(options.processorOptions.ring);
+      const { ring, layers } = options.processorOptions;
+      this.#pcm = createPcmConsumer(ring, layers);
     }
 
     process(_: Float32Array[][], outputs: Float32Array[][]) {
