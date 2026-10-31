@@ -64,7 +64,7 @@
   },
   "devDependencies": {
     "libav.js": "6.10.9",
-    "mediabunny": "1.61.6",
+    "mediabunny": "1.62.1",
     "playwright": "1.64.1"
   }
 }
